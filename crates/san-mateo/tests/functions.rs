@@ -4,20 +4,24 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use common::*;
+use san_mateo::clock::{ManualClock, OsEntropy};
 use san_mateo::model::ConnectionKey;
 use san_mateo::store::SyncStatus;
 use san_mateo::transport::HttpResponse;
 use san_mateo::{
-    ActionContext, ActionFunction, ActionSpec, Error, PaginateOptions, ProxyRequest, Registry,
-    Result, SyncContext, SyncFunction, SyncSpec,
+    ActionContext, ActionFunction, ActionSpec, BackgroundSettings, Error, GetOptions,
+    HttpTransport, PaginateOptions, ProxyRequest, Registry, Result, SyncContext, SyncFunction,
+    SyncSpec,
 };
 use serde_json::{Value, json};
+use tokio::sync::Notify;
 
 struct Contacts {
     runs: Arc<AtomicUsize>,
@@ -385,4 +389,182 @@ async fn actions_run_and_return_output() {
             .await,
         Err(Error::UnknownConnection(_))
     ));
+}
+
+/// A sync that waits at a gate.
+struct Slow {
+    started: Arc<AtomicUsize>,
+    gate: Arc<Notify>,
+}
+
+#[async_trait]
+impl SyncFunction for Slow {
+    fn spec(&self) -> SyncSpec {
+        SyncSpec {
+            name: "slow".into(),
+            integration: "crm".into(),
+            models: vec!["S".into()],
+            frequency: Duration::from_secs(3_600),
+            auto_start: true,
+        }
+    }
+
+    async fn run(&self, _ctx: &SyncContext) -> Result<()> {
+        self.started.fetch_add(1, Ordering::SeqCst);
+        self.gate.notified().await;
+        Ok(())
+    }
+}
+
+async fn slow_harness() -> (Harness, Arc<AtomicUsize>, Arc<Notify>) {
+    let started = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new(Notify::new());
+    let h = ready_with(Registry::new().sync(Slow {
+        started: started.clone(),
+        gate: gate.clone(),
+    }))
+    .await;
+    (h, started, gate)
+}
+
+async fn until_started(started: &AtomicUsize) {
+    while started.load(Ordering::SeqCst) == 0 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slow_sync_does_not_stall_the_background_loops() {
+    let (h, started, gate) = slow_harness().await;
+    let conn = connect_crm(&h, "at-1", Some("rt-1"), Some(3_600)).await;
+    h.http.reply(
+        "POST",
+        "https://auth.crm.example.com/token",
+        token_reply("at-bg", Some("rt-bg"), Some(3_600)),
+    );
+    let bg = h.san.start_background(BackgroundSettings {
+        tick: Duration::from_secs(1),
+        ..BackgroundSettings::default()
+    });
+    until_started(&started).await;
+    // The token expires soon now. A later tick must refresh it.
+    h.clock.advance(chrono::Duration::minutes(50));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let got = h
+        .san
+        .get_connection(
+            "dev",
+            &conn.key(),
+            GetOptions {
+                refresh_if_needed: false,
+                force_refresh: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(got.credentials.bearer_token(), Some("at-bg"));
+    assert_eq!(started.load(Ordering::SeqCst), 1, "one run at a time");
+    gate.notify_waiters();
+    bg.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn stop_and_flush_do_not_wait_for_ever() {
+    let (h, started, gate) = slow_harness().await;
+    connect_crm(&h, "at-1", None, None).await;
+    let bg = h.san.start_background(BackgroundSettings {
+        tick: Duration::from_secs(1),
+        ..BackgroundSettings::default()
+    });
+    until_started(&started).await;
+    let stopped = tokio::time::timeout(Duration::from_secs(60), bg.stop()).await;
+    assert!(stopped.is_ok(), "stop must not wait for a slow sync");
+    assert!(
+        !h.san.flush_within(Duration::from_secs(1)).await,
+        "the slow sync still runs"
+    );
+    gate.notify_waiters();
+    assert!(h.san.flush_within(Duration::from_secs(5)).await);
+}
+
+/// A sync that notes `last_sync_date` and takes ten minutes.
+struct Timed {
+    clock: Arc<OnceLock<Arc<ManualClock>>>,
+    seen: Arc<Mutex<Vec<Option<DateTime<Utc>>>>>,
+}
+
+#[async_trait]
+impl SyncFunction for Timed {
+    fn spec(&self) -> SyncSpec {
+        SyncSpec {
+            name: "timed".into(),
+            integration: "crm".into(),
+            models: vec!["T".into()],
+            frequency: Duration::from_secs(60),
+            auto_start: false,
+        }
+    }
+
+    async fn run(&self, ctx: &SyncContext) -> Result<()> {
+        self.seen.lock().unwrap().push(ctx.last_sync_date());
+        self.clock
+            .get()
+            .unwrap()
+            .advance(chrono::Duration::minutes(10));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn last_sync_date_is_the_start_of_the_last_successful_run() {
+    let clock = Arc::new(OnceLock::new());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let h = ready_with(Registry::new().sync(Timed {
+        clock: clock.clone(),
+        seen: seen.clone(),
+    }))
+    .await;
+    clock.set(h.clock.clone()).unwrap();
+    let key = connect_crm(&h, "at", None, None).await.key();
+    let first_start = now(&h);
+    h.san.run_sync("dev", &key, "timed").await.unwrap();
+    h.san.run_sync("dev", &key, "timed").await.unwrap();
+    // Changes made during the first run are after its start.
+    assert_eq!(*seen.lock().unwrap(), vec![None, Some(first_start)]);
+}
+
+#[tokio::test]
+async fn two_processes_do_not_run_one_sync_at_once() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new(Notify::new());
+    let h = ready_with(registry(&runs, Some(gate.clone()))).await;
+    let key = connect_crm(&h, "at", None, None).await.key();
+    stub_crm(&h);
+    let other = builder(
+        h.store.clone(),
+        Arc::new(h.http.clone()) as Arc<dyn HttpTransport>,
+        h.clock.clone(),
+        registry(&runs, None),
+    )
+    .entropy(Arc::new(OsEntropy))
+    .build()
+    .unwrap();
+    let san = h.san.clone();
+    let k2 = key.clone();
+    let first = tokio::spawn(async move { san.run_sync("dev", &k2, "contacts").await });
+    while runs.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    let second = other.run_sync("dev", &key, "contacts").await;
+    assert!(matches!(second, Err(Error::Conflict(_))), "{second:?}");
+    gate.notify_one();
+    assert!(first.await.unwrap().unwrap().success);
+    // The lease is free after the run.
+    assert!(
+        other
+            .run_sync("dev", &key, "contacts")
+            .await
+            .unwrap()
+            .success
+    );
 }

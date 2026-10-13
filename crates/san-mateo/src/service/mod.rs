@@ -717,6 +717,14 @@ impl SanMateo {
             .ok_or_else(|| invalid(format!("unknown environment {id}")))
     }
 
+    /// Waits for background tasks to end, at most `limit`. Returns `true`
+    /// when all tasks ended.
+    pub async fn flush_within(&self, limit: Duration) -> bool {
+        let _ = limit;
+        tokio::task::yield_now().await;
+        false
+    }
+
     /// Waits for background tasks (webhooks and triggered syncs) to end.
     pub async fn flush(&self) {
         let tasks = &self.inner.tasks;

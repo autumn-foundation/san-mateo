@@ -260,6 +260,9 @@ impl Store for Flaky {
     async fn put_sync_state(&self, row: SyncStateRow) -> Result<()> {
         self.inner.put_sync_state(row).await
     }
+    async fn set_sync_paused(&self, row: SyncStateRow) -> Result<()> {
+        self.inner.set_sync_paused(row).await
+    }
     async fn get_sync_state(
         &self,
         connection: Uuid,

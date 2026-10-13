@@ -52,6 +52,7 @@ where
     record_deletes(make().await).await;
     record_listing(make().await).await;
     sync_states(make().await).await;
+    sync_pause_is_its_own_write(make().await).await;
     environments_are_isolated(make().await).await;
 }
 
@@ -833,7 +834,7 @@ pub async fn sync_states(s: Arc<dyn Store>) {
     let mut changed = sync_state(conn, "b");
     changed.status = SyncStatus::Error;
     changed.last_error = Some("boom".to_owned());
-    changed.paused = true;
+    changed.last_counts = SyncCounts::default();
     s.put_sync_state(changed.clone()).await.unwrap();
     assert_eq!(s.get_sync_state(conn, "b").await.unwrap(), Some(changed));
     let names: Vec<String> = s
@@ -844,6 +845,45 @@ pub async fn sync_states(s: Arc<dyn Store>) {
         .map(|r| r.sync_name)
         .collect();
     assert_eq!(names, vec!["a", "b"]);
+}
+
+pub async fn sync_pause_is_its_own_write(s: Arc<dyn Store>) {
+    let e = env();
+    let conn = s
+        .upsert_connection(connection(&e, "gh", "c1"))
+        .await
+        .unwrap()
+        .row
+        .id;
+    // With no state, a pause adds the row.
+    let mut first = sync_state(conn, "a");
+    first.paused = true;
+    s.set_sync_paused(first.clone()).await.unwrap();
+    assert_eq!(s.get_sync_state(conn, "a").await.unwrap(), Some(first));
+    // The end of a run does not undo a pause.
+    let mut run = sync_state(conn, "a");
+    run.status = SyncStatus::Error;
+    run.last_error = Some("boom".to_owned());
+    s.put_sync_state(run.clone()).await.unwrap();
+    let got = s.get_sync_state(conn, "a").await.unwrap().unwrap();
+    assert!(got.paused);
+    assert_eq!(got.status, SyncStatus::Error);
+    assert_eq!(got.last_error.as_deref(), Some("boom"));
+    // A pause change keeps all other fields.
+    let mut other = sync_state(conn, "a");
+    other.status = SyncStatus::Running;
+    other.last_error = None;
+    other.paused = false;
+    s.set_sync_paused(other).await.unwrap();
+    let got = s.get_sync_state(conn, "a").await.unwrap().unwrap();
+    assert!(!got.paused);
+    assert_eq!(got.status, SyncStatus::Error);
+    assert_eq!(got.last_error.as_deref(), Some("boom"));
+    // A new state from a run takes its own value.
+    let mut b = sync_state(conn, "b");
+    b.paused = true;
+    s.put_sync_state(b.clone()).await.unwrap();
+    assert_eq!(s.get_sync_state(conn, "b").await.unwrap(), Some(b));
 }
 
 pub async fn environments_are_isolated(s: Arc<dyn Store>) {

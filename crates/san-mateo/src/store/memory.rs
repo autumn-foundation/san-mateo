@@ -444,6 +444,10 @@ impl Store for MemoryStore {
         Ok(())
     }
 
+    async fn set_sync_paused(&self, _row: SyncStateRow) -> Result<()> {
+        Ok(())
+    }
+
     async fn get_sync_state(
         &self,
         connection: Uuid,

@@ -379,8 +379,12 @@ pub trait Store: Send + Sync + 'static {
     /// `query.limit + 1` rows, so the caller can tell if a next page exists.
     async fn list_records(&self, connection: Uuid, query: &RecordQuery) -> Result<Vec<RecordRow>>;
 
-    /// Writes the state of a sync.
+    /// Writes the state of a sync. It keeps the stored `paused` value: only
+    /// [`Store::set_sync_paused`] changes it. A new state takes `row.paused`.
     async fn put_sync_state(&self, row: SyncStateRow) -> Result<()>;
+    /// Sets `paused` of a sync state to `row.paused`. It changes no other
+    /// field. When no state is stored, it adds `row`.
+    async fn set_sync_paused(&self, row: SyncStateRow) -> Result<()>;
     /// Reads the state of a sync.
     async fn get_sync_state(
         &self,
