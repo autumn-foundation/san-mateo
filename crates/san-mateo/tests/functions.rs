@@ -13,12 +13,14 @@ use chrono::{DateTime, Utc};
 use common::*;
 use san_mateo::clock::{ManualClock, OsEntropy};
 use san_mateo::model::ConnectionKey;
+use san_mateo::records::RecordQuery;
+use san_mateo::store::Store;
 use san_mateo::store::SyncStatus;
 use san_mateo::transport::HttpResponse;
 use san_mateo::{
     ActionContext, ActionFunction, ActionSpec, BackgroundSettings, Error, GetOptions,
-    HttpTransport, PaginateOptions, ProxyRequest, Registry, Result, SyncContext, SyncFunction,
-    SyncSpec,
+    HttpTransport, PaginateOptions, ProxyRequest, Registry, Result, SanMateo, SyncContext,
+    SyncFunction, SyncSpec,
 };
 use serde_json::{Value, json};
 use tokio::sync::Notify;
@@ -567,4 +569,58 @@ async fn two_processes_do_not_run_one_sync_at_once() {
             .unwrap()
             .success
     );
+}
+
+/// A sync that deletes its own connection during the run.
+struct SelfDelete {
+    san: Arc<OnceLock<SanMateo>>,
+}
+
+#[async_trait]
+impl SyncFunction for SelfDelete {
+    fn spec(&self) -> SyncSpec {
+        SyncSpec {
+            name: "self-delete".into(),
+            integration: "crm".into(),
+            models: vec!["X".into()],
+            frequency: Duration::from_secs(60),
+            auto_start: false,
+        }
+    }
+
+    async fn run(&self, ctx: &SyncContext) -> Result<()> {
+        ctx.batch_save("X", vec![json!({"id": "1"})]).await?;
+        let san = self.san.get().unwrap();
+        san.delete_connection(ctx.environment(), ctx.connection())
+            .await?;
+        ctx.batch_save("X", vec![json!({"id": "2"})]).await?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn deleting_a_connection_during_a_sync_leaves_no_rows() {
+    let handle = Arc::new(OnceLock::new());
+    let h = ready_with(Registry::new().sync(SelfDelete {
+        san: handle.clone(),
+    }))
+    .await;
+    handle.set(h.san.clone()).unwrap();
+    let conn = connect_crm(&h, "at", None, None).await;
+    let got = h.san.run_sync("dev", &conn.key(), "self-delete").await;
+    assert!(matches!(got, Err(Error::UnknownConnection(_))), "{got:?}");
+    assert_eq!(
+        h.store
+            .get_sync_state(conn.id, "self-delete")
+            .await
+            .unwrap(),
+        None,
+        "no sync state for a deleted connection"
+    );
+    let q = RecordQuery {
+        model: "X".into(),
+        limit: 10,
+        ..RecordQuery::default()
+    };
+    assert!(h.store.list_records(conn.id, &q).await.unwrap().is_empty());
 }

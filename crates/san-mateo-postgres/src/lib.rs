@@ -899,6 +899,21 @@ mod tests {
     }
 
     #[test]
+    fn records_and_sync_states_cascade_from_connections() {
+        let sql = full_migrations_sql();
+        for table in ["sm_records", "sm_sync_states"] {
+            let at = sql
+                .find(&format!("CREATE TABLE IF NOT EXISTS {table}"))
+                .unwrap();
+            let end = at + sql[at..].find(");").unwrap();
+            assert!(
+                sql[at..end].contains("REFERENCES sm_connections (id) ON DELETE CASCADE"),
+                "{table}"
+            );
+        }
+    }
+
+    #[test]
     fn connect_rejects_a_bad_url() {
         assert!(PgStore::connect("not a url", 2).is_err());
     }

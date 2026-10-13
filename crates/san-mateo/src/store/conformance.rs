@@ -51,6 +51,8 @@ where
     record_upsert_classes(make().await).await;
     record_deletes(make().await).await;
     record_listing(make().await).await;
+    record_times_only_go_up(make().await).await;
+    writes_for_an_unknown_connection_fail(make().await).await;
     sync_states(make().await).await;
     sync_pause_is_its_own_write(make().await).await;
     environments_are_isolated(make().await).await;
@@ -279,6 +281,16 @@ pub async fn connection_list_filters(s: Arc<dyn Store>) {
         ids(s.list_connections(&e, &by_id).await.unwrap()),
         vec!["c2"]
     );
+}
+
+/// Adds a connection in a new environment and returns its id. Records and
+/// sync states need a connection.
+async fn new_connection(s: &Arc<dyn Store>) -> Uuid {
+    s.upsert_connection(connection(&env(), "gh", "c1"))
+        .await
+        .unwrap()
+        .row
+        .id
 }
 
 fn write(conn: Uuid, external: &str, hash: &str) -> RecordWrite {
@@ -551,7 +563,7 @@ pub async fn purge_expired(s: Arc<dyn Store>) {
 }
 
 pub async fn record_upsert_classes(s: Arc<dyn Store>) {
-    let conn = Uuid::new_v4();
+    let conn = new_connection(&s).await;
     let got = s
         .upsert_records(
             conn,
@@ -626,7 +638,7 @@ pub async fn record_upsert_classes(s: Arc<dyn Store>) {
 }
 
 pub async fn record_deletes(s: Arc<dyn Store>) {
-    let conn = Uuid::new_v4();
+    let conn = new_connection(&s).await;
     s.upsert_records(conn, "m", vec![write(conn, "1", "a")], t(1))
         .await
         .unwrap();
@@ -665,7 +677,7 @@ pub async fn record_deletes(s: Arc<dyn Store>) {
 }
 
 pub async fn record_listing(s: Arc<dyn Store>) {
-    let conn = Uuid::new_v4();
+    let conn = new_connection(&s).await;
     for (i, ext) in ["a", "b", "c", "d", "e"].iter().enumerate() {
         s.upsert_records(
             conn,
@@ -677,6 +689,7 @@ pub async fn record_listing(s: Arc<dyn Store>) {
         .unwrap();
     }
     // a, b at t(0); c, d at t(1); e at t(2). Then b changes at t(3), d is deleted at t(4).
+    // The second batch of a time gets 1 µs more: write times only go up.
     s.upsert_records(conn, "m", vec![write(conn, "b", "h2")], t(3))
         .await
         .unwrap();
@@ -826,8 +839,120 @@ pub async fn record_listing(s: Arc<dyn Store>) {
     assert!(other_model.is_empty());
 }
 
+pub async fn record_times_only_go_up(s: Arc<dyn Store>) {
+    let conn = new_connection(&s).await;
+    let base = RecordQuery {
+        model: "m".to_owned(),
+        limit: 100,
+        ..RecordQuery::default()
+    };
+    s.upsert_records(
+        conn,
+        "m",
+        vec![write(conn, "a", "h"), write(conn, "b", "h")],
+        t(10),
+    )
+    .await
+    .unwrap();
+    let first = s.list_records(conn, &base).await.unwrap();
+    assert_eq!(first.len(), 2);
+    let cursor = Cursor {
+        updated_at_us: first[1].updated_at.timestamp_micros(),
+        id: first[1].id,
+    };
+    // Later batches with an earlier `now`: a slow writer or a clock step back.
+    s.upsert_records(conn, "m", vec![write(conn, "c", "h")], t(5))
+        .await
+        .unwrap();
+    s.upsert_records(conn, "m", vec![write(conn, "a", "h2")], t(5))
+        .await
+        .unwrap();
+    s.delete_records(
+        conn,
+        "m",
+        vec![(crate::records::record_id(conn, "m", "b"), "b".to_owned())],
+        t(5),
+    )
+    .await
+    .unwrap();
+    // A reader with the old cursor sees each later change, in write order.
+    let next = s
+        .list_records(
+            conn,
+            &RecordQuery {
+                cursor: Some(cursor),
+                ..base.clone()
+            },
+        )
+        .await
+        .unwrap();
+    let ext: Vec<&str> = next.iter().map(|r| r.external_id.as_str()).collect();
+    assert_eq!(ext, vec!["c", "a", "b"]);
+    assert!(next[0].updated_at > first[1].updated_at);
+    for w in next.windows(2) {
+        assert!(w[0].updated_at < w[1].updated_at);
+    }
+    assert_eq!(next[0].last_action(), LastAction::Added);
+    assert_eq!(next[1].last_action(), LastAction::Updated);
+    assert_eq!(next[2].deleted_at, Some(next[2].updated_at));
+    // A later `now` is used as it is.
+    s.upsert_records(conn, "m", vec![write(conn, "d", "h")], t(100))
+        .await
+        .unwrap();
+    let d = s
+        .list_records(
+            conn,
+            &RecordQuery {
+                external_ids: vec!["d".to_owned()],
+                ..base
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(d[0].updated_at, t(100));
+}
+
+pub async fn writes_for_an_unknown_connection_fail(s: Arc<dyn Store>) {
+    let unknown = |r: crate::error::Result<()>| {
+        assert!(matches!(r, Err(Error::UnknownConnection(_))), "{r:?}");
+    };
+    let e = env();
+    let row = s
+        .upsert_connection(connection(&e, "gh", "c1"))
+        .await
+        .unwrap()
+        .row;
+    s.delete_connection(&e, "gh", "c1").await.unwrap().unwrap();
+    for conn in [Uuid::new_v4(), row.id] {
+        unknown(
+            s.upsert_records(conn, "m", vec![write(conn, "1", "h")], t(1))
+                .await
+                .map(drop),
+        );
+        unknown(
+            s.delete_records(
+                conn,
+                "m",
+                vec![(crate::records::record_id(conn, "m", "1"), "1".to_owned())],
+                t(1),
+            )
+            .await
+            .map(drop),
+        );
+        unknown(s.put_sync_state(sync_state(conn, "s")).await);
+        unknown(s.set_sync_paused(sync_state(conn, "s")).await);
+        let q = RecordQuery {
+            model: "m".to_owned(),
+            limit: 10,
+            ..RecordQuery::default()
+        };
+        assert!(s.list_records(conn, &q).await.unwrap().is_empty());
+        assert_eq!(s.get_sync_state(conn, "s").await.unwrap(), None);
+    }
+}
+
 pub async fn sync_states(s: Arc<dyn Store>) {
-    let conn = Uuid::new_v4();
+    let conn = new_connection(&s).await;
     assert_eq!(s.get_sync_state(conn, "b").await.unwrap(), None);
     s.put_sync_state(sync_state(conn, "b")).await.unwrap();
     s.put_sync_state(sync_state(conn, "a")).await.unwrap();
