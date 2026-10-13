@@ -17,12 +17,15 @@ chrono.workspace = true
 deadpool = { version = "0.13", features = ["rt_tokio_1"] }
 diesel = { version = "2.3", default-features = false, features = ["postgres_backend", "chrono", "serde_json", "uuid"] }
 diesel-async = { version = "0.9", features = ["deadpool", "postgres"] }
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 san-mateo = { workspace = true, features = ["test-support"] }
+futures.workspace = true
+url.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

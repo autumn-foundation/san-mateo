@@ -4284,9 +4284,12 @@ dependencies = [
  "deadpool",
  "diesel",
  "diesel-async",
+ "futures",
  "san-mateo",
+ "serde",
  "serde_json",
  "tokio",
+ "url",
  "uuid",
 ]
 
