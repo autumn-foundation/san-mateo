@@ -64,7 +64,10 @@ pub(crate) fn route_infos(prefix: &str) -> Vec<RouteInfo> {
             // San Mateo checks its own tokens: the secret key, a connect
             // session token, or the OAuth state.
             let (classification, middleware) = if spec.secret_key {
-                (RouteClassification::Gated, vec![SECRET_KEY_LABEL.to_owned()])
+                (
+                    RouteClassification::Gated,
+                    vec![SECRET_KEY_LABEL.to_owned()],
+                )
             } else {
                 (RouteClassification::Public, Vec::new())
             };
@@ -93,8 +96,8 @@ async fn forward(cell: &Cell, req: Request<Body>) -> Response {
         .extensions()
         .get::<CspNonce>()
         .map(|n| n.value().to_owned());
-    // A new request with no extensions. The outer match put path parameters
-    // in the extensions, and the core router adds its own.
+    // Send a new request with no extensions. The outer route puts its path
+    // parameters there, and the core router adds them again.
     let (parts, body) = req.into_parts();
     let mut inner = Request::new(body);
     *inner.method_mut() = parts.method;
@@ -168,10 +171,8 @@ async fn bridge_nonce(res: Response, nonce: &str) -> Response {
         let body = serde_json::json!({"error": {"code": "page_too_large", "message": "the page is too large"}});
         return status_json(StatusCode::BAD_GATEWAY, &body);
     };
-    let text = String::from_utf8_lossy(&bytes).replace(
-        &format!("nonce=\"{core}\""),
-        &format!("nonce=\"{nonce}\""),
-    );
+    let text = String::from_utf8_lossy(&bytes)
+        .replace(&format!("nonce=\"{core}\""), &format!("nonce=\"{nonce}\""));
     let csp = parts
         .headers
         .get(header::CONTENT_SECURITY_POLICY)
@@ -232,10 +233,20 @@ mod tests {
             assert_eq!(info.path, format!("/sm{}", spec.path));
             assert_eq!(info.module.as_deref(), Some("san_mateo::api"));
             if spec.secret_key {
-                assert_eq!(info.classification, RouteClassification::Gated, "{}", info.path);
+                assert_eq!(
+                    info.classification,
+                    RouteClassification::Gated,
+                    "{}",
+                    info.path
+                );
                 assert_eq!(info.middleware, [SECRET_KEY_LABEL]);
             } else {
-                assert_eq!(info.classification, RouteClassification::Public, "{}", info.path);
+                assert_eq!(
+                    info.classification,
+                    RouteClassification::Public,
+                    "{}",
+                    info.path
+                );
             }
         }
         let root_infos = route_infos("");
@@ -251,7 +262,12 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["error"]["code"], "service_unavailable");
-        assert!(v["error"]["message"].as_str().unwrap().contains("not started"));
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("not started")
+        );
         let rt = started(&cell);
         let (status, body) = send(app.clone(), "GET", "/health", false).await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -325,14 +341,23 @@ mod tests {
     }
 
     async fn text(res: Response) -> String {
-        String::from_utf8(to_bytes(res.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap()
+        String::from_utf8(
+            to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
     }
 
     #[tokio::test]
     async fn the_bridge_puts_the_autumn_nonce_in_html_pages() {
         let out = bridge_nonce(page("core1"), "autumnN1").await;
         assert!(out.headers().get(header::CONTENT_LENGTH).is_none());
-        let csp = out.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().to_owned();
+        let csp = out.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .to_owned();
         assert!(csp.contains("'nonce-autumnN1'"), "{csp}");
         let body = text(out).await;
         assert_eq!(body.matches("nonce=\"autumnN1\"").count(), 2, "{body}");
@@ -346,13 +371,15 @@ mod tests {
             header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
         );
-        assert_eq!(text(bridge_nonce(json, "n").await).await, "{\"nonce\":\"x\"}");
+        assert_eq!(
+            text(bridge_nonce(json, "n").await).await,
+            "{\"nonce\":\"x\"}"
+        );
         // HTML with no core nonce is not changed.
         let mut plain = Response::new(Body::from("<p>hi</p>"));
-        plain.headers_mut().insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/html"),
-        );
+        plain
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html"));
         assert_eq!(text(bridge_nonce(plain, "n").await).await, "<p>hi</p>");
     }
 
@@ -406,7 +433,10 @@ mod tests {
             .to_owned();
         let nonce = core_nonce(&csp).unwrap().to_owned();
         let body = text(res).await;
-        assert!(body.contains(&format!("<script nonce=\"{nonce}\">")), "{csp}\n{body}");
+        assert!(
+            body.contains(&format!("<script nonce=\"{nonce}\">")),
+            "{csp}\n{body}"
+        );
         // With no autumn nonce, the core page is not changed.
         let res = forward(&cell, get()).await;
         let csp = res.headers()[header::CONTENT_SECURITY_POLICY]

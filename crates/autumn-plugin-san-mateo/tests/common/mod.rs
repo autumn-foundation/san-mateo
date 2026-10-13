@@ -94,7 +94,12 @@ pub fn bearer(secret: &str) -> String {
 }
 
 /// Sends a JSON request with the dev secret key.
-pub async fn api(client: &TestClient, method: &str, path: &str, body: Option<Value>) -> TestResponse {
+pub async fn api(
+    client: &TestClient,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> TestResponse {
     let auth = bearer(DEV_SECRET);
     let req = match method {
         "GET" => client.get(path),

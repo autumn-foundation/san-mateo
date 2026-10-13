@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use autumn_plugin_san_mateo::san_mateo::transport::{
     HttpRequest, HttpResponse, HttpTransport, TransportError,
 };
-use autumn_plugin_san_mateo::san_mateo::{MemoryTransport, Store};
+use autumn_plugin_san_mateo::san_mateo::{
+    ConnectOptions, ConnectSessionInput, MemoryStore, MemoryTransport, NewIntegration, Store,
+};
 use autumn_plugin_san_mateo::{INDICATOR_NAME, PluginError, SanMateoPlugin};
 use autumn_web::actuator::{HealthIndicator, HealthStatus};
 use autumn_web::reexports::axum::body::Body;
@@ -45,7 +47,10 @@ fn a_missing_or_bad_encryption_key_fails_start_without_the_value() {
     assert!(e.contains(KEY_ENV), "{e}");
     let p = plugin(&network()).secret_env(KEY_ENV, "c2hvcnQtc2VjcmV0LWtleQ==");
     let e = start_err(p);
-    assert!(e.contains(KEY_ENV) && !e.contains("c2hvcnQtc2VjcmV0LWtleQ=="), "{e}");
+    assert!(
+        e.contains(KEY_ENV) && !e.contains("c2hvcnQtc2VjcmV0LWtleQ=="),
+        "{e}"
+    );
 }
 
 #[test]
@@ -62,7 +67,9 @@ fn a_missing_webhook_secret_fails_start() {
 fn invalid_config_and_service_errors_fail_start() {
     let mut c = config();
     c.background.tick_secs = 0;
-    let e = plugin_with(&network(), c).start(&AppState::for_test()).unwrap_err();
+    let e = plugin_with(&network(), c)
+        .start(&AppState::for_test())
+        .unwrap_err();
     assert!(matches!(e, PluginError::Config(_)), "{e:?}");
     // Two environments with the same secret: the core rejects the build.
     let e = plugin(&network())
@@ -89,7 +96,10 @@ async fn actuator_health_shows_san_mateo_without_secrets() {
     let body = client.get("/actuator/health").send().await.text();
     assert!(body.contains(INDICATOR_NAME), "{body}");
     assert!(body.contains("UP"), "{body}");
-    assert!(!body.contains(DEV_SECRET) && !body.contains(KEY_B64), "{body}");
+    assert!(
+        !body.contains(DEV_SECRET) && !body.contains(KEY_B64),
+        "{body}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -154,7 +164,7 @@ impl HttpTransport for Slow {
 #[tokio::test(flavor = "multi_thread")]
 async fn shutdown_waits_for_webhooks_in_flight() {
     let http = network();
-    let store = Arc::new(autumn_plugin_san_mateo::san_mateo::MemoryStore::new());
+    let store = Arc::new(MemoryStore::new());
     let rt = plugin(&http)
         .transport(Arc::new(Slow(http.clone())))
         .store(Arc::clone(&store) as Arc<dyn Store>)
@@ -163,7 +173,7 @@ async fn shutdown_waits_for_webhooks_in_flight() {
     let san = rt.service();
     san.create_integration(
         "dev",
-        autumn_plugin_san_mateo::san_mateo::NewIntegration {
+        NewIntegration {
             unique_key: "open".to_owned(),
             provider: "open".to_owned(),
             ..Default::default()
@@ -172,14 +182,17 @@ async fn shutdown_waits_for_webhooks_in_flight() {
     .await
     .unwrap();
     let token = san
-        .create_connect_session("dev", Default::default())
+        .create_connect_session("dev", ConnectSessionInput::default())
         .await
         .unwrap()
         .token;
-    san.connect_unauthenticated(token.expose(), "open", Default::default())
+    san.connect_unauthenticated(token.expose(), "open", ConnectOptions::default())
         .await
         .unwrap();
-    assert!(http.requests_to(HOOK).is_empty(), "the webhook is in flight");
+    assert!(
+        http.requests_to(HOOK).is_empty(),
+        "the webhook is in flight"
+    );
     rt.shutdown().await;
     assert_eq!(http.requests_to(HOOK).len(), 1);
 }

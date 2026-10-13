@@ -24,7 +24,9 @@ fn csrf_on() -> AutumnConfig {
 
 #[test]
 fn csrf_without_an_exemption_fails_start_with_the_fix() {
-    let e = plugin(&network()).start(&state_with(csrf_on())).unwrap_err();
+    let e = plugin(&network())
+        .start(&state_with(csrf_on()))
+        .unwrap_err();
     assert!(matches!(e, PluginError::Config(_)));
     let msg = e.to_string();
     assert!(msg.contains("[security.csrf] exempt_paths"), "{msg}");
@@ -75,7 +77,9 @@ async fn csrf_with_the_exemption_lets_bearer_calls_through() {
 fn captcha_without_an_exemption_fails_start() {
     let mut cfg = AutumnConfig::default();
     cfg.bot_protection.enabled = true;
-    let e = plugin(&network()).start(&state_with(cfg.clone())).unwrap_err();
+    let e = plugin(&network())
+        .start(&state_with(cfg.clone()))
+        .unwrap_err();
     assert!(e.to_string().contains("captcha_exempt_paths"), "{e}");
     cfg.security.captcha_exempt_paths = vec!["/san-mateo".to_owned()];
     plugin(&network()).start(&state_with(cfg)).unwrap();
@@ -104,6 +108,9 @@ async fn the_hosted_connect_page_runs_under_the_autumn_csp() {
         .unwrap()
         .to_owned();
     let html = r.text();
-    assert!(html.contains(&format!("<script nonce=\"{nonce}\">")), "{csp}\n{html}");
+    assert!(
+        html.contains(&format!("<script nonce=\"{nonce}\">")),
+        "{csp}\n{html}"
+    );
     assert!(html.contains("/san-mateo/api-auth/api-key/keyed"), "{html}");
 }

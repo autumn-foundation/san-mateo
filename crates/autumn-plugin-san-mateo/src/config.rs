@@ -9,6 +9,20 @@
 //!
 //! The config holds no secrets. It holds the names of the env vars that hold
 //! them. The plugin reads those env vars at startup.
+//!
+//! ```toml
+//! [san_mateo]
+//! server_url = "https://app.example.com"
+//! encryption_key_env = "SAN_MATEO_ENCRYPTION_KEY"
+//! providers_file = "providers.yaml"
+//!
+//! [san_mateo.environments.prod]
+//! secret_key_env = "SAN_MATEO_PROD_SECRET_KEY"
+//!
+//! [san_mateo.environments.prod.webhooks]
+//! urls = ["https://app.example.com/hooks/san-mateo"]
+//! signing_secret_env = "SAN_MATEO_PROD_WEBHOOK_SECRET"
+//! ```
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -16,8 +30,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use san_mateo::{
-    BackgroundSettings, Catalog, EnvironmentConfig, KeyRing, ProxySettings, Secret,
-    WebhookSettings,
+    BackgroundSettings, Catalog, EnvironmentConfig, KeyRing, ProxySettings, Secret, WebhookSettings,
 };
 use serde::{Deserialize, Serialize};
 
@@ -254,8 +267,8 @@ impl SanMateoConfig {
     ) -> Result<Self, PluginError> {
         let mut table = toml::Table::new();
         for text in [base, profile_file].into_iter().flatten() {
-            let parsed: toml::Table = toml::from_str(text)
-                .map_err(|e| PluginError::config(format!("toml: {e}")))?;
+            let parsed: toml::Table =
+                toml::from_str(text).map_err(|e| PluginError::config(format!("toml: {e}")))?;
             if let Some(toml::Value::Table(section)) = parsed.get(SECTION) {
                 merge(&mut table, section.clone());
             }
@@ -365,11 +378,16 @@ impl SanMateoConfig {
             return bad("encryption_key_env must not be empty".to_owned());
         }
         for (id, env) in &self.old_encryption_keys {
-            if !valid_id(id, 32) || *id == self.encryption_key_id || env.trim().is_empty() {
+            if !valid_id(id, 32) {
                 return bad(format!(
-                    "old_encryption_keys: each key id {ID_RULE}, differs from encryption_key_id, \
-                     and names an env var ({id})"
+                    "old_encryption_keys: the id {id:?} {ID_RULE}, at most 32"
                 ));
+            }
+            if *id == self.encryption_key_id {
+                return bad(format!("old_encryption_keys: {id} is the active key id"));
+            }
+            if env.trim().is_empty() {
+                return bad(format!("old_encryption_keys.{id} must name an env var"));
             }
         }
         if let Some(id) = &self.lookup_key_id
@@ -380,7 +398,11 @@ impl SanMateoConfig {
                 "lookup_key_id {id} must be encryption_key_id or a key in old_encryption_keys"
             ));
         }
-        if self.providers_file.as_ref().is_some_and(|f| f.trim().is_empty()) {
+        if self
+            .providers_file
+            .as_ref()
+            .is_some_and(|f| f.trim().is_empty())
+        {
             return bad("providers_file must not be empty".to_owned());
         }
         self.validate_environments()?;
@@ -412,7 +434,9 @@ impl SanMateoConfig {
                 return bad(format!("environments: the id {id:?} {ID_RULE}, at most 64"));
             }
             if env.secret_key_env.trim().is_empty() {
-                return bad(format!("environments.{id}.secret_key_env must not be empty"));
+                return bad(format!(
+                    "environments.{id}.secret_key_env must not be empty"
+                ));
             }
             if !key_envs.insert(env.secret_key_env.as_str()) {
                 return bad(format!(
@@ -494,7 +518,10 @@ impl SanMateoConfig {
                     .signing_secret_env
                     .as_deref()
                     .map(|name| {
-                        secrets.require(name, &format!("webhook signing secret for environment {id}"))
+                        secrets.require(
+                            name,
+                            &format!("webhook signing secret for environment {id}"),
+                        )
                     })
                     .transpose()?
                     .map(Secret::new);
@@ -610,16 +637,21 @@ impl Secrets {
 
     /// The value of the env var `name`, if it is set and not empty.
     pub(crate) fn get(&self, name: &str) -> Option<String> {
-        let value = match self.overrides.get(name) {
-            Some(v) => Some(v.clone()),
-            None => std::env::var(name).ok().or_else(|| {
-                self.dotenv
-                    .get_or_init(|| autumn_web::dotenv::resolve_process_dotenv().unwrap_or_default())
-                    .iter()
-                    .find_map(|(k, v)| (k == name).then(|| v.clone()))
-            }),
-        };
-        value.filter(|v| !v.trim().is_empty())
+        self.overrides
+            .get(name)
+            .map_or_else(
+                || std::env::var(name).ok().or_else(|| self.dotenv_var(name)),
+                |v| Some(v.clone()),
+            )
+            .filter(|v| !v.trim().is_empty())
+    }
+
+    /// The value of `name` in `.env`. The plugin reads the file one time.
+    fn dotenv_var(&self, name: &str) -> Option<String> {
+        self.dotenv
+            .get_or_init(|| autumn_web::dotenv::resolve_process_dotenv().unwrap_or_default())
+            .iter()
+            .find_map(|(k, v)| (k == name).then(|| v.clone()))
     }
 
     /// The value of the env var `name`. The error names the var and `what`.
@@ -747,10 +779,8 @@ mod tests {
     }
 
     fn scratch_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "sm-plugin-config-{name}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("sm-plugin-config-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -829,7 +859,10 @@ enabled = false
             &[],
             env(&[
                 ("AUTUMN_SAN_MATEO__SERVER_URL", "https://sm.example.com"),
-                ("AUTUMN_SAN_MATEO__ENVIRONMENTS__PROD__SECRET_KEY_ENV", "PROD_KEY"),
+                (
+                    "AUTUMN_SAN_MATEO__ENVIRONMENTS__PROD__SECRET_KEY_ENV",
+                    "PROD_KEY",
+                ),
                 (
                     "AUTUMN_SAN_MATEO__ENVIRONMENTS__PROD__WEBHOOKS__URLS",
                     "https://h.example.com/a, https://h.example.com/b",
@@ -838,12 +871,21 @@ enabled = false
                     "AUTUMN_SAN_MATEO__ENVIRONMENTS__PROD__WEBHOOKS__SIGNING_SECRET_ENV",
                     "PROD_WHSEC",
                 ),
-                ("AUTUMN_SAN_MATEO__ENVIRONMENTS__PROD__WEBHOOKS__RETRIES", "4"),
-                ("AUTUMN_SAN_MATEO__ENVIRONMENTS__PROD__WEBHOOKS__SEND_SYNC", "false"),
+                (
+                    "AUTUMN_SAN_MATEO__ENVIRONMENTS__PROD__WEBHOOKS__RETRIES",
+                    "4",
+                ),
+                (
+                    "AUTUMN_SAN_MATEO__ENVIRONMENTS__PROD__WEBHOOKS__SEND_SYNC",
+                    "false",
+                ),
                 ("AUTUMN_SAN_MATEO__OLD_ENCRYPTION_KEYS__K0", "OLD_KEY"),
                 ("AUTUMN_SAN_MATEO__BACKGROUND__ENABLED", "false"),
                 ("AUTUMN_SAN_MATEO__BACKGROUND__REFRESH_BATCH", "7"),
-                ("AUTUMN_SAN_MATEO__PROXY__ALLOWED_HOSTS", "a.example.com,b.example.com"),
+                (
+                    "AUTUMN_SAN_MATEO__PROXY__ALLOWED_HOSTS",
+                    "a.example.com,b.example.com",
+                ),
                 ("AUTUMN_OTHER__X", "ignored"),
             ]),
         )
@@ -855,7 +897,10 @@ enabled = false
             prod.webhooks.urls,
             ["https://h.example.com/a", "https://h.example.com/b"]
         );
-        assert_eq!(prod.webhooks.signing_secret_env.as_deref(), Some("PROD_WHSEC"));
+        assert_eq!(
+            prod.webhooks.signing_secret_env.as_deref(),
+            Some("PROD_WHSEC")
+        );
         assert_eq!(prod.webhooks.retries, 4);
         assert!(!prod.webhooks.send_sync);
         assert_eq!(c.old_encryption_keys["k0"], "OLD_KEY");
@@ -899,8 +944,7 @@ enabled = false
         let c = SanMateoConfig::load_from_dir(&dir, &["staging".to_owned()], Vec::new()).unwrap();
         assert_eq!(c.server_url, "https://base.example.com");
         // No files at all: the defaults.
-        let c =
-            SanMateoConfig::load_from_dir(&scratch_dir("empty"), &[], Vec::new()).unwrap();
+        let c = SanMateoConfig::load_from_dir(&scratch_dir("empty"), &[], Vec::new()).unwrap();
         assert_eq!(c, SanMateoConfig::default());
     }
 
@@ -911,90 +955,110 @@ enabled = false
         assert_eq!(c.drain_timeout_secs, 1);
     }
 
+    /// Applies `f` to the defaults and returns the validation error.
+    fn check(f: fn(&mut SanMateoConfig)) -> String {
+        let mut c = SanMateoConfig::default();
+        f(&mut c);
+        c.validate().unwrap_err().to_string()
+    }
+
+    fn default_env(c: &mut SanMateoConfig) -> &mut EnvironmentSettings {
+        c.environments.get_mut(DEFAULT_ENVIRONMENT).unwrap()
+    }
+
     #[test]
-    fn validation_rules() {
-        let check = |f: fn(&mut SanMateoConfig)| {
-            let mut c = SanMateoConfig::default();
-            f(&mut c);
-            c.validate().unwrap_err().to_string()
-        };
+    fn validation_rules_for_urls_keys_and_loops() {
         assert!(check(|c| c.server_url = "ftp://x".into()).contains("server_url"));
         assert!(check(|c| c.server_url = "http://app.example.com".into()).contains("server_url"));
-        assert!(check(|c| c.server_url = "https://x.example.com/?a=1".into()).contains("server_url"));
+        assert!(
+            check(|c| c.server_url = "https://x.example.com/?a=1".into()).contains("server_url")
+        );
         assert!(check(|c| c.connect_url = Some("nope".into())).contains("connect_url"));
         assert!(check(|c| c.encryption_key_id = String::new()).contains("encryption_key_id"));
         assert!(check(|c| c.encryption_key_id = "a b".into()).contains("encryption_key_id"));
         assert!(check(|c| c.encryption_key_id = "k".repeat(33)).contains("encryption_key_id"));
         assert!(check(|c| c.encryption_key_env = " ".into()).contains("encryption_key_env"));
-        assert!(check(|c| {
-            c.old_encryption_keys.insert("k1".into(), "X".into());
-        })
-        .contains("old_encryption_keys"));
-        assert!(check(|c| {
-            c.old_encryption_keys.insert("bad id".into(), "X".into());
-        })
-        .contains("old_encryption_keys"));
-        assert!(check(|c| {
-            c.old_encryption_keys.insert("k0".into(), String::new());
-        })
-        .contains("old_encryption_keys"));
+        for (id, env) in [("k1", "X"), ("bad id", "X"), ("k0", "")] {
+            let mut c = SanMateoConfig::default();
+            c.old_encryption_keys.insert(id.into(), env.into());
+            let e = c.validate().unwrap_err().to_string();
+            assert!(e.contains("old_encryption_keys"), "{e}");
+        }
         assert!(check(|c| c.lookup_key_id = Some("k9".into())).contains("lookup_key_id"));
         assert!(check(|c| c.providers_file = Some(String::new())).contains("providers_file"));
-        assert!(check(|c| c.environments.clear()).contains("environments"));
-        assert!(check(|c| {
-            c.environments.insert("bad id".into(), EnvironmentSettings::default());
-        })
-        .contains("environments"));
-        assert!(check(|c| {
-            c.environments.get_mut("default").unwrap().secret_key_env = String::new();
-        })
-        .contains("secret_key_env"));
-        assert!(check(|c| {
-            c.environments.insert("other".into(), EnvironmentSettings::default());
-        })
-        .contains("secret_key_env"));
-        assert!(check(|c| {
-            c.environments.get_mut("default").unwrap().callback_url = Some("x".into());
-        })
-        .contains("callback_url"));
-        assert!(check(|c| {
-            let w = &mut c.environments.get_mut("default").unwrap().webhooks;
-            w.urls = vec!["https://h.example.com".into()];
-        })
-        .contains("signing_secret_env"));
-        assert!(check(|c| {
-            let w = &mut c.environments.get_mut("default").unwrap().webhooks;
-            w.urls = vec!["https://a.example.com".into(); 3];
-            w.signing_secret_env = Some("S".into());
-        })
-        .contains("urls"));
-        assert!(check(|c| {
-            let w = &mut c.environments.get_mut("default").unwrap().webhooks;
-            w.urls = vec!["http://hooks.example.com".into()];
-            w.signing_secret_env = Some("S".into());
-        })
-        .contains("urls"));
-        assert!(check(|c| {
-            c.environments.get_mut("default").unwrap().webhooks.signing_secret_env =
-                Some(String::new());
-        })
-        .contains("signing_secret_env"));
-        assert!(check(|c| {
-            c.environments.get_mut("default").unwrap().webhooks.retries = MAX_WEBHOOK_RETRIES + 1;
-        })
-        .contains("retries"));
-        assert!(check(|c| c.proxy.allowed_hosts = vec!["https://x".into()]).contains("allowed_hosts"));
+        assert!(
+            check(|c| c.proxy.allowed_hosts = vec!["https://x".into()]).contains("allowed_hosts")
+        );
         assert!(check(|c| c.proxy.allowed_hosts = vec![String::new()]).contains("allowed_hosts"));
         assert!(check(|c| c.background.tick_secs = 0).contains("tick_secs"));
         assert!(check(|c| c.background.refresh_batch = 0).contains("refresh_batch"));
-        // Valid edge cases.
-        let mut c = SanMateoConfig::default();
-        c.server_url = "http://127.0.0.1:8080".into();
-        c.connect_url = Some("https://connect.example.com/c".into());
-        c.old_encryption_keys.insert("k0".into(), "OLD".into());
-        c.lookup_key_id = Some("k0".into());
-        let w = &mut c.environments.get_mut("default").unwrap().webhooks;
-        w.urls = vec!["https://a.example.com/h".into(), "http://localhost:9/h".into()];
+    }
+
+    #[test]
+    fn validation_rules_for_environments() {
+        assert!(check(|c| c.environments.clear()).contains("environments"));
+        assert!(
+            check(|c| {
+                c.environments
+                    .insert("bad id".into(), EnvironmentSettings::default());
+            })
+            .contains("environments")
+        );
+        assert!(
+            check(|c| default_env(c).secret_key_env = String::new()).contains("secret_key_env")
+        );
+        assert!(
+            check(|c| {
+                c.environments
+                    .insert("other".into(), EnvironmentSettings::default());
+            })
+            .contains("secret_key_env")
+        );
+        assert!(check(|c| default_env(c).callback_url = Some("x".into())).contains("callback_url"));
+        assert!(
+            check(|c| default_env(c).webhooks.urls = vec!["https://h.example.com".into()])
+                .contains("signing_secret_env")
+        );
+        assert!(
+            check(|c| {
+                let w = &mut default_env(c).webhooks;
+                w.urls = vec!["https://a.example.com".into(); 3];
+                w.signing_secret_env = Some("S".into());
+            })
+            .contains("urls")
+        );
+        assert!(
+            check(|c| {
+                let w = &mut default_env(c).webhooks;
+                w.urls = vec!["http://hooks.example.com".into()];
+                w.signing_secret_env = Some("S".into());
+            })
+            .contains("urls")
+        );
+        assert!(
+            check(|c| default_env(c).webhooks.signing_secret_env = Some(String::new()))
+                .contains("signing_secret_env")
+        );
+        assert!(
+            check(|c| default_env(c).webhooks.retries = MAX_WEBHOOK_RETRIES + 1)
+                .contains("retries")
+        );
+    }
+
+    #[test]
+    fn validation_accepts_edge_cases() {
+        let mut c = SanMateoConfig {
+            server_url: "http://127.0.0.1:8080".into(),
+            connect_url: Some("https://connect.example.com/c".into()),
+            old_encryption_keys: BTreeMap::from([("k0".into(), "OLD".into())]),
+            lookup_key_id: Some("k0".into()),
+            ..SanMateoConfig::default()
+        };
+        let w = &mut default_env(&mut c).webhooks;
+        w.urls = vec![
+            "https://a.example.com/h?team=1".into(),
+            "http://localhost:9/h".into(),
+        ];
         w.signing_secret_env = Some("WHSEC".into());
         c.validate().unwrap();
     }
@@ -1030,27 +1094,39 @@ enabled = false
             .require("SM_PLUGIN_TEST_NEVER_SET_1", "encryption key")
             .unwrap_err()
             .to_string();
-        assert!(e.contains("SM_PLUGIN_TEST_NEVER_SET_1") && e.contains("encryption key"), "{e}");
+        assert!(
+            e.contains("SM_PLUGIN_TEST_NEVER_SET_1") && e.contains("encryption key"),
+            "{e}"
+        );
         let debug = format!("{s:?}");
-        assert!(debug.contains("SM_TEST_A") && !debug.contains("from-plugin"), "{debug}");
+        assert!(
+            debug.contains("SM_TEST_A") && !debug.contains("from-plugin"),
+            "{debug}"
+        );
     }
 
     #[test]
     fn key_ring_reads_named_env_vars_and_supports_rotation() {
-        let mut c = SanMateoConfig::default();
-        c.encryption_key_env = "SM_KEY_NEW".into();
-        c.encryption_key_id = "k2".into();
+        let mut c = SanMateoConfig {
+            encryption_key_env: "SM_KEY_NEW".into(),
+            encryption_key_id: "k2".into(),
+            ..SanMateoConfig::default()
+        };
         let e = c.key_ring(&secrets(&[])).unwrap_err().to_string();
         assert!(e.contains("SM_KEY_NEW"), "{e}");
         let e = c
             .key_ring(&secrets(&[("SM_KEY_NEW", "not-base64-secret")]))
             .unwrap_err()
             .to_string();
-        assert!(e.contains("SM_KEY_NEW") && !e.contains("not-base64-secret"), "{e}");
+        assert!(
+            e.contains("SM_KEY_NEW") && !e.contains("not-base64-secret"),
+            "{e}"
+        );
         // Data sealed with the old key opens after rotation.
         let old = KeyRing::from_base64("k1", OLD_KEY_B64).unwrap();
         let sealed = old.seal(b"token", b"row").unwrap();
-        c.old_encryption_keys.insert("k1".into(), "SM_KEY_OLD".into());
+        c.old_encryption_keys
+            .insert("k1".into(), "SM_KEY_OLD".into());
         c.lookup_key_id = Some("k1".into());
         let e = c
             .key_ring(&secrets(&[("SM_KEY_NEW", KEY_B64)]))
@@ -1058,12 +1134,19 @@ enabled = false
             .to_string();
         assert!(e.contains("SM_KEY_OLD"), "{e}");
         let ring = c
-            .key_ring(&secrets(&[("SM_KEY_NEW", KEY_B64), ("SM_KEY_OLD", OLD_KEY_B64)]))
+            .key_ring(&secrets(&[
+                ("SM_KEY_NEW", KEY_B64),
+                ("SM_KEY_OLD", OLD_KEY_B64),
+            ]))
             .unwrap();
         assert_eq!(ring.active_key_id(), "k2");
         assert_eq!(ring.open(&sealed, b"row").unwrap(), b"token");
         assert!(ring.seal(b"x", b"row").unwrap().contains(".k2."));
-        assert_eq!(ring.lookup_hash("v"), old.lookup_hash("v"), "lookup key stays k1");
+        assert_eq!(
+            ring.lookup_hash("v"),
+            old.lookup_hash("v"),
+            "lookup key stays k1"
+        );
     }
 
     #[test]
@@ -1074,11 +1157,17 @@ enabled = false
             callback_url: Some("https://app.example.com/cb".into()),
             ..EnvironmentSettings::default()
         };
-        prod.webhooks.urls = vec!["https://h.example.com/1".into(), "https://h.example.com/2".into()];
+        prod.webhooks.urls = vec![
+            "https://h.example.com/1".into(),
+            "https://h.example.com/2".into(),
+        ];
         prod.webhooks.signing_secret_env = Some("SM_PROD_WH".into());
         prod.webhooks.retries = 1;
         c.environments = BTreeMap::from([("prod".to_owned(), prod)]);
-        let e = c.environment_configs(&secrets(&[])).unwrap_err().to_string();
+        let e = c
+            .environment_configs(&secrets(&[]))
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("SM_PROD_SK") && e.contains("prod"), "{e}");
         let e = c
             .environment_configs(&secrets(&[("SM_PROD_SK", "sk_prod")]))
@@ -1086,16 +1175,31 @@ enabled = false
             .to_string();
         assert!(e.contains("SM_PROD_WH"), "{e}");
         let envs = c
-            .environment_configs(&secrets(&[("SM_PROD_SK", "sk_prod"), ("SM_PROD_WH", "whsec")]))
+            .environment_configs(&secrets(&[
+                ("SM_PROD_SK", "sk_prod"),
+                ("SM_PROD_WH", "whsec"),
+            ]))
             .unwrap();
         assert_eq!(envs.len(), 1);
         let p = &envs[0];
         assert_eq!(p.id, "prod");
         assert_eq!(p.secret_key.expose(), "sk_prod");
-        assert_eq!(p.callback_url.as_deref(), Some("https://app.example.com/cb"));
-        assert_eq!(p.webhooks.primary_url.as_deref(), Some("https://h.example.com/1"));
-        assert_eq!(p.webhooks.secondary_url.as_deref(), Some("https://h.example.com/2"));
-        assert_eq!(p.webhooks.signing_secret.as_ref().unwrap().expose(), "whsec");
+        assert_eq!(
+            p.callback_url.as_deref(),
+            Some("https://app.example.com/cb")
+        );
+        assert_eq!(
+            p.webhooks.primary_url.as_deref(),
+            Some("https://h.example.com/1")
+        );
+        assert_eq!(
+            p.webhooks.secondary_url.as_deref(),
+            Some("https://h.example.com/2")
+        );
+        assert_eq!(
+            p.webhooks.signing_secret.as_ref().unwrap().expose(),
+            "whsec"
+        );
         assert_eq!(p.webhooks.retries, 1);
         assert!(p.webhooks.send_auth && p.webhooks.send_sync);
         // No webhooks: no URLs and no secret.

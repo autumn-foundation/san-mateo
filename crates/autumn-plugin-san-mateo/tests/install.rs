@@ -91,7 +91,10 @@ async fn connect_and_proxy_through_the_autumn_stack() {
     r.assert_status(201);
     assert_eq!(json(&r)["id"], "n1");
     let sent = &http.requests_to("https://api.keyed.example.com/v1/notes")[0];
-    assert_eq!(sent.url, "https://api.keyed.example.com/v1/notes?draft=true");
+    assert_eq!(
+        sent.url,
+        "https://api.keyed.example.com/v1/notes?draft=true"
+    );
     assert_eq!(sent.header_value("x-api-key"), Some("user-api-key"));
     assert_eq!(sent.body, br#"{"text":"hi"}"#);
     // A path parameter reaches the core once.
@@ -132,13 +135,20 @@ async fn connect_session_links_use_the_prefix() {
     )
     .await;
     r.assert_status(201);
-    let link = json(&r)["data"]["connect_link"].as_str().unwrap().to_owned();
+    let link = json(&r)["data"]["connect_link"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert!(
         link.starts_with("https://app.example.com/integrations-api/connect?session_token=smcs_"),
         "{link}"
     );
     // The default prefix is not mounted.
-    client.get("/san-mateo/health").send().await.assert_status(404);
+    client
+        .get("/san-mateo/health")
+        .send()
+        .await
+        .assert_status(404);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -193,10 +203,25 @@ fn plugin_declares_all_routes_under_the_prefix() {
     }
 }
 
+#[test]
+fn plugin_passes_the_autumn_conformance_checks() {
+    use autumn_web::plugin_conformance::{ConformanceConfig, run_conformance};
+    let p = SanMateoPlugin::new();
+    let contract = p.contract().unwrap();
+    let routes = autumn_web::app().plugin(p).plugin_route_infos().unwrap();
+    let cfg = ConformanceConfig::new(PLUGIN_NAME)
+        .prefix(DEFAULT_PREFIX)
+        .contract(contract);
+    let report = run_conformance(&cfg, &routes);
+    assert!(report.passed(), "{}", report.to_text_report());
+}
+
 /// A user handler gets the service as an extractor.
 async fn environments(san: SanMateoService) -> AutumnResult<Json<Value>> {
     let env = san.environment("prod").map_err(autumn_error)?;
-    Ok(Json(json!({"id": env.id, "count": san.config().environments.len()})))
+    Ok(Json(
+        json!({"id": env.id, "count": san.config().environments.len()}),
+    ))
 }
 
 async fn missing(san: SanMateoService) -> AutumnResult<Json<Value>> {
@@ -213,7 +238,10 @@ async fn handlers_and_jobs_get_the_service() {
         .plugin(plugin(&http))
         // autumn runs this after the plugin and before job workers start.
         .state_initializer(move |state: &AppState| {
-            flag.store(SanMateoService::from_state(state).is_some(), Ordering::SeqCst);
+            flag.store(
+                SanMateoService::from_state(state).is_some(),
+                Ordering::SeqCst,
+            );
         })
         .merge(
             autumn_web::reexports::axum::Router::new()

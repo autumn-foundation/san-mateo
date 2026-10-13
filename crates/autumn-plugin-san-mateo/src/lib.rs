@@ -12,6 +12,16 @@
 //! - **Operations:** a `san_mateo` health indicator, background loops, and a
 //!   drain at shutdown.
 //!
+//! Notes:
+//!
+//! - autumn needs one or more routes of the app. The nested San Mateo router
+//!   does not count.
+//! - With `[security.csrf] enabled = true`, add the prefix to `exempt_paths`.
+//!   San Mateo clients send tokens, not cookies. Else the startup fails and
+//!   the error gives the fix.
+//! - The hosted connect page needs `[security.headers.csp_nonce]
+//!   enabled = true`. The plugin then puts the autumn nonce in the page.
+//!
 //! ```rust,no_run
 //! use autumn_plugin_san_mateo::SanMateoPlugin;
 //!

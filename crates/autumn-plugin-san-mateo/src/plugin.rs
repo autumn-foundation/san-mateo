@@ -302,9 +302,10 @@ impl SanMateoPlugin {
             .config(core)
             .key_ring(config.key_ring(&secrets)?)
             .catalog(config.catalog(self.catalog)?);
-        match self.store {
-            Some(store) => builder = builder.store(store),
-            None => tracing::warn!("san mateo: a memory store; all data is lost at restart"),
+        if let Some(store) = self.store {
+            builder = builder.store(store);
+        } else {
+            tracing::warn!("san mateo: a memory store; all data is lost at restart");
         }
         if let Some(transport) = self.transport {
             builder = builder.transport(transport);
@@ -371,7 +372,12 @@ fn exemption_fix(prefix: &str) -> String {
 /// Fails when CSRF or CAPTCHA would block a San Mateo route. A plugin cannot
 /// add an exemption, so the error gives the config fix.
 fn check_security(cfg: &AutumnConfig, prefix: &str) -> Result<(), PluginError> {
-    let webhook_paths = cfg.security.webhooks.endpoints.iter().map(|e| e.path.clone());
+    let webhook_paths = cfg
+        .security
+        .webhooks
+        .endpoints
+        .iter()
+        .map(|e| e.path.clone());
     let mutating = mutating_routes(cfg, prefix);
     if cfg.security.csrf.enabled {
         let mut exempt = cfg.security.csrf.exempt_paths.clone();
@@ -440,7 +446,6 @@ impl SanMateoRuntime {
 
     /// The routes, relative to the prefix. Use it in tests, or to mount the
     /// routes yourself.
-    #[must_use]
     pub fn router(&self) -> Router {
         routes::mounted_router(&self.cell, false)
     }
@@ -580,7 +585,10 @@ mod tests {
         check_security(&cfg, "/san-mateo").unwrap();
         cfg.security.csrf.enabled = true;
         let e = check_security(&cfg, "/san-mateo").unwrap_err().to_string();
-        assert!(e.contains("exempt_paths") && e.contains("[\"/san-mateo\"]"), "{e}");
+        assert!(
+            e.contains("exempt_paths") && e.contains("[\"/san-mateo\"]"),
+            "{e}"
+        );
         assert!(e.contains("[security.csrf]"), "{e}");
         cfg.security.csrf.exempt_paths = ex(&["/san-mateo"]);
         check_security(&cfg, "/san-mateo").unwrap();
@@ -610,7 +618,10 @@ mod tests {
         let mut cfg = AutumnConfig::default();
         cfg.security.csrf.enabled = true;
         let e = check_security(&cfg, "").unwrap_err().to_string();
-        assert!(e.contains("\"/integrations\"") && e.contains("\"/proxy\""), "{e}");
+        assert!(
+            e.contains("\"/integrations\"") && e.contains("\"/proxy\""),
+            "{e}"
+        );
         assert!(!e.contains("[\"/\"]"), "{e}");
         cfg.security.csrf.exempt_paths = ex(&[
             "/integrations",
@@ -642,7 +653,10 @@ mod tests {
         let mut cfg = AutumnConfig::default();
         cfg.bot_protection.enabled = true;
         let e = check_security(&cfg, "/sm").unwrap_err().to_string();
-        assert!(e.contains("captcha_exempt_paths") && e.contains("[\"/sm\"]"), "{e}");
+        assert!(
+            e.contains("captcha_exempt_paths") && e.contains("[\"/sm\"]"),
+            "{e}"
+        );
         cfg.bot_protection.dev_bypass = true;
         check_security(&cfg, "/sm").unwrap();
         cfg.bot_protection.dev_bypass = false;
@@ -696,7 +710,11 @@ mod tests {
         let cell: Cell = Arc::new(OnceLock::new());
         let san = service();
         let bg = san.start_background(san_mateo::BackgroundSettings::default());
-        let rt = Arc::new(Runtime::new(san, Some(bg), std::time::Duration::from_secs(1)));
+        let rt = Arc::new(Runtime::new(
+            san,
+            Some(bg),
+            std::time::Duration::from_secs(1),
+        ));
         let _ = cell.set(Arc::clone(&rt));
         shutdown_hook(&cell).await;
         assert!(rt.is_closed());

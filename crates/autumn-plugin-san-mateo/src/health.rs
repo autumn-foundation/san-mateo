@@ -1,8 +1,8 @@
 //! Health indicator for `/actuator/health` and `/ready`.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use autumn_web::actuator::{HealthCheckOutput, HealthIndicator};

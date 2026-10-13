@@ -115,8 +115,8 @@ mod tests {
         let s = SanMateoService::require(&state).unwrap();
         assert_eq!(s.config().server_url, "https://sm.example.com");
         assert_eq!(s.san().config().environments.len(), 1);
-        assert_eq!(s.clone().into_inner().catalog().len(), 0);
         assert!(SanMateoService::from_state(&state).is_some());
+        assert_eq!(s.into_inner().catalog().len(), 0);
     }
 
     #[tokio::test]

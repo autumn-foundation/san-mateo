@@ -132,9 +132,15 @@ async fn an_app_boots_with_config_files_and_env_vars() {
     let start = Instant::now();
     loop {
         if let Some(status) = child.0.try_wait().unwrap() {
-            panic!("the app stopped at boot ({status}):\n{}", output_of(&mut child.0));
+            panic!(
+                "the app stopped at boot ({status}):\n{}",
+                output_of(&mut child.0)
+            );
         }
-        assert!(start.elapsed() < Duration::from_secs(60), "the app did not answer");
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "the app did not answer"
+        );
         if let Ok(res) = client.get(format!("{base}/san-mateo/health")).send().await
             && res.status().as_u16() == 200
         {
@@ -172,7 +178,10 @@ async fn an_app_boots_with_config_files_and_env_vars() {
     assert_eq!(res.status().as_u16(), 201);
     let v: serde_json::Value = serde_json::from_str(&res.text().await.unwrap()).unwrap();
     let link = v["data"]["connect_link"].as_str().unwrap();
-    assert!(link.starts_with(&format!("{base}/san-mateo/connect?")), "{link}");
+    assert!(
+        link.starts_with(&format!("{base}/san-mateo/connect?")),
+        "{link}"
+    );
     let res = client.get(format!("{base}/")).send().await.unwrap();
     assert_eq!(res.text().await.unwrap(), "app");
     let res = client

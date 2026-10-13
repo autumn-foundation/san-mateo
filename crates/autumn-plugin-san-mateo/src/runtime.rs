@@ -71,7 +71,10 @@ impl Runtime {
         if let Some(loops) = loops {
             loops.stop().await;
         }
-        if tokio::time::timeout(self.drain, self.san.flush()).await.is_err() {
+        if tokio::time::timeout(self.drain, self.san.flush())
+            .await
+            .is_err()
+        {
             tracing::warn!("san mateo: webhooks or syncs still run after the drain time");
         }
     }
