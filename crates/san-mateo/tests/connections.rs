@@ -908,3 +908,56 @@ async fn background_loops_start_and_stop() {
         .unwrap();
     assert_eq!(got.credentials.bearer_token(), Some("at-bg"));
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_background_loop_purges_expired_sessions() {
+    let h = ready().await;
+    let state_of = |url: &str| query_of(url)["state"].clone();
+    // A connect session (30 min) with an OAuth flow (15 min).
+    let old = session(&h).await;
+    let old_state = state_of(
+        &h.san
+            .oauth_start(&old, "crm", san_mateo::ConnectOptions::default())
+            .await
+            .unwrap(),
+    );
+    h.clock.advance(chrono::Duration::minutes(31));
+    // A live session and flow.
+    let live = session(&h).await;
+    let live_state = state_of(
+        &h.san
+            .oauth_start(&live, "crm", san_mateo::ConnectOptions::default())
+            .await
+            .unwrap(),
+    );
+    let (old, live) = (h.keys.lookup_hash(&old), h.keys.lookup_hash(&live));
+    assert!(h.store.get_connect_session(&old).await.unwrap().is_some());
+    let bg = h.san.start_background(san_mateo::BackgroundSettings {
+        tick: Duration::from_secs(1),
+        run_syncs: false,
+        ..san_mateo::BackgroundSettings::default()
+    });
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    bg.stop().await;
+    // The expired rows are gone. The live rows stay.
+    assert!(h.store.get_connect_session(&old).await.unwrap().is_none());
+    assert!(h.store.get_connect_session(&live).await.unwrap().is_some());
+    let (old_state, live_state) = (
+        h.keys.lookup_hash(&old_state),
+        h.keys.lookup_hash(&live_state),
+    );
+    assert!(
+        h.store
+            .take_oauth_session(&old_state)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        h.store
+            .take_oauth_session(&live_state)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
