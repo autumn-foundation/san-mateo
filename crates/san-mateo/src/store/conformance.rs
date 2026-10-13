@@ -3,7 +3,14 @@
 //! Each test uses a new environment id and new UUIDs, so tests can share
 //! one database. Times are whole seconds, so a store can keep microseconds.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, missing_docs)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::missing_panics_doc,
+    clippy::many_single_char_names,
+    clippy::too_many_lines,
+    missing_docs
+)]
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -107,9 +114,20 @@ pub async fn integrations_crud(s: Arc<dyn Store>) {
     let e = env();
     assert_eq!(s.get_integration(&e, "gh").await.unwrap(), None);
     s.insert_integration(integration(&e, "gh")).await.unwrap();
-    s.insert_integration(integration(&e, "a-first")).await.unwrap();
-    assert_eq!(s.get_integration(&e, "gh").await.unwrap(), Some(integration(&e, "gh")));
-    let keys: Vec<String> = s.list_integrations(&e).await.unwrap().into_iter().map(|i| i.unique_key).collect();
+    s.insert_integration(integration(&e, "a-first"))
+        .await
+        .unwrap();
+    assert_eq!(
+        s.get_integration(&e, "gh").await.unwrap(),
+        Some(integration(&e, "gh"))
+    );
+    let keys: Vec<String> = s
+        .list_integrations(&e)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.unique_key)
+        .collect();
     assert_eq!(keys, vec!["a-first", "gh"]);
     let mut changed = integration(&e, "gh");
     changed.scopes = vec!["read".to_owned()];
@@ -126,7 +144,10 @@ pub async fn integrations_crud(s: Arc<dyn Store>) {
 pub async fn integration_conflict(s: Arc<dyn Store>) {
     let e = env();
     s.insert_integration(integration(&e, "gh")).await.unwrap();
-    let err = s.insert_integration(integration(&e, "gh")).await.unwrap_err();
+    let err = s
+        .insert_integration(integration(&e, "gh"))
+        .await
+        .unwrap_err();
     assert!(matches!(err, Error::Conflict(_)), "{err:?}");
 }
 
@@ -136,12 +157,15 @@ pub async fn connection_upsert_and_get(s: Arc<dyn Store>) {
     let up = s.upsert_connection(first.clone()).await.unwrap();
     assert!(up.created);
     assert_eq!(up.row, first);
-    assert_eq!(s.get_connection(&e, "gh", "c1").await.unwrap(), Some(first.clone()));
+    assert_eq!(
+        s.get_connection(&e, "gh", "c1").await.unwrap(),
+        Some(first.clone())
+    );
     assert_eq!(s.get_connection(&e, "gh", "c2").await.unwrap(), None);
     assert_eq!(s.get_connection(&e, "other", "c1").await.unwrap(), None);
 
     let mut again = connection(&e, "gh", "c1");
-    again.credentials = "sm1.k.new".to_owned();
+    "sm1.k.new".clone_into(&mut again.credentials);
     again.created_at = t(100);
     again.updated_at = t(100);
     let up = s.upsert_connection(again).await.unwrap();
@@ -151,14 +175,21 @@ pub async fn connection_upsert_and_get(s: Arc<dyn Store>) {
     assert_eq!(up.row.updated_at, t(100));
     assert_eq!(up.row.credentials, "sm1.k.new");
     assert_eq!(up.row.version, 1);
-    assert_eq!(s.get_connection(&e, "gh", "c1").await.unwrap(), Some(up.row));
+    assert_eq!(
+        s.get_connection(&e, "gh", "c1").await.unwrap(),
+        Some(up.row)
+    );
 }
 
 pub async fn connection_compare_and_set(s: Arc<dyn Store>) {
     let e = env();
-    let row = s.upsert_connection(connection(&e, "gh", "c1")).await.unwrap().row;
+    let row = s
+        .upsert_connection(connection(&e, "gh", "c1"))
+        .await
+        .unwrap()
+        .row;
     let mut w1 = row.clone();
-    w1.credentials = "sm1.k.w1".to_owned();
+    "sm1.k.w1".clone_into(&mut w1.credentials);
     w1.refresh_attempts = 2;
     w1.last_refresh_failure = Some(t(9));
     let stored = s.update_connection(&w1).await.unwrap().unwrap();
@@ -166,7 +197,7 @@ pub async fn connection_compare_and_set(s: Arc<dyn Store>) {
     assert_eq!(stored.credentials, "sm1.k.w1");
     // A second writer with the old version loses.
     let mut w2 = row.clone();
-    w2.credentials = "sm1.k.w2".to_owned();
+    "sm1.k.w2".clone_into(&mut w2.credentials);
     assert_eq!(s.update_connection(&w2).await.unwrap(), None);
     let now = s.get_connection(&e, "gh", "c1").await.unwrap().unwrap();
     assert_eq!(now.credentials, "sm1.k.w1");
@@ -190,14 +221,42 @@ pub async fn connection_list_filters(s: Arc<dyn Store>) {
     for r in [c.clone(), a.clone(), b.clone()] {
         s.upsert_connection(r).await.unwrap();
     }
-    let ids = |rows: Vec<ConnectionRow>| rows.into_iter().map(|r| r.connection_id).collect::<Vec<_>>();
-    assert_eq!(ids(s.list_connections(&e, &ConnectionFilter::default()).await.unwrap()), vec!["c1", "c2", "c3"]);
-    let by_key = ConnectionFilter { provider_config_key: Some("gh".to_owned()), ..ConnectionFilter::default() };
-    assert_eq!(ids(s.list_connections(&e, &by_key).await.unwrap()), vec!["c1", "c2"]);
-    let by_user = ConnectionFilter { end_user_id: Some("u1".to_owned()), ..ConnectionFilter::default() };
-    assert_eq!(ids(s.list_connections(&e, &by_user).await.unwrap()), vec!["c1", "c3"]);
-    let by_id = ConnectionFilter { connection_id: Some("c2".to_owned()), ..ConnectionFilter::default() };
-    assert_eq!(ids(s.list_connections(&e, &by_id).await.unwrap()), vec!["c2"]);
+    let ids = |rows: Vec<ConnectionRow>| {
+        rows.into_iter()
+            .map(|r| r.connection_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        ids(s
+            .list_connections(&e, &ConnectionFilter::default())
+            .await
+            .unwrap()),
+        vec!["c1", "c2", "c3"]
+    );
+    let by_key = ConnectionFilter {
+        provider_config_key: Some("gh".to_owned()),
+        ..ConnectionFilter::default()
+    };
+    assert_eq!(
+        ids(s.list_connections(&e, &by_key).await.unwrap()),
+        vec!["c1", "c2"]
+    );
+    let by_user = ConnectionFilter {
+        end_user_id: Some("u1".to_owned()),
+        ..ConnectionFilter::default()
+    };
+    assert_eq!(
+        ids(s.list_connections(&e, &by_user).await.unwrap()),
+        vec!["c1", "c3"]
+    );
+    let by_id = ConnectionFilter {
+        connection_id: Some("c2".to_owned()),
+        ..ConnectionFilter::default()
+    };
+    assert_eq!(
+        ids(s.list_connections(&e, &by_id).await.unwrap()),
+        vec!["c2"]
+    );
 }
 
 fn write(conn: Uuid, external: &str, hash: &str) -> RecordWrite {
@@ -220,20 +279,34 @@ fn sync_state(conn: Uuid, name: &str) -> SyncStateRow {
         last_finished_at: Some(t(2)),
         last_success_at: Some(t(2)),
         last_error: None,
-        last_counts: SyncCounts { added: 1, updated: 2, deleted: 3 },
+        last_counts: SyncCounts {
+            added: 1,
+            updated: 2,
+            deleted: 3,
+        },
     }
 }
 
 pub async fn connection_delete_cascades(s: Arc<dyn Store>) {
     let e = env();
-    let row = s.upsert_connection(connection(&e, "gh", "c1")).await.unwrap().row;
-    s.upsert_records(row.id, "m", vec![write(row.id, "1", "h")], t(1)).await.unwrap();
+    let row = s
+        .upsert_connection(connection(&e, "gh", "c1"))
+        .await
+        .unwrap()
+        .row;
+    s.upsert_records(row.id, "m", vec![write(row.id, "1", "h")], t(1))
+        .await
+        .unwrap();
     s.put_sync_state(sync_state(row.id, "s")).await.unwrap();
     let deleted = s.delete_connection(&e, "gh", "c1").await.unwrap().unwrap();
     assert_eq!(deleted.id, row.id);
     assert_eq!(s.delete_connection(&e, "gh", "c1").await.unwrap(), None);
     assert_eq!(s.get_connection(&e, "gh", "c1").await.unwrap(), None);
-    let q = RecordQuery { model: "m".to_owned(), limit: 10, ..RecordQuery::default() };
+    let q = RecordQuery {
+        model: "m".to_owned(),
+        limit: 10,
+        ..RecordQuery::default()
+    };
     assert!(s.list_records(row.id, &q).await.unwrap().is_empty());
     assert_eq!(s.get_sync_state(row.id, "s").await.unwrap(), None);
 }
@@ -241,13 +314,25 @@ pub async fn connection_delete_cascades(s: Arc<dyn Store>) {
 pub async fn integration_delete_cascades(s: Arc<dyn Store>) {
     let e = env();
     s.insert_integration(integration(&e, "gh")).await.unwrap();
-    let row = s.upsert_connection(connection(&e, "gh", "c1")).await.unwrap().row;
-    s.upsert_records(row.id, "m", vec![write(row.id, "1", "h")], t(1)).await.unwrap();
-    s.upsert_connection(connection(&e, "other", "c1")).await.unwrap();
+    let row = s
+        .upsert_connection(connection(&e, "gh", "c1"))
+        .await
+        .unwrap()
+        .row;
+    s.upsert_records(row.id, "m", vec![write(row.id, "1", "h")], t(1))
+        .await
+        .unwrap();
+    s.upsert_connection(connection(&e, "other", "c1"))
+        .await
+        .unwrap();
     assert!(s.delete_integration(&e, "gh").await.unwrap());
     assert_eq!(s.get_connection(&e, "gh", "c1").await.unwrap(), None);
     assert!(s.get_connection(&e, "other", "c1").await.unwrap().is_some());
-    let q = RecordQuery { model: "m".to_owned(), limit: 10, ..RecordQuery::default() };
+    let q = RecordQuery {
+        model: "m".to_owned(),
+        limit: 10,
+        ..RecordQuery::default()
+    };
     assert!(s.list_records(row.id, &q).await.unwrap().is_empty());
 }
 
@@ -278,7 +363,10 @@ pub async fn expiring_connections(s: Arc<dyn Store>) {
         .map(|r| r.connection_id)
         .collect();
     assert_eq!(got, vec!["sooner", "soon"]);
-    let limited = s.connections_expiring_before(base + Duration::seconds(60), 1).await.unwrap();
+    let limited = s
+        .connections_expiring_before(base + Duration::seconds(60), 1)
+        .await
+        .unwrap();
     assert_eq!(limited.len(), 1);
 }
 
@@ -328,10 +416,19 @@ pub async fn connect_sessions(s: Arc<dyn Store>) {
     let hash = format!("h-{}", Uuid::new_v4());
     let row = connect_session(&e, &hash, t(1_800));
     s.insert_connect_session(row.clone()).await.unwrap();
-    assert_eq!(s.get_connect_session(&hash).await.unwrap(), Some(row.clone()));
+    assert_eq!(
+        s.get_connect_session(&hash).await.unwrap(),
+        Some(row.clone())
+    );
     assert_eq!(s.get_connect_session("nope").await.unwrap(), None);
-    assert_eq!(s.get_connect_session_by_id(row.id).await.unwrap(), Some(row.clone()));
-    assert_eq!(s.get_connect_session_by_id(Uuid::new_v4()).await.unwrap(), None);
+    assert_eq!(
+        s.get_connect_session_by_id(row.id).await.unwrap(),
+        Some(row.clone())
+    );
+    assert_eq!(
+        s.get_connect_session_by_id(Uuid::new_v4()).await.unwrap(),
+        None
+    );
     assert!(s.delete_connect_session(row.id).await.unwrap());
     assert!(!s.delete_connect_session(row.id).await.unwrap());
     assert_eq!(s.get_connect_session(&hash).await.unwrap(), None);
@@ -367,10 +464,18 @@ pub async fn purge_expired(s: Arc<dyn Store>) {
     let new_c = format!("nc-{}", Uuid::new_v4());
     let old_o = format!("oo-{}", Uuid::new_v4());
     let new_o = format!("no-{}", Uuid::new_v4());
-    s.insert_connect_session(connect_session(&e, &old_c, t(10))).await.unwrap();
-    s.insert_connect_session(connect_session(&e, &new_c, t(1_000_000))).await.unwrap();
-    s.insert_oauth_session(oauth_session(&e, &old_o, t(10))).await.unwrap();
-    s.insert_oauth_session(oauth_session(&e, &new_o, t(1_000_000))).await.unwrap();
+    s.insert_connect_session(connect_session(&e, &old_c, t(10)))
+        .await
+        .unwrap();
+    s.insert_connect_session(connect_session(&e, &new_c, t(1_000_000)))
+        .await
+        .unwrap();
+    s.insert_oauth_session(oauth_session(&e, &old_o, t(10)))
+        .await
+        .unwrap();
+    s.insert_oauth_session(oauth_session(&e, &new_o, t(1_000_000)))
+        .await
+        .unwrap();
     let n = s.purge_expired(t(500)).await.unwrap();
     assert!(n >= 2, "{n}");
     assert_eq!(s.get_connect_session(&old_c).await.unwrap(), None);
@@ -381,18 +486,62 @@ pub async fn purge_expired(s: Arc<dyn Store>) {
 
 pub async fn record_upsert_classes(s: Arc<dyn Store>) {
     let conn = Uuid::new_v4();
-    let got = s.upsert_records(conn, "m", vec![write(conn, "1", "a"), write(conn, "2", "b")], t(1)).await.unwrap();
-    assert_eq!(got, vec![("1".to_owned(), Change::Added), ("2".to_owned(), Change::Added)]);
-    let got = s.upsert_records(conn, "m", vec![write(conn, "1", "a"), write(conn, "2", "c"), write(conn, "3", "d")], t(2)).await.unwrap();
+    let got = s
+        .upsert_records(
+            conn,
+            "m",
+            vec![write(conn, "1", "a"), write(conn, "2", "b")],
+            t(1),
+        )
+        .await
+        .unwrap();
     assert_eq!(
         got,
-        vec![("1".to_owned(), Change::Unchanged), ("2".to_owned(), Change::Updated), ("3".to_owned(), Change::Added)]
+        vec![
+            ("1".to_owned(), Change::Added),
+            ("2".to_owned(), Change::Added)
+        ]
     );
-    s.delete_records(conn, "m", vec![(crate::records::record_id(conn, "m", "1"), "1".to_owned())], t(3)).await.unwrap();
+    let got = s
+        .upsert_records(
+            conn,
+            "m",
+            vec![
+                write(conn, "1", "a"),
+                write(conn, "2", "c"),
+                write(conn, "3", "d"),
+            ],
+            t(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        got,
+        vec![
+            ("1".to_owned(), Change::Unchanged),
+            ("2".to_owned(), Change::Updated),
+            ("3".to_owned(), Change::Added)
+        ]
+    );
+    s.delete_records(
+        conn,
+        "m",
+        vec![(crate::records::record_id(conn, "m", "1"), "1".to_owned())],
+        t(3),
+    )
+    .await
+    .unwrap();
     // A record that comes back after a delete is added again.
-    let got = s.upsert_records(conn, "m", vec![write(conn, "1", "a")], t(4)).await.unwrap();
+    let got = s
+        .upsert_records(conn, "m", vec![write(conn, "1", "a")], t(4))
+        .await
+        .unwrap();
     assert_eq!(got, vec![("1".to_owned(), Change::Added)]);
-    let q = RecordQuery { model: "m".to_owned(), limit: 100, ..RecordQuery::default() };
+    let q = RecordQuery {
+        model: "m".to_owned(),
+        limit: 100,
+        ..RecordQuery::default()
+    };
     let rows = s.list_records(conn, &q).await.unwrap();
     let one = rows.iter().find(|r| r.external_id == "1").unwrap();
     assert_eq!(one.deleted_at, None);
@@ -403,20 +552,46 @@ pub async fn record_upsert_classes(s: Arc<dyn Store>) {
     assert_eq!(two.updated_at, t(2));
     assert_eq!(two.data, "sm1.k.2.c");
     // Another model with the same external id is a different record.
-    let got = s.upsert_records(conn, "other", vec![write(conn, "1", "a")], t(5)).await.unwrap();
+    let got = s
+        .upsert_records(conn, "other", vec![write(conn, "1", "a")], t(5))
+        .await
+        .unwrap();
     assert_eq!(got, vec![("1".to_owned(), Change::Added)]);
 }
 
 pub async fn record_deletes(s: Arc<dyn Store>) {
     let conn = Uuid::new_v4();
-    s.upsert_records(conn, "m", vec![write(conn, "1", "a")], t(1)).await.unwrap();
+    s.upsert_records(conn, "m", vec![write(conn, "1", "a")], t(1))
+        .await
+        .unwrap();
     let id1 = crate::records::record_id(conn, "m", "1");
     let id9 = crate::records::record_id(conn, "m", "9");
-    let got = s.delete_records(conn, "m", vec![(id1, "1".to_owned()), (id9, "9".to_owned())], t(2)).await.unwrap();
-    assert_eq!(got, vec![("1".to_owned(), Change::Deleted), ("9".to_owned(), Change::Ignored)]);
-    let got = s.delete_records(conn, "m", vec![(id1, "1".to_owned())], t(3)).await.unwrap();
+    let got = s
+        .delete_records(
+            conn,
+            "m",
+            vec![(id1, "1".to_owned()), (id9, "9".to_owned())],
+            t(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        got,
+        vec![
+            ("1".to_owned(), Change::Deleted),
+            ("9".to_owned(), Change::Ignored)
+        ]
+    );
+    let got = s
+        .delete_records(conn, "m", vec![(id1, "1".to_owned())], t(3))
+        .await
+        .unwrap();
     assert_eq!(got, vec![("1".to_owned(), Change::Ignored)]);
-    let q = RecordQuery { model: "m".to_owned(), limit: 10, ..RecordQuery::default() };
+    let q = RecordQuery {
+        model: "m".to_owned(),
+        limit: 10,
+        ..RecordQuery::default()
+    };
     let rows = s.list_records(conn, &q).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].deleted_at, Some(t(2)));
@@ -426,13 +601,33 @@ pub async fn record_deletes(s: Arc<dyn Store>) {
 pub async fn record_listing(s: Arc<dyn Store>) {
     let conn = Uuid::new_v4();
     for (i, ext) in ["a", "b", "c", "d", "e"].iter().enumerate() {
-        s.upsert_records(conn, "m", vec![write(conn, ext, "h")], t(i64::try_from(i).unwrap() / 2)).await.unwrap();
+        s.upsert_records(
+            conn,
+            "m",
+            vec![write(conn, ext, "h")],
+            t(i64::try_from(i).unwrap() / 2),
+        )
+        .await
+        .unwrap();
     }
     // a, b at t(0); c, d at t(1); e at t(2). Then b changes at t(3), d is deleted at t(4).
-    s.upsert_records(conn, "m", vec![write(conn, "b", "h2")], t(3)).await.unwrap();
-    s.delete_records(conn, "m", vec![(crate::records::record_id(conn, "m", "d"), "d".to_owned())], t(4)).await.unwrap();
+    s.upsert_records(conn, "m", vec![write(conn, "b", "h2")], t(3))
+        .await
+        .unwrap();
+    s.delete_records(
+        conn,
+        "m",
+        vec![(crate::records::record_id(conn, "m", "d"), "d".to_owned())],
+        t(4),
+    )
+    .await
+    .unwrap();
 
-    let base = RecordQuery { model: "m".to_owned(), limit: 100, ..RecordQuery::default() };
+    let base = RecordQuery {
+        model: "m".to_owned(),
+        limit: 100,
+        ..RecordQuery::default()
+    };
     let all = s.list_records(conn, &base).await.unwrap();
     assert_eq!(all.len(), 5);
     for w in all.windows(2) {
@@ -442,27 +637,126 @@ pub async fn record_listing(s: Arc<dyn Store>) {
     assert_eq!(all[4].external_id, "d");
 
     // `limit + 1` rows at most.
-    let page = s.list_records(conn, &RecordQuery { limit: 2, ..base.clone() }).await.unwrap();
+    let page = s
+        .list_records(
+            conn,
+            &RecordQuery {
+                limit: 2,
+                ..base.clone()
+            },
+        )
+        .await
+        .unwrap();
     assert_eq!(page.len(), 3);
     // The cursor gives the rows after it, with a strict compare.
-    let cursor = Cursor { updated_at_us: page[1].updated_at.timestamp_micros(), id: page[1].id };
-    let rest = s.list_records(conn, &RecordQuery { cursor: Some(cursor), ..base.clone() }).await.unwrap();
+    let cursor = Cursor {
+        updated_at_us: page[1].updated_at.timestamp_micros(),
+        id: page[1].id,
+    };
+    let rest = s
+        .list_records(
+            conn,
+            &RecordQuery {
+                cursor: Some(cursor),
+                ..base.clone()
+            },
+        )
+        .await
+        .unwrap();
     assert_eq!(rest.len(), 3);
     assert_eq!(rest[0].id, page[2].id);
 
-    let modified = s.list_records(conn, &RecordQuery { modified_after_us: Some(t(2).timestamp_micros()), ..base.clone() }).await.unwrap();
+    let modified = s
+        .list_records(
+            conn,
+            &RecordQuery {
+                modified_after_us: Some(t(2).timestamp_micros()),
+                ..base.clone()
+            },
+        )
+        .await
+        .unwrap();
     let ext: Vec<&str> = modified.iter().map(|r| r.external_id.as_str()).collect();
     assert_eq!(ext, vec!["e", "b", "d"]);
 
-    let deleted = s.list_records(conn, &RecordQuery { filter: vec![LastAction::Deleted], ..base.clone() }).await.unwrap();
-    assert_eq!(deleted.iter().map(|r| r.external_id.as_str()).collect::<Vec<_>>(), vec!["d"]);
-    let updated = s.list_records(conn, &RecordQuery { filter: vec![LastAction::Updated], ..base.clone() }).await.unwrap();
-    assert_eq!(updated.iter().map(|r| r.external_id.as_str()).collect::<Vec<_>>(), vec!["b"]);
-    let added = s.list_records(conn, &RecordQuery { filter: vec![LastAction::Added], ..base.clone() }).await.unwrap();
-    assert_eq!(added.iter().map(|r| r.external_id.as_str()).collect::<Vec<_>>(), vec!["a", "c", "e"]);
-    let by_id = s.list_records(conn, &RecordQuery { external_ids: vec!["c".to_owned(), "zz".to_owned()], ..base.clone() }).await.unwrap();
-    assert_eq!(by_id.iter().map(|r| r.external_id.as_str()).collect::<Vec<_>>(), vec!["c"]);
-    let other_model = s.list_records(conn, &RecordQuery { model: "x".to_owned(), ..base }).await.unwrap();
+    let deleted = s
+        .list_records(
+            conn,
+            &RecordQuery {
+                filter: vec![LastAction::Deleted],
+                ..base.clone()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        deleted
+            .iter()
+            .map(|r| r.external_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["d"]
+    );
+    let updated = s
+        .list_records(
+            conn,
+            &RecordQuery {
+                filter: vec![LastAction::Updated],
+                ..base.clone()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        updated
+            .iter()
+            .map(|r| r.external_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b"]
+    );
+    let added = s
+        .list_records(
+            conn,
+            &RecordQuery {
+                filter: vec![LastAction::Added],
+                ..base.clone()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        added
+            .iter()
+            .map(|r| r.external_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a", "c", "e"]
+    );
+    let by_id = s
+        .list_records(
+            conn,
+            &RecordQuery {
+                external_ids: vec!["c".to_owned(), "zz".to_owned()],
+                ..base.clone()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        by_id
+            .iter()
+            .map(|r| r.external_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["c"]
+    );
+    let other_model = s
+        .list_records(
+            conn,
+            &RecordQuery {
+                model: "x".to_owned(),
+                ..base
+            },
+        )
+        .await
+        .unwrap();
     assert!(other_model.is_empty());
 }
 
@@ -477,7 +771,13 @@ pub async fn sync_states(s: Arc<dyn Store>) {
     changed.paused = true;
     s.put_sync_state(changed.clone()).await.unwrap();
     assert_eq!(s.get_sync_state(conn, "b").await.unwrap(), Some(changed));
-    let names: Vec<String> = s.list_sync_states(conn).await.unwrap().into_iter().map(|r| r.sync_name).collect();
+    let names: Vec<String> = s
+        .list_sync_states(conn)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.sync_name)
+        .collect();
     assert_eq!(names, vec!["a", "b"]);
 }
 
@@ -485,9 +785,17 @@ pub async fn environments_are_isolated(s: Arc<dyn Store>) {
     let (e1, e2) = (env(), env());
     s.insert_integration(integration(&e1, "gh")).await.unwrap();
     s.insert_integration(integration(&e2, "gh")).await.unwrap();
-    s.upsert_connection(connection(&e1, "gh", "c1")).await.unwrap();
+    s.upsert_connection(connection(&e1, "gh", "c1"))
+        .await
+        .unwrap();
     assert!(s.get_connection(&e2, "gh", "c1").await.unwrap().is_none());
-    assert_eq!(s.list_connections(&e2, &ConnectionFilter::default()).await.unwrap().len(), 0);
+    assert_eq!(
+        s.list_connections(&e2, &ConnectionFilter::default())
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
     assert!(s.delete_integration(&e2, "gh").await.unwrap());
     assert!(s.get_connection(&e1, "gh", "c1").await.unwrap().is_some());
     assert_eq!(s.list_integrations(&e1).await.unwrap().len(), 1);

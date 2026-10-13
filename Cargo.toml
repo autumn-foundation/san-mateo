@@ -51,3 +51,6 @@ expect_used = "warn"
 redundant_pub_crate = "allow"
 # Names such as `san_mateo::store::Store` are clear in this crate.
 module_name_repetitions = "allow"
+# The same allows as the autumn workspace. A trait impl can need no `.await`.
+unused_async_trait_impl = "allow"
+assert_is_empty = "allow"

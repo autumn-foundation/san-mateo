@@ -278,14 +278,16 @@ impl WebhookSender {
         if !event.wanted(settings) {
             return Vec::new();
         }
-        let urls: Vec<&str> = match url_override {
-            Some(u) => vec![u],
-            None => [&settings.primary_url, &settings.secondary_url]
-                .into_iter()
-                .filter_map(|u| u.as_deref())
-                .filter(|u| !u.is_empty())
-                .collect(),
-        };
+        let urls: Vec<&str> = url_override.map_or_else(
+            || {
+                [&settings.primary_url, &settings.secondary_url]
+                    .into_iter()
+                    .filter_map(|u| u.as_deref())
+                    .filter(|u| !u.is_empty())
+                    .collect()
+            },
+            |u| vec![u],
+        );
         let body = event.body();
         let mut request = HttpRequest::new("POST", "")
             .header("content-type", "application/json")
@@ -293,7 +295,9 @@ impl WebhookSender {
             .body(body.clone());
         if let Some(secret) = settings.signing_secret.as_ref().filter(|s| !s.is_empty()) {
             let sig = sign(secret.expose(), &body);
-            request = request.header(SIGNATURE_HEADER, sig.clone()).header(NANGO_SIGNATURE_HEADER, sig);
+            request = request
+                .header(SIGNATURE_HEADER, sig.clone())
+                .header(NANGO_SIGNATURE_HEADER, sig);
         }
         let sends = urls.into_iter().map(|url| {
             let mut req = request.clone();
@@ -316,7 +320,12 @@ impl WebhookSender {
                 if !ok {
                     tracing::warn!(url = %crate::transport::redact_query(&request.url), ?status, attempts, "webhook delivery failed");
                 }
-                return Delivery { url: request.url, status, attempts, ok };
+                return Delivery {
+                    url: request.url,
+                    status,
+                    attempts,
+                    ok,
+                };
             }
             let wait = crate::policy::backoff_ms(settings.initial_backoff_ms, attempts, 60_000);
             tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
@@ -344,7 +353,10 @@ mod tests {
             end_user: Some(EndUser {
                 id: "u1".into(),
                 email: Some("u@example.com".into()),
-                organization: Some(crate::model::Organization { id: "o1".into(), display_name: None }),
+                organization: Some(crate::model::Organization {
+                    id: "o1".into(),
+                    display_name: None,
+                }),
                 ..EndUser::default()
             }),
         })
@@ -369,7 +381,10 @@ mod tests {
             })
         );
         let body = String::from_utf8(auth().body()).unwrap();
-        assert!(body.starts_with(r#"{"authMode":"OAUTH2","connectionId":"c1","#), "{body}");
+        assert!(
+            body.starts_with(r#"{"authMode":"OAUTH2","connectionId":"c1","#),
+            "{body}"
+        );
     }
 
     #[test]
@@ -381,8 +396,15 @@ mod tests {
             models: vec!["Issue".into()],
             success: false,
             modified_after: chrono::TimeZone::timestamp_opt(&Utc, 1_700_000_000, 0).unwrap(),
-            counts: SyncCounts { added: 1, updated: 2, deleted: 3 },
-            error: Some(ErrorPayload { kind: "function_failed".into(), description: "boom".into() }),
+            counts: SyncCounts {
+                added: 1,
+                updated: 2,
+                deleted: 3,
+            },
+            error: Some(ErrorPayload {
+                kind: "function_failed".into(),
+                description: "boom".into(),
+            }),
         });
         assert_eq!(
             e.to_json(),
@@ -432,8 +454,16 @@ mod tests {
     #[tokio::test]
     async fn delivers_signed_to_both_urls() {
         let t = MemoryTransport::new();
-        t.reply("POST", "https://hooks.example.com/a", HttpResponse::new(200, ""));
-        t.reply("POST", "https://hooks.example.com/b", HttpResponse::new(204, ""));
+        t.reply(
+            "POST",
+            "https://hooks.example.com/a",
+            HttpResponse::new(200, ""),
+        );
+        t.reply(
+            "POST",
+            "https://hooks.example.com/b",
+            HttpResponse::new(204, ""),
+        );
         let s = WebhookSender::new(Arc::new(t.clone()));
         let d = s.deliver(&settings(), None, &auth()).await;
         assert_eq!(d.len(), 2);
@@ -443,17 +473,29 @@ mod tests {
         for r in &reqs {
             assert_eq!(r.body, body);
             assert_eq!(r.header_value("content-type"), Some("application/json"));
-            assert_eq!(r.header_value(SIGNATURE_HEADER), Some(sign("whsec", &body).as_str()));
-            assert_eq!(r.header_value(NANGO_SIGNATURE_HEADER), Some(sign("whsec", &body).as_str()));
+            assert_eq!(
+                r.header_value(SIGNATURE_HEADER),
+                Some(sign("whsec", &body).as_str())
+            );
+            assert_eq!(
+                r.header_value(NANGO_SIGNATURE_HEADER),
+                Some(sign("whsec", &body).as_str())
+            );
         }
     }
 
     #[tokio::test]
     async fn override_replaces_both_urls() {
         let t = MemoryTransport::new();
-        t.reply("POST", "https://override.example.com/x", HttpResponse::new(200, ""));
+        t.reply(
+            "POST",
+            "https://override.example.com/x",
+            HttpResponse::new(200, ""),
+        );
         let s = WebhookSender::new(Arc::new(t.clone()));
-        let d = s.deliver(&settings(), Some("https://override.example.com/x"), &auth()).await;
+        let d = s
+            .deliver(&settings(), Some("https://override.example.com/x"), &auth())
+            .await;
         assert_eq!(d.len(), 1);
         assert_eq!(t.requests().len(), 1);
     }
@@ -461,18 +503,53 @@ mod tests {
     #[tokio::test]
     async fn retries_5xx_and_network_errors_but_not_4xx() {
         let t = MemoryTransport::new();
-        t.reply("POST", "https://hooks.example.com/a", HttpResponse::new(503, ""));
-        t.reply("POST", "https://hooks.example.com/a", HttpResponse::new(200, ""));
-        t.fail("POST", "https://hooks.example.com/b", TransportError::Timeout);
+        t.reply(
+            "POST",
+            "https://hooks.example.com/a",
+            HttpResponse::new(503, ""),
+        );
+        t.reply(
+            "POST",
+            "https://hooks.example.com/a",
+            HttpResponse::new(200, ""),
+        );
+        t.fail(
+            "POST",
+            "https://hooks.example.com/b",
+            TransportError::Timeout,
+        );
         let s = WebhookSender::new(Arc::new(t.clone()));
         let d = s.deliver(&settings(), None, &auth()).await;
-        assert_eq!(d[0], Delivery { url: "https://hooks.example.com/a".into(), status: Some(200), attempts: 2, ok: true });
-        assert_eq!(d[1], Delivery { url: "https://hooks.example.com/b".into(), status: None, attempts: 3, ok: false });
+        assert_eq!(
+            d[0],
+            Delivery {
+                url: "https://hooks.example.com/a".into(),
+                status: Some(200),
+                attempts: 2,
+                ok: true
+            }
+        );
+        assert_eq!(
+            d[1],
+            Delivery {
+                url: "https://hooks.example.com/b".into(),
+                status: None,
+                attempts: 3,
+                ok: false
+            }
+        );
 
         let t = MemoryTransport::new();
-        t.reply("POST", "https://hooks.example.com/a", HttpResponse::new(410, ""));
+        t.reply(
+            "POST",
+            "https://hooks.example.com/a",
+            HttpResponse::new(410, ""),
+        );
         let s = WebhookSender::new(Arc::new(t.clone()));
-        let one = WebhookSettings { secondary_url: None, ..settings() };
+        let one = WebhookSettings {
+            secondary_url: None,
+            ..settings()
+        };
         let d = s.deliver(&one, None, &auth()).await;
         assert_eq!(d[0].attempts, 1);
         assert!(!d[0].ok);
@@ -482,11 +559,26 @@ mod tests {
     async fn no_urls_or_turned_off_sends_nothing() {
         let t = MemoryTransport::new();
         let s = WebhookSender::new(Arc::new(t.clone()));
-        assert!(s.deliver(&WebhookSettings::default(), None, &auth()).await.is_empty());
-        let off = WebhookSettings { send_auth: false, ..settings() };
+        assert!(
+            s.deliver(&WebhookSettings::default(), None, &auth())
+                .await
+                .is_empty()
+        );
+        let off = WebhookSettings {
+            send_auth: false,
+            ..settings()
+        };
         assert!(s.deliver(&off, None, &auth()).await.is_empty());
-        let unsigned = WebhookSettings { signing_secret: None, secondary_url: None, ..settings() };
-        t.reply("POST", "https://hooks.example.com/a", HttpResponse::new(200, ""));
+        let unsigned = WebhookSettings {
+            signing_secret: None,
+            secondary_url: None,
+            ..settings()
+        };
+        t.reply(
+            "POST",
+            "https://hooks.example.com/a",
+            HttpResponse::new(200, ""),
+        );
         s.deliver(&unsigned, None, &auth()).await;
         assert_eq!(t.requests()[0].header_value(SIGNATURE_HEADER), None);
     }

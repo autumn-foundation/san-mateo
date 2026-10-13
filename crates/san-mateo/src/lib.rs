@@ -52,11 +52,10 @@ pub use provider::{AuthMode, Catalog, Provider};
 pub use proxy::{ProxyRequest, ProxyResponse, ProxySettings};
 pub use secret::Secret;
 pub use service::{
-    Background, BackgroundSettings, Config, ConnectOptions, ConnectSession,
-    ConnectSessionCreated, ConnectSessionInput, Connection, ConnectionPatch, ConnectionSummary,
-    EnvironmentConfig, GetOptions, ImportConnection, Integration, IntegrationPatch,
-    NewIntegration, RecordPage, RecordsRequest, RefreshReport, SanMateo, SanMateoBuilder,
-    SyncRunReport, SyncStatusEntry,
+    Background, BackgroundSettings, Config, ConnectOptions, ConnectSession, ConnectSessionCreated,
+    ConnectSessionInput, Connection, ConnectionPatch, ConnectionSummary, EnvironmentConfig,
+    GetOptions, ImportConnection, Integration, IntegrationPatch, NewIntegration, RecordPage,
+    RecordsRequest, RefreshReport, SanMateo, SanMateoBuilder, SyncRunReport, SyncStatusEntry,
 };
 pub use store::{MemoryStore, Store};
 pub use transport::{HttpTransport, MemoryTransport, ReqwestTransport};

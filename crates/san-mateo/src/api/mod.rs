@@ -24,9 +24,10 @@ use crate::model::{ConnectionKey, EndUser, IntegrationDefaults, Organization, Ta
 use crate::proxy::ProxyRequest;
 use crate::secret::Secret;
 use crate::service::{
-    CONNECT_TOKEN_PREFIX, ConnectOptions, ConnectSession, ConnectSessionCreated, ConnectSessionInput,
-    Connection, ConnectionPatch, ConnectionSummary, GetOptions, ImportConnection, Integration,
-    IntegrationPatch, NewIntegration, RecordsRequest, SanMateo, SyncStatusEntry,
+    CONNECT_TOKEN_PREFIX, ConnectOptions, ConnectSession, ConnectSessionCreated,
+    ConnectSessionInput, Connection, ConnectionPatch, ConnectionSummary, GetOptions,
+    ImportConnection, Integration, IntegrationPatch, NewIntegration, RecordsRequest, SanMateo,
+    SyncStatusEntry,
 };
 use crate::store::ConnectionFilter;
 
@@ -44,7 +45,11 @@ pub struct RouteSpec {
 }
 
 const fn r(method: &'static str, path: &'static str, secret_key: bool) -> RouteSpec {
-    RouteSpec { method, path, secret_key }
+    RouteSpec {
+        method,
+        path,
+        secret_key,
+    }
 }
 
 /// All routes of the API.
@@ -88,19 +93,26 @@ pub const ROUTES: &[RouteSpec] = &[
 ];
 
 /// Returns the API router.
-#[must_use]
 pub fn router(san: SanMateo) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/providers", get(list_providers))
         .route("/providers/{name}", get(get_provider))
-        .route("/integrations", get(list_integrations).post(create_integration))
+        .route(
+            "/integrations",
+            get(list_integrations).post(create_integration),
+        )
         .route(
             "/integrations/{key}",
-            get(get_integration).patch(update_integration).delete(delete_integration),
+            get(get_integration)
+                .patch(update_integration)
+                .delete(delete_integration),
         )
         .route("/connect/sessions", post(create_session))
-        .route("/connect/sessions/reconnect", post(create_reconnect_session))
+        .route(
+            "/connect/sessions/reconnect",
+            post(create_reconnect_session),
+        )
         .route("/connect/session", get(get_session).delete(delete_session))
         .route("/connect", get(html::connect_page))
         .route("/oauth/connect/{key}", get(oauth_connect))
@@ -109,14 +121,25 @@ pub fn router(san: SanMateo) -> Router {
         .route("/api-auth/api-key/{key}", post(connect_api_key))
         .route("/api-auth/basic/{key}", post(connect_basic))
         .route("/auth/unauthenticated/{key}", post(connect_unauthenticated))
-        .route("/connections", get(list_connections).post(import_connection))
-        .route("/connections/metadata", post(set_metadata).patch(update_metadata))
+        .route(
+            "/connections",
+            get(list_connections).post(import_connection),
+        )
+        .route(
+            "/connections/metadata",
+            post(set_metadata).patch(update_metadata),
+        )
         .route(
             "/connections/{id}",
-            get(get_connection).patch(patch_connection).delete(delete_connection),
+            get(get_connection)
+                .patch(patch_connection)
+                .delete(delete_connection),
         )
         .route("/connection", get(list_connections))
-        .route("/connection/{id}", get(get_connection).delete(delete_connection))
+        .route(
+            "/connection/{id}",
+            get(get_connection).delete(delete_connection),
+        )
         .route("/proxy/{*path}", any(proxy))
         .route("/records", get(list_records))
         .route("/sync/trigger", post(trigger_syncs))
@@ -140,7 +163,8 @@ impl From<Error> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let status = StatusCode::from_u16(self.0.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let status =
+            StatusCode::from_u16(self.0.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         if status.is_server_error() {
             tracing::error!(code = self.0.code(), "request failed");
         }
@@ -149,7 +173,11 @@ impl IntoResponse for ApiError {
             Error::Store(_) | Error::Internal(_) => "an internal error occurred".to_owned(),
             other => other.to_string(),
         };
-        (status, axum::Json(json!({"error": {"code": self.0.code(), "message": message}}))).into_response()
+        (
+            status,
+            axum::Json(json!({"error": {"code": self.0.code(), "message": message}})),
+        )
+            .into_response()
     }
 }
 
@@ -164,7 +192,8 @@ fn body_json<T: serde::de::DeserializeOwned>(bytes: &Bytes) -> ApiResult<T> {
     let v: Value = if bytes.is_empty() {
         Value::Null
     } else {
-        serde_json::from_slice(bytes).map_err(|e| invalid(format!("the body is not valid JSON: {e}")))?
+        serde_json::from_slice(bytes)
+            .map_err(|e| invalid(format!("the body is not valid JSON: {e}")))?
     };
     serde_json::from_value(v).map_err(|e| invalid(format!("the body is not valid: {e}")))
 }
@@ -184,19 +213,27 @@ impl FromRequestParts<SanMateo> for Env {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, san: &SanMateo) -> ApiResult<Self> {
-        let key = bearer(parts).ok_or_else(|| ApiError(Error::Unauthorized("a secret key is required".to_owned())))?;
+        let key = bearer(parts)
+            .ok_or_else(|| ApiError(Error::Unauthorized("a secret key is required".to_owned())))?;
         Ok(Self(san.authenticate(key)?.id.clone()))
     }
 }
 
 /// Query pairs in order.
 fn query_pairs(raw: Option<&str>) -> Vec<(String, String)> {
-    raw.map(|q| url::form_urlencoded::parse(q.as_bytes()).into_owned().collect())
-        .unwrap_or_default()
+    raw.map(|q| {
+        url::form_urlencoded::parse(q.as_bytes())
+            .into_owned()
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 fn query_get<'a>(pairs: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    pairs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    pairs
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.as_str())
 }
 
 /// The connect session token, from the query or the `Authorization` header.
@@ -210,19 +247,28 @@ impl FromRequestParts<SanMateo> for SessionToken {
         let token = query_get(&pairs, "connect_session_token")
             .or_else(|| query_get(&pairs, "session_token"))
             .map(str::to_owned)
-            .or_else(|| bearer(parts).filter(|t| t.starts_with(CONNECT_TOKEN_PREFIX)).map(str::to_owned))
+            .or_else(|| {
+                bearer(parts)
+                    .filter(|t| t.starts_with(CONNECT_TOKEN_PREFIX))
+                    .map(str::to_owned)
+            })
             .ok_or(ApiError(Error::InvalidConnectSession))?;
         Ok(Self(token))
     }
 }
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers.get(name).and_then(|v| v.to_str().ok()).map(str::trim).filter(|v| !v.is_empty())
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
 }
 
 /// The connection of a request, from `Connection-Id` and `Provider-Config-Key`.
 fn connection_from_headers(headers: &HeaderMap) -> ApiResult<ConnectionKey> {
-    let id = header_str(headers, "connection-id").ok_or_else(|| ApiError(Error::MissingField("Connection-Id".to_owned())))?;
+    let id = header_str(headers, "connection-id")
+        .ok_or_else(|| ApiError(Error::MissingField("Connection-Id".to_owned())))?;
     let key = header_str(headers, "provider-config-key")
         .ok_or_else(|| ApiError(Error::MissingField("Provider-Config-Key".to_owned())))?;
     Ok(ConnectionKey::new(key, id))
@@ -347,7 +393,11 @@ async fn list_providers(_env: Env, State(san): State<SanMateo>) -> axum::Json<Va
     axum::Json(json!({ "data": list }))
 }
 
-async fn get_provider(_env: Env, State(san): State<SanMateo>, Path(name): Path<String>) -> ApiResult<axum::Json<Value>> {
+async fn get_provider(
+    _env: Env,
+    State(san): State<SanMateo>,
+    Path(name): Path<String>,
+) -> ApiResult<axum::Json<Value>> {
     let p = san.catalog().require(&name)?;
     Ok(axum::Json(json!({ "data": &*p })))
 }
@@ -365,7 +415,11 @@ struct IntegrationCredentials {
 }
 
 fn split_scopes(s: &str) -> Vec<String> {
-    s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect()
+    s.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -381,10 +435,15 @@ struct CreateIntegrationBody {
 }
 
 fn mode_of(san: &SanMateo, provider: &str) -> Option<String> {
-    san.catalog().get(provider).map(|p| p.auth_mode.as_str().to_owned())
+    san.catalog()
+        .get(provider)
+        .map(|p| p.auth_mode.as_str().to_owned())
 }
 
-async fn list_integrations(Env(env): Env, State(san): State<SanMateo>) -> ApiResult<axum::Json<Value>> {
+async fn list_integrations(
+    Env(env): Env,
+    State(san): State<SanMateo>,
+) -> ApiResult<axum::Json<Value>> {
     let list: Vec<Value> = san
         .list_integrations(&env)
         .await?
@@ -394,9 +453,18 @@ async fn list_integrations(Env(env): Env, State(san): State<SanMateo>) -> ApiRes
     Ok(axum::Json(json!({ "data": list })))
 }
 
-async fn create_integration(Env(env): Env, State(san): State<SanMateo>, body: Bytes) -> ApiResult<axum::Json<Value>> {
+async fn create_integration(
+    Env(env): Env,
+    State(san): State<SanMateo>,
+    body: Bytes,
+) -> ApiResult<axum::Json<Value>> {
     let b: CreateIntegrationBody = body_json(&body)?;
-    let creds = b.credentials.unwrap_or(IntegrationCredentials { _kind: None, client_id: None, client_secret: None, scopes: None });
+    let creds = b.credentials.unwrap_or(IntegrationCredentials {
+        _kind: None,
+        client_id: None,
+        client_secret: None,
+        scopes: None,
+    });
     let i = san
         .create_integration(
             &env,
@@ -406,12 +474,18 @@ async fn create_integration(Env(env): Env, State(san): State<SanMateo>, body: By
                 display_name: b.display_name,
                 client_id: creds.client_id,
                 client_secret: creds.client_secret,
-                scopes: creds.scopes.as_deref().map(split_scopes).unwrap_or_default(),
+                scopes: creds
+                    .scopes
+                    .as_deref()
+                    .map(split_scopes)
+                    .unwrap_or_default(),
                 custom: b.custom,
             },
         )
         .await?;
-    Ok(axum::Json(json!({ "data": integration_json(&i, None, false) })))
+    Ok(axum::Json(
+        json!({ "data": integration_json(&i, None, false) }),
+    ))
 }
 
 async fn get_integration(
@@ -422,8 +496,12 @@ async fn get_integration(
 ) -> ApiResult<axum::Json<Value>> {
     let i = san.get_integration(&env, &key).await?;
     let pairs = query_pairs(q.as_deref());
-    let include = pairs.iter().any(|(k, v)| k.starts_with("include") && v.split(',').any(|x| x == "credentials"));
-    Ok(axum::Json(json!({ "data": integration_json(&i, mode_of(&san, &i.provider).as_deref(), include) })))
+    let include = pairs
+        .iter()
+        .any(|(k, v)| k.starts_with("include") && v.split(',').any(|x| x == "credentials"));
+    Ok(axum::Json(
+        json!({ "data": integration_json(&i, mode_of(&san, &i.provider).as_deref(), include) }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -444,16 +522,36 @@ async fn update_integration(
 ) -> ApiResult<axum::Json<Value>> {
     let b: UpdateIntegrationBody = body_json(&body)?;
     let (client_id, client_secret, scopes) = match b.credentials {
-        Some(c) => (c.client_id, c.client_secret, c.scopes.as_deref().map(split_scopes)),
+        Some(c) => (
+            c.client_id,
+            c.client_secret,
+            c.scopes.as_deref().map(split_scopes),
+        ),
         None => (None, None, None),
     };
     let i = san
-        .update_integration(&env, &key, IntegrationPatch { display_name: b.display_name, client_id, client_secret, scopes, custom: b.custom })
+        .update_integration(
+            &env,
+            &key,
+            IntegrationPatch {
+                display_name: b.display_name,
+                client_id,
+                client_secret,
+                scopes,
+                custom: b.custom,
+            },
+        )
         .await?;
-    Ok(axum::Json(json!({ "data": integration_json(&i, None, false) })))
+    Ok(axum::Json(
+        json!({ "data": integration_json(&i, None, false) }),
+    ))
 }
 
-async fn delete_integration(Env(env): Env, State(san): State<SanMateo>, Path(key): Path<String>) -> ApiResult<axum::Json<Value>> {
+async fn delete_integration(
+    Env(env): Env,
+    State(san): State<SanMateo>,
+    Path(key): Path<String>,
+) -> ApiResult<axum::Json<Value>> {
     san.delete_integration(&env, &key).await?;
     Ok(axum::Json(json!({"success": true})))
 }
@@ -498,7 +596,10 @@ struct SessionBody {
 
 impl SessionBody {
     fn into_input(self) -> ConnectSessionInput {
-        let organization = self.organization.map(|o| Organization { id: o.id, display_name: o.display_name });
+        let organization = self.organization.map(|o| Organization {
+            id: o.id,
+            display_name: o.display_name,
+        });
         ConnectSessionInput {
             end_user: self.end_user.map(|u| EndUser {
                 id: u.id,
@@ -516,27 +617,51 @@ impl SessionBody {
     }
 }
 
-async fn create_session(Env(env): Env, State(san): State<SanMateo>, body: Bytes) -> ApiResult<Response> {
+async fn create_session(
+    Env(env): Env,
+    State(san): State<SanMateo>,
+    body: Bytes,
+) -> ApiResult<Response> {
     let b: Option<SessionBody> = body_json(&body)?;
-    let created = san.create_connect_session(&env, b.unwrap_or_default().into_input()).await?;
+    let created = san
+        .create_connect_session(&env, b.unwrap_or_default().into_input())
+        .await?;
     Ok(created_json(&created))
 }
 
-async fn create_reconnect_session(Env(env): Env, State(san): State<SanMateo>, body: Bytes) -> ApiResult<Response> {
+async fn create_reconnect_session(
+    Env(env): Env,
+    State(san): State<SanMateo>,
+    body: Bytes,
+) -> ApiResult<Response> {
     let b: SessionBody = body_json(&body)?;
-    let connection_id = b.connection_id.clone().ok_or_else(|| ApiError(Error::MissingField("connection_id".to_owned())))?;
-    let integration_id = b.integration_id.clone().ok_or_else(|| ApiError(Error::MissingField("integration_id".to_owned())))?;
+    let connection_id = b
+        .connection_id
+        .clone()
+        .ok_or_else(|| ApiError(Error::MissingField("connection_id".to_owned())))?;
+    let integration_id = b
+        .integration_id
+        .clone()
+        .ok_or_else(|| ApiError(Error::MissingField("integration_id".to_owned())))?;
     let key = ConnectionKey::new(integration_id, connection_id);
-    let created = san.create_reconnect_session(&env, &key, b.into_input()).await?;
+    let created = san
+        .create_reconnect_session(&env, &key, b.into_input())
+        .await?;
     Ok(created_json(&created))
 }
 
-async fn get_session(State(san): State<SanMateo>, SessionToken(token): SessionToken) -> ApiResult<axum::Json<Value>> {
+async fn get_session(
+    State(san): State<SanMateo>,
+    SessionToken(token): SessionToken,
+) -> ApiResult<axum::Json<Value>> {
     let s = san.connect_session(&token).await?;
     Ok(axum::Json(json!({ "data": session_json(&s) })))
 }
 
-async fn delete_session(State(san): State<SanMateo>, SessionToken(token): SessionToken) -> ApiResult<StatusCode> {
+async fn delete_session(
+    State(san): State<SanMateo>,
+    SessionToken(token): SessionToken,
+) -> ApiResult<StatusCode> {
     san.delete_connect_session(&token).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -547,7 +672,10 @@ fn connect_options(pairs: &[(String, String)]) -> ConnectOptions {
     for (k, v) in pairs {
         if let Some(name) = k.strip_prefix("params[").and_then(|s| s.strip_suffix(']')) {
             o.connection_config.insert(name.to_owned(), json!(v));
-        } else if let Some(name) = k.strip_prefix("authorization_params[").and_then(|s| s.strip_suffix(']')) {
+        } else if let Some(name) = k
+            .strip_prefix("authorization_params[")
+            .and_then(|s| s.strip_suffix(']'))
+        {
             o.authorization_params.insert(name.to_owned(), v.clone());
         } else if k == "user_scope" {
             o.user_scopes = Some(v.clone());
@@ -562,7 +690,9 @@ async fn oauth_connect(
     Path(key): Path<String>,
     RawQuery(q): RawQuery,
 ) -> ApiResult<Response> {
-    let url = san.oauth_start(&token, &key, connect_options(&query_pairs(q.as_deref()))).await?;
+    let url = san
+        .oauth_start(&token, &key, connect_options(&query_pairs(q.as_deref())))
+        .await?;
     Ok((StatusCode::FOUND, [(header::LOCATION, url)]).into_response())
 }
 
@@ -587,8 +717,17 @@ async fn connect_api_key(
     body: Bytes,
 ) -> ApiResult<axum::Json<Value>> {
     let b: Map<String, Value> = body_json::<Option<Map<String, Value>>>(&body)?.unwrap_or_default();
-    let api_key = body_string(&b, "apiKey").or_else(|| body_string(&b, "api_key")).unwrap_or_default();
-    let c = san.connect_api_key(&token, &key, Secret::new(api_key), body_options(q.as_deref(), &b)).await?;
+    let api_key = body_string(&b, "apiKey")
+        .or_else(|| body_string(&b, "api_key"))
+        .unwrap_or_default();
+    let c = san
+        .connect_api_key(
+            &token,
+            &key,
+            Secret::new(api_key),
+            body_options(q.as_deref(), &b),
+        )
+        .await?;
     Ok(auth_result(&c))
 }
 
@@ -640,23 +779,42 @@ async fn connect_unauthenticated(
     body: Bytes,
 ) -> ApiResult<axum::Json<Value>> {
     let b: Map<String, Value> = body_json::<Option<Map<String, Value>>>(&body)?.unwrap_or_default();
-    let c = san.connect_unauthenticated(&token, &key, body_options(q.as_deref(), &b)).await?;
+    let c = san
+        .connect_unauthenticated(&token, &key, body_options(q.as_deref(), &b))
+        .await?;
     Ok(auth_result(&c))
 }
 
-async fn list_connections(Env(env): Env, State(san): State<SanMateo>, RawQuery(q): RawQuery) -> ApiResult<axum::Json<Value>> {
+async fn list_connections(
+    Env(env): Env,
+    State(san): State<SanMateo>,
+    RawQuery(q): RawQuery,
+) -> ApiResult<axum::Json<Value>> {
     let pairs = query_pairs(q.as_deref());
-    let get = |names: &[&str]| names.iter().find_map(|n| query_get(&pairs, n)).map(str::to_owned);
+    let get = |names: &[&str]| {
+        names
+            .iter()
+            .find_map(|n| query_get(&pairs, n))
+            .map(str::to_owned)
+    };
     let filter = ConnectionFilter {
         provider_config_key: get(&["integrationId", "provider_config_key"]),
         connection_id: get(&["connectionId", "connection_id"]),
         end_user_id: get(&["endUserId", "end_user_id"]),
     };
-    let list: Vec<Value> = san.list_connections(&env, &filter).await?.iter().map(summary_json).collect();
+    let list: Vec<Value> = san
+        .list_connections(&env, &filter)
+        .await?
+        .iter()
+        .map(summary_json)
+        .collect();
     Ok(axum::Json(json!({ "connections": list })))
 }
 
-fn key_from_query(id: String, q: Option<&str>) -> ApiResult<(ConnectionKey, Vec<(String, String)>)> {
+fn key_from_query(
+    id: String,
+    q: Option<&str>,
+) -> ApiResult<(ConnectionKey, Vec<(String, String)>)> {
     let pairs = query_pairs(q);
     let key = query_get(&pairs, "provider_config_key")
         .ok_or_else(|| ApiError(Error::MissingField("provider_config_key".to_owned())))?
@@ -675,7 +833,10 @@ async fn get_connection(
     RawQuery(q): RawQuery,
 ) -> ApiResult<axum::Json<Value>> {
     let (key, pairs) = key_from_query(id, q.as_deref())?;
-    let options = GetOptions { refresh_if_needed: true, force_refresh: query_flag(&pairs, "force_refresh") };
+    let options = GetOptions {
+        refresh_if_needed: true,
+        force_refresh: query_flag(&pairs, "force_refresh"),
+    };
     let c = san.get_connection(&env, &key, options).await?;
     Ok(axum::Json(connection_json(&c)))
 }
@@ -687,11 +848,15 @@ struct PatchConnectionBody {
     #[serde(default)]
     tags: Option<Tags>,
     #[serde(default, deserialize_with = "double_option")]
+    #[allow(clippy::option_option)]
     webhook_url_override: Option<Option<String>>,
 }
 
 /// Tells a missing field (`None`) from a JSON `null` (`Some(None)`).
-fn double_option<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<Option<String>>, D::Error> {
+#[allow(clippy::option_option)]
+fn double_option<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<Option<String>>, D::Error> {
     Option::<String>::deserialize(d).map(Some)
 }
 
@@ -705,7 +870,13 @@ async fn patch_connection(
     let (key, _) = key_from_query(id, q.as_deref())?;
     let b: PatchConnectionBody = body_json(&body)?;
     let patch = ConnectionPatch {
-        end_user: b.end_user.map(|u| EndUser { id: u.id, email: u.email, display_name: u.display_name, tags: u.tags, organization: None }),
+        end_user: b.end_user.map(|u| EndUser {
+            id: u.id,
+            email: u.email,
+            display_name: u.display_name,
+            tags: u.tags,
+            organization: None,
+        }),
         tags: b.tags,
         webhook_url_override: b.webhook_url_override,
     };
@@ -742,7 +913,11 @@ struct ImportBody {
     webhook_url_override: Option<String>,
 }
 
-async fn import_connection(Env(env): Env, State(san): State<SanMateo>, body: Bytes) -> ApiResult<axum::Json<Value>> {
+async fn import_connection(
+    Env(env): Env,
+    State(san): State<SanMateo>,
+    body: Bytes,
+) -> ApiResult<axum::Json<Value>> {
     let b: ImportBody = body_json(&body)?;
     let c = san
         .import_connection(
@@ -754,7 +929,13 @@ async fn import_connection(Env(env): Env, State(san): State<SanMateo>, body: Byt
                 connection_config: b.connection_config,
                 metadata: b.metadata,
                 tags: b.tags,
-                end_user: b.end_user.map(|u| EndUser { id: u.id, email: u.email, display_name: u.display_name, tags: u.tags, organization: None }),
+                end_user: b.end_user.map(|u| EndUser {
+                    id: u.id,
+                    email: u.email,
+                    display_name: u.display_name,
+                    tags: u.tags,
+                    organization: None,
+                }),
                 webhook_url_override: b.webhook_url_override,
             },
         )
@@ -776,28 +957,48 @@ struct MetadataBody {
     metadata: Map<String, Value>,
 }
 
-async fn metadata(env: &str, san: &SanMateo, body: &Bytes, merge: bool) -> ApiResult<axum::Json<Value>> {
+async fn metadata(
+    env: &str,
+    san: &SanMateo,
+    body: &Bytes,
+    merge: bool,
+) -> ApiResult<axum::Json<Value>> {
     let b: MetadataBody = body_json(body)?;
     let ids = match &b.connection_id {
         OneOrMany::One(id) => vec![id.clone()],
         OneOrMany::Many(ids) => ids.clone(),
     };
     for id in &ids {
-        san.set_metadata(env, &ConnectionKey::new(&b.provider_config_key, id), b.metadata.clone(), merge)
-            .await?;
+        san.set_metadata(
+            env,
+            &ConnectionKey::new(&b.provider_config_key, id),
+            b.metadata.clone(),
+            merge,
+        )
+        .await?;
     }
     let connection_id = match b.connection_id {
         OneOrMany::One(id) => json!(id),
         OneOrMany::Many(ids) => json!(ids),
     };
-    Ok(axum::Json(json!({"connection_id": connection_id, "provider_config_key": b.provider_config_key, "metadata": b.metadata})))
+    Ok(axum::Json(
+        json!({"connection_id": connection_id, "provider_config_key": b.provider_config_key, "metadata": b.metadata}),
+    ))
 }
 
-async fn set_metadata(Env(env): Env, State(san): State<SanMateo>, body: Bytes) -> ApiResult<axum::Json<Value>> {
+async fn set_metadata(
+    Env(env): Env,
+    State(san): State<SanMateo>,
+    body: Bytes,
+) -> ApiResult<axum::Json<Value>> {
     metadata(&env, &san, &body, false).await
 }
 
-async fn update_metadata(Env(env): Env, State(san): State<SanMateo>, body: Bytes) -> ApiResult<axum::Json<Value>> {
+async fn update_metadata(
+    Env(env): Env,
+    State(san): State<SanMateo>,
+    body: Bytes,
+) -> ApiResult<axum::Json<Value>> {
     metadata(&env, &san, &body, true).await
 }
 
@@ -813,28 +1014,43 @@ async fn proxy(
     body: Bytes,
 ) -> ApiResult<Response> {
     let key = connection_from_headers(&headers)?;
-    let path_and_query = uri.path_and_query().map_or_else(|| uri.path().to_owned(), |p| p.as_str().to_owned());
-    let endpoint = path_and_query.strip_prefix("/proxy").unwrap_or(&path_and_query).to_owned();
+    let path_and_query = uri
+        .path_and_query()
+        .map_or_else(|| uri.path().to_owned(), |p| p.as_str().to_owned());
+    let endpoint = path_and_query
+        .strip_prefix("/proxy")
+        .unwrap_or(&path_and_query)
+        .to_owned();
     let pairs: Vec<(String, String)> = headers
         .iter()
-        .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.as_str().to_owned(), v.to_owned())))
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|v| (k.as_str().to_owned(), v.to_owned()))
+        })
         .collect();
     let mut forwarded = crate::proxy::forwarded_headers(&pairs);
     for name in PASS_HEADERS {
-        if let Some(v) = header_str(&headers, name) {
-            if !forwarded.iter().any(|(k, _)| k == name) {
-                forwarded.push(((*name).to_owned(), v.to_owned()));
-            }
+        if let Some(v) = header_str(&headers, name)
+            && !forwarded.iter().any(|(k, _)| k == name)
+        {
+            forwarded.push(((*name).to_owned(), v.to_owned()));
         }
     }
     let retries = match header_str(&headers, "retries") {
-        Some(v) => v.parse::<u32>().map_err(|_| invalid("Retries must be a whole number"))?,
+        Some(v) => v
+            .parse::<u32>()
+            .map_err(|_| invalid("Retries must be a whole number"))?,
         None => 0,
     };
     let retry_on = match header_str(&headers, "retry-on") {
         Some(v) => v
             .split(',')
-            .map(|s| s.trim().parse::<u16>().map_err(|_| invalid("Retry-On must be a list of status codes")))
+            .map(|s| {
+                s.trim()
+                    .parse::<u16>()
+                    .map_err(|_| invalid("Retry-On must be a list of status codes"))
+            })
             .collect::<ApiResult<Vec<u16>>>()?,
         None => Vec::new(),
     };
@@ -852,19 +1068,31 @@ async fn proxy(
     let mut res = Response::new(Body::from(reply.body));
     *res.status_mut() = StatusCode::from_u16(reply.status).unwrap_or(StatusCode::BAD_GATEWAY);
     for (k, v) in reply.headers {
-        if let (Ok(name), Ok(value)) = (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(&v)) {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(k.as_bytes()),
+            HeaderValue::from_str(&v),
+        ) {
             res.headers_mut().append(name, value);
         }
     }
     Ok(res)
 }
 
-async fn list_records(Env(env): Env, State(san): State<SanMateo>, headers: HeaderMap, RawQuery(q): RawQuery) -> ApiResult<axum::Json<Value>> {
+async fn list_records(
+    Env(env): Env,
+    State(san): State<SanMateo>,
+    headers: HeaderMap,
+    RawQuery(q): RawQuery,
+) -> ApiResult<axum::Json<Value>> {
     let key = connection_from_headers(&headers)?;
     let pairs = query_pairs(q.as_deref());
-    let model = query_get(&pairs, "model").ok_or_else(|| ApiError(Error::MissingField("model".to_owned())))?;
+    let model = query_get(&pairs, "model")
+        .ok_or_else(|| ApiError(Error::MissingField("model".to_owned())))?;
     let limit = query_get(&pairs, "limit")
-        .map(|l| l.parse::<u32>().map_err(|_| invalid("limit must be a whole number")))
+        .map(|l| {
+            l.parse::<u32>()
+                .map_err(|_| invalid("limit must be a whole number"))
+        })
         .transpose()?;
     let ids = pairs
         .iter()
@@ -875,13 +1103,17 @@ async fn list_records(Env(env): Env, State(san): State<SanMateo>, headers: Heade
     let request = RecordsRequest {
         model: model.to_owned(),
         cursor: query_get(&pairs, "cursor").map(str::to_owned),
-        modified_after: query_get(&pairs, "modified_after").or_else(|| query_get(&pairs, "delta")).map(str::to_owned),
+        modified_after: query_get(&pairs, "modified_after")
+            .or_else(|| query_get(&pairs, "delta"))
+            .map(str::to_owned),
         limit,
         filter: query_get(&pairs, "filter").map(str::to_owned),
         ids,
     };
     let page = san.list_records(&env, &key, request).await?;
-    Ok(axum::Json(json!({"records": page.records, "next_cursor": page.next_cursor})))
+    Ok(axum::Json(
+        json!({"records": page.records, "next_cursor": page.next_cursor}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -910,21 +1142,53 @@ impl SyncsBody {
     }
 }
 
-async fn trigger_syncs(Env(env): Env, State(san): State<SanMateo>, body: Bytes) -> ApiResult<axum::Json<Value>> {
+async fn trigger_syncs(
+    Env(env): Env,
+    State(san): State<SanMateo>,
+    body: Bytes,
+) -> ApiResult<axum::Json<Value>> {
     let b: SyncsBody = body_json(&body)?;
-    san.trigger_syncs(&env, &b.provider_config_key, b.connection_id.as_deref(), &b.names()?).await?;
+    san.trigger_syncs(
+        &env,
+        &b.provider_config_key,
+        b.connection_id.as_deref(),
+        &b.names()?,
+    )
+    .await?;
     Ok(axum::Json(json!({"success": true})))
 }
 
-async fn pause_syncs(Env(env): Env, State(san): State<SanMateo>, body: Bytes) -> ApiResult<axum::Json<Value>> {
+async fn pause_syncs(
+    Env(env): Env,
+    State(san): State<SanMateo>,
+    body: Bytes,
+) -> ApiResult<axum::Json<Value>> {
     let b: SyncsBody = body_json(&body)?;
-    san.set_sync_paused(&env, &b.provider_config_key, b.connection_id.as_deref(), &b.names()?, true).await?;
+    san.set_sync_paused(
+        &env,
+        &b.provider_config_key,
+        b.connection_id.as_deref(),
+        &b.names()?,
+        true,
+    )
+    .await?;
     Ok(axum::Json(json!({"success": true})))
 }
 
-async fn start_syncs(Env(env): Env, State(san): State<SanMateo>, body: Bytes) -> ApiResult<axum::Json<Value>> {
+async fn start_syncs(
+    Env(env): Env,
+    State(san): State<SanMateo>,
+    body: Bytes,
+) -> ApiResult<axum::Json<Value>> {
     let b: SyncsBody = body_json(&body)?;
-    san.set_sync_paused(&env, &b.provider_config_key, b.connection_id.as_deref(), &b.names()?, false).await?;
+    san.set_sync_paused(
+        &env,
+        &b.provider_config_key,
+        b.connection_id.as_deref(),
+        &b.names()?,
+        false,
+    )
+    .await?;
     Ok(axum::Json(json!({"success": true})))
 }
 
@@ -952,14 +1216,29 @@ fn status_json(e: &SyncStatusEntry) -> Value {
     })
 }
 
-async fn sync_status(Env(env): Env, State(san): State<SanMateo>, RawQuery(q): RawQuery) -> ApiResult<axum::Json<Value>> {
+async fn sync_status(
+    Env(env): Env,
+    State(san): State<SanMateo>,
+    RawQuery(q): RawQuery,
+) -> ApiResult<axum::Json<Value>> {
     let pairs = query_pairs(q.as_deref());
-    let key = query_get(&pairs, "provider_config_key").ok_or_else(|| ApiError(Error::MissingField("provider_config_key".to_owned())))?;
+    let key = query_get(&pairs, "provider_config_key")
+        .ok_or_else(|| ApiError(Error::MissingField("provider_config_key".to_owned())))?;
     let syncs: Vec<String> = query_get(&pairs, "syncs")
-        .map(|s| s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect())
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
         .unwrap_or_default();
-    let list = san.sync_status(&env, key, query_get(&pairs, "connection_id"), &syncs).await?;
-    Ok(axum::Json(json!({"syncs": list.iter().map(status_json).collect::<Vec<_>>()})))
+    let list = san
+        .sync_status(&env, key, query_get(&pairs, "connection_id"), &syncs)
+        .await?;
+    Ok(axum::Json(
+        json!({"syncs": list.iter().map(status_json).collect::<Vec<_>>()}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -969,8 +1248,15 @@ struct ActionBody {
     input: Value,
 }
 
-async fn trigger_action(Env(env): Env, State(san): State<SanMateo>, headers: HeaderMap, body: Bytes) -> ApiResult<axum::Json<Value>> {
+async fn trigger_action(
+    Env(env): Env,
+    State(san): State<SanMateo>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> ApiResult<axum::Json<Value>> {
     let key = connection_from_headers(&headers)?;
     let b: ActionBody = body_json(&body)?;
-    Ok(axum::Json(san.run_action(&env, &key, &b.action_name, b.input).await?))
+    Ok(axum::Json(
+        san.run_action(&env, &key, &b.action_name, b.input).await?,
+    ))
 }

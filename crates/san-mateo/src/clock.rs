@@ -53,7 +53,11 @@ fn from_epoch_number(n: f64) -> Option<DateTime<Utc>> {
     if !n.is_finite() || n < 0.0 {
         return None;
     }
-    let ms = if n >= EPOCH_MS_THRESHOLD { n } else { n * 1000.0 };
+    let ms = if n >= EPOCH_MS_THRESHOLD {
+        n
+    } else {
+        n * 1000.0
+    };
     if ms > 8.0e15 {
         return None;
     }
@@ -74,7 +78,9 @@ pub fn parse_instant_str(s: &str) -> Option<DateTime<Utc>> {
     if let Ok(t) = DateTime::parse_from_rfc3339(s) {
         return Some(t.with_timezone(&Utc));
     }
-    DateTime::parse_from_rfc2822(s).ok().map(|t| t.with_timezone(&Utc))
+    DateTime::parse_from_rfc2822(s)
+        .ok()
+        .map(|t| t.with_timezone(&Utc))
 }
 
 /// The system clock.
@@ -114,7 +120,9 @@ impl ManualClock {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, DateTime<Utc>> {
-        self.now.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.now
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -191,7 +199,10 @@ mod tests {
         let t = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         assert_eq!(parse_instant(&json!(1_700_000_000)), Some(t));
         assert_eq!(parse_instant(&json!(1_700_000_000_000_i64)), Some(t));
-        assert_eq!(parse_instant(&json!(1_700_000_000.5)), Some(t + chrono::Duration::milliseconds(500)));
+        assert_eq!(
+            parse_instant(&json!(1_700_000_000.5)),
+            Some(t + chrono::Duration::milliseconds(500))
+        );
         assert_eq!(parse_instant(&json!("1700000000")), Some(t));
         assert_eq!(parse_instant(&json!("2023-11-14T22:13:20Z")), Some(t));
         assert_eq!(parse_instant(&json!("2023-11-14T23:13:20+01:00")), Some(t));
@@ -226,7 +237,10 @@ mod tests {
         let b = s.hex(32);
         assert_eq!(a.len(), 64);
         assert_ne!(a, b);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
         assert_ne!(s.uuid(), s.uuid());
         assert_eq!(s.uuid().get_version_num(), 4);
         let os = OsEntropy;

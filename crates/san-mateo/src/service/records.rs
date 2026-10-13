@@ -60,12 +60,19 @@ impl SanMateo {
             let id = records::record_id(conn.id, model, &external_id);
             writes.push(RecordWrite {
                 data_hash: records::data_hash(&self.inner.keys, &record),
-                data: self.inner.keys.seal_json(&record, &record_aad(conn.id, model, id))?,
+                data: self
+                    .inner
+                    .keys
+                    .seal_json(&record, &record_aad(conn.id, model, id))?,
                 id,
                 external_id,
             });
         }
-        let changes = self.inner.store.upsert_records(conn.id, model, writes, self.now()).await?;
+        let changes = self
+            .inner
+            .store
+            .upsert_records(conn.id, model, writes, self.now())
+            .await?;
         let mut out = BatchOutcome::default();
         for (id, change) in changes {
             out.push(id, change);
@@ -91,7 +98,11 @@ impl SanMateo {
             .into_iter()
             .map(|(external, _)| (records::record_id(conn.id, model, &external), external))
             .collect();
-        let changes = self.inner.store.delete_records(conn.id, model, ids, self.now()).await?;
+        let changes = self
+            .inner
+            .store
+            .delete_records(conn.id, model, ids, self.now())
+            .await?;
         let mut out = BatchOutcome::default();
         for (id, change) in changes {
             out.push(id, change);
@@ -100,7 +111,10 @@ impl SanMateo {
     }
 
     fn record_json(&self, connection: Uuid, model: &str, row: &RecordRow) -> Result<Value> {
-        let mut data: Value = self.inner.keys.open_json(&row.data, &record_aad(connection, model, row.id))?;
+        let mut data: Value = self
+            .inner
+            .keys
+            .open_json(&row.data, &record_aad(connection, model, row.id))?;
         let cursor = Cursor {
             updated_at_us: row.updated_at.timestamp_micros(),
             id: row.id,
@@ -129,7 +143,12 @@ impl SanMateo {
     /// # Errors
     ///
     /// [`Error::UnknownConnection`], [`Error::Invalid`].
-    pub async fn list_records(&self, env: &str, key: &ConnectionKey, request: RecordsRequest) -> Result<RecordPage> {
+    pub async fn list_records(
+        &self,
+        env: &str,
+        key: &ConnectionKey,
+        request: RecordsRequest,
+    ) -> Result<RecordPage> {
         check_model(&request.model)?;
         let limit = records::check_limit(request.limit)?;
         if request.ids.len() > records::MAX_IDS {
@@ -145,7 +164,12 @@ impl SanMateo {
                     .map_err(|_| invalid("modified_after must be an RFC 3339 time"))
             })
             .transpose()?;
-        let filter = request.filter.as_deref().map(records::parse_filter).transpose()?.unwrap_or_default();
+        let filter = request
+            .filter
+            .as_deref()
+            .map(records::parse_filter)
+            .transpose()?
+            .unwrap_or_default();
         let conn = self.connection_row(env, key).await?;
         let query = RecordQuery {
             model: request.model.clone(),
@@ -158,14 +182,20 @@ impl SanMateo {
         let mut rows = self.inner.store.list_records(conn.id, &query).await?;
         let more = rows.len() > limit as usize;
         rows.truncate(limit as usize);
-        let next_cursor = more
-            .then(|| rows.last())
-            .flatten()
-            .map(|r| Cursor { updated_at_us: r.updated_at.timestamp_micros(), id: r.id }.encode());
+        let next_cursor = more.then(|| rows.last()).flatten().map(|r| {
+            Cursor {
+                updated_at_us: r.updated_at.timestamp_micros(),
+                id: r.id,
+            }
+            .encode()
+        });
         let records = rows
             .iter()
             .map(|r| self.record_json(conn.id, &request.model, r))
             .collect::<Result<Vec<_>>>()?;
-        Ok(RecordPage { records, next_cursor })
+        Ok(RecordPage {
+            records,
+            next_cursor,
+        })
     }
 }

@@ -1,5 +1,7 @@
 //! The REST API over HTTP (AC1, AC3, AC4, AC8, AC10, AC14, AC15, AC17, AC23).
 
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
+
 mod common;
 
 use std::sync::Arc;
@@ -26,7 +28,8 @@ struct Reply {
 
 impl Reply {
     fn json(&self) -> Value {
-        serde_json::from_slice(&self.body).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&self.body)))
+        serde_json::from_slice(&self.body)
+            .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&self.body)))
     }
     fn text(&self) -> String {
         String::from_utf8(self.body.clone()).unwrap()
@@ -36,21 +39,37 @@ impl Reply {
     }
 }
 
-async fn call(h: &Harness, method: &str, uri: &str, headers: &[(&str, &str)], body: Option<Value>) -> Reply {
+async fn call(
+    h: &Harness,
+    method: &str,
+    uri: &str,
+    headers: &[(&str, &str)],
+    body: Option<Value>,
+) -> Reply {
     let app = san_mateo::api::router(h.san.clone());
     let mut req = Request::builder().method(method).uri(uri);
     for (k, v) in headers {
         req = req.header(*k, *v);
     }
     let req = match body {
-        Some(b) => req.header("content-type", "application/json").body(Body::from(b.to_string())).unwrap(),
+        Some(b) => req
+            .header("content-type", "application/json")
+            .body(Body::from(b.to_string()))
+            .unwrap(),
         None => req.body(Body::empty()).unwrap(),
     };
     let res = app.oneshot(req).await.unwrap();
     let status = res.status();
     let headers = res.headers().clone();
-    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap().to_vec();
-    Reply { status, headers, body }
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+    Reply {
+        status,
+        headers,
+        body,
+    }
 }
 
 const AUTH: (&str, &str) = ("authorization", "Bearer sk_test_dev_0123456789");
@@ -61,7 +80,14 @@ async fn health_needs_no_auth_and_other_routes_do() {
     let r = call(&h, "GET", "/health", &[], None).await;
     assert_eq!(r.status, StatusCode::OK);
     assert_eq!(r.json()["status"], "ok");
-    for (m, p) in [("GET", "/providers"), ("GET", "/integrations"), ("GET", "/connections"), ("GET", "/proxy/x"), ("POST", "/connect/sessions"), ("GET", "/records?model=M")] {
+    for (m, p) in [
+        ("GET", "/providers"),
+        ("GET", "/integrations"),
+        ("GET", "/connections"),
+        ("GET", "/proxy/x"),
+        ("POST", "/connect/sessions"),
+        ("GET", "/records?model=M"),
+    ] {
         let r = call(&h, m, p, &[], None).await;
         assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{m} {p}");
         assert_eq!(r.json()["error"]["code"], "unauthorized");
@@ -81,7 +107,10 @@ async fn providers() {
     assert_eq!(crm["auth_mode"], "OAUTH2");
     assert_eq!(crm["display_name"], "Test CRM");
     let r = call(&h, "GET", "/providers/crm", &[AUTH], None).await;
-    assert_eq!(r.json()["data"]["proxy"]["base_url"], "https://api.crm.example.com");
+    assert_eq!(
+        r.json()["data"]["proxy"]["base_url"],
+        "https://api.crm.example.com"
+    );
     let r = call(&h, "GET", "/providers/nope", &[AUTH], None).await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
     assert_eq!(r.json()["error"]["code"], "unknown_provider");
@@ -99,9 +128,21 @@ async fn integrations_over_http() {
     assert_eq!(d["display_name"], "CRM");
     assert!(d["created_at"].is_string());
     assert!(!r.text().contains("csecret"));
-    assert_eq!(call(&h, "POST", "/integrations", &[AUTH], Some(body)).await.status, StatusCode::CONFLICT);
+    assert_eq!(
+        call(&h, "POST", "/integrations", &[AUTH], Some(body))
+            .await
+            .status,
+        StatusCode::CONFLICT
+    );
 
-    let r = call(&h, "GET", "/integrations/gh?include=credentials", &[AUTH], None).await;
+    let r = call(
+        &h,
+        "GET",
+        "/integrations/gh?include=credentials",
+        &[AUTH],
+        None,
+    )
+    .await;
     let d = r.json()["data"].clone();
     assert_eq!(d["credentials"]["client_id"], "cid");
     assert_eq!(d["credentials"]["scopes"], "read,write");
@@ -114,8 +155,20 @@ async fn integrations_over_http() {
     let r = call(&h, "DELETE", "/integrations/gh", &[AUTH], None).await;
     assert_eq!(r.status, StatusCode::OK);
     assert_eq!(r.json()["success"], true);
-    assert_eq!(call(&h, "GET", "/integrations/gh", &[AUTH], None).await.status, StatusCode::NOT_FOUND);
-    let r = call(&h, "POST", "/integrations", &[AUTH], Some(json!({"unique_key": 5}))).await;
+    assert_eq!(
+        call(&h, "GET", "/integrations/gh", &[AUTH], None)
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    let r = call(
+        &h,
+        "POST",
+        "/integrations",
+        &[AUTH],
+        Some(json!({"unique_key": 5})),
+    )
+    .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
     assert_eq!(r.json()["error"]["code"], "invalid_body");
 }
@@ -124,7 +177,12 @@ async fn session_token(h: &Harness, body: Value) -> String {
     let r = call(h, "POST", "/connect/sessions", &[AUTH], Some(body)).await;
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.text());
     let d = r.json()["data"].clone();
-    assert!(d["connect_link"].as_str().unwrap().starts_with("https://sm.example.com/connect?session_token=smcs_"));
+    assert!(
+        d["connect_link"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://sm.example.com/connect?session_token=smcs_")
+    );
     assert!(d["expires_at"].is_string());
     d["token"].as_str().unwrap().to_owned()
 }
@@ -144,18 +202,51 @@ async fn connect_sessions_over_http() {
     )
     .await;
     let bearer = format!("Bearer {token}");
-    let r = call(&h, "GET", "/connect/session", &[("authorization", &bearer)], None).await;
+    let r = call(
+        &h,
+        "GET",
+        "/connect/session",
+        &[("authorization", &bearer)],
+        None,
+    )
+    .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
     let d = r.json()["data"].clone();
     assert_eq!(d["allowed_integrations"], json!(["crm", "keyed"]));
     assert_eq!(d["endUser"]["id"], "u1");
     assert_eq!(d["endUser"]["organization"]["id"], "o1");
-    assert_eq!(d["integrations_config_defaults"]["crm"]["user_scopes"], "read");
+    assert_eq!(
+        d["integrations_config_defaults"]["crm"]["user_scopes"],
+        "read"
+    );
     assert_eq!(d["isReconnecting"], false);
     // The secret key is not a session token.
-    assert_eq!(call(&h, "GET", "/connect/session", &[AUTH], None).await.status, StatusCode::UNAUTHORIZED);
-    assert_eq!(call(&h, "DELETE", "/connect/session", &[("authorization", &bearer)], None).await.status, StatusCode::NO_CONTENT);
-    let r = call(&h, "GET", "/connect/session", &[("authorization", &bearer)], None).await;
+    assert_eq!(
+        call(&h, "GET", "/connect/session", &[AUTH], None)
+            .await
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(
+            &h,
+            "DELETE",
+            "/connect/session",
+            &[("authorization", &bearer)],
+            None
+        )
+        .await
+        .status,
+        StatusCode::NO_CONTENT
+    );
+    let r = call(
+        &h,
+        "GET",
+        "/connect/session",
+        &[("authorization", &bearer)],
+        None,
+    )
+    .await;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED);
     assert_eq!(r.json()["error"]["code"], "invalid_connect_session");
 }
@@ -170,41 +261,123 @@ async fn oauth_over_http() {
     let q = query_of(&location);
     assert_eq!(q["scope"], "read");
     assert_eq!(q["prompt"], "login");
-    h.http.reply("POST", "https://auth.crm.example.com/token", token_reply("at-1", Some("rt-1"), Some(3_600)));
-    let r = call(&h, "GET", &format!("/oauth/callback?code=c1&state={}", q["state"]), &[], None).await;
+    h.http.reply(
+        "POST",
+        "https://auth.crm.example.com/token",
+        token_reply("at-1", Some("rt-1"), Some(3_600)),
+    );
+    let r = call(
+        &h,
+        "GET",
+        &format!("/oauth/callback?code=c1&state={}", q["state"]),
+        &[],
+        None,
+    )
+    .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
     assert!(r.header("content-type").unwrap().starts_with("text/html"));
     let html = r.text();
-    assert!(html.contains("postMessage") && html.contains("connectionId"), "{html}");
+    assert!(
+        html.contains("postMessage") && html.contains("connectionId"),
+        "{html}"
+    );
     assert!(r.header("content-security-policy").is_some());
-    let r = call(&h, "GET", &format!("/oauth/callback?code=c1&state={}", q["state"]), &[], None).await;
+    let r = call(
+        &h,
+        "GET",
+        &format!("/oauth/callback?code=c1&state={}", q["state"]),
+        &[],
+        None,
+    )
+    .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
     assert!(r.text().contains("invalid_oauth_state"));
-    let r = call(&h, "GET", "/oauth/connect/crm?connect_session_token=smcs_bad", &[], None).await;
+    let r = call(
+        &h,
+        "GET",
+        "/oauth/connect/crm?connect_session_token=smcs_bad",
+        &[],
+        None,
+    )
+    .await;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED);
     // Connection config from `params[...]`.
-    let r = call(&h, "GET", &format!("/oauth/connect/zen?connect_session_token={token}&params[subdomain]=acme"), &[], None).await;
-    assert!(r.header("location").unwrap().starts_with("https://acme.zen.example.com/"));
+    let r = call(
+        &h,
+        "GET",
+        &format!("/oauth/connect/zen?connect_session_token={token}&params[subdomain]=acme"),
+        &[],
+        None,
+    )
+    .await;
+    assert!(
+        r.header("location")
+            .unwrap()
+            .starts_with("https://acme.zen.example.com/")
+    );
 }
 
 #[tokio::test]
 async fn other_auth_modes_over_http() {
     let h = ready().await;
     let token = session_token(&h, json!({"end_user": {"id": "u1"}})).await;
-    h.http.reply("GET", "https://api.keyed.example.com/v1/me", HttpResponse::new(200, "{}"));
-    let r = call(&h, "POST", &format!("/api-auth/api-key/keyed?connect_session_token={token}"), &[], Some(json!({"apiKey": "k1"}))).await;
+    h.http.reply(
+        "GET",
+        "https://api.keyed.example.com/v1/me",
+        HttpResponse::new(200, "{}"),
+    );
+    let r = call(
+        &h,
+        "POST",
+        &format!("/api-auth/api-key/keyed?connect_session_token={token}"),
+        &[],
+        Some(json!({"apiKey": "k1"})),
+    )
+    .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
     assert_eq!(r.json()["providerConfigKey"], "keyed");
     assert!(r.json()["connectionId"].is_string());
     let bearer = format!("Bearer {token}");
-    let r = call(&h, "POST", "/api-auth/basic/basic", &[("authorization", &bearer)], Some(json!({"username": "u", "password": "p"}))).await;
+    let r = call(
+        &h,
+        "POST",
+        "/api-auth/basic/basic",
+        &[("authorization", &bearer)],
+        Some(json!({"username": "u", "password": "p"})),
+    )
+    .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
-    h.http.reply("POST", "https://auth.machine.example.com/token", HttpResponse::json(200, &json!({"access_token": "cc", "expires_in": 60})));
-    let r = call(&h, "POST", &format!("/oauth2/auth/machine?connect_session_token={token}"), &[], Some(json!({"client_id": "i", "client_secret": "s"}))).await;
+    h.http.reply(
+        "POST",
+        "https://auth.machine.example.com/token",
+        HttpResponse::json(200, &json!({"access_token": "cc", "expires_in": 60})),
+    );
+    let r = call(
+        &h,
+        "POST",
+        &format!("/oauth2/auth/machine?connect_session_token={token}"),
+        &[],
+        Some(json!({"client_id": "i", "client_secret": "s"})),
+    )
+    .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
-    let r = call(&h, "POST", &format!("/auth/unauthenticated/open?connect_session_token={token}"), &[], None).await;
+    let r = call(
+        &h,
+        "POST",
+        &format!("/auth/unauthenticated/open?connect_session_token={token}"),
+        &[],
+        None,
+    )
+    .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
-    let r = call(&h, "POST", &format!("/api-auth/api-key/keyed?connect_session_token={token}"), &[], Some(json!({}))).await;
+    let r = call(
+        &h,
+        "POST",
+        &format!("/api-auth/api-key/keyed?connect_session_token={token}"),
+        &[],
+        Some(json!({})),
+    )
+    .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
     let r = call(&h, "GET", "/connections", &[AUTH], None).await;
     assert_eq!(r.json()["connections"].as_array().unwrap().len(), 4);
@@ -215,7 +388,14 @@ async fn connections_over_http() {
     let h = ready().await;
     let conn = connect_crm(&h, "at-1", Some("rt-1"), Some(3_600)).await;
     let id = conn.connection_id.clone();
-    let r = call(&h, "GET", "/connections?integrationId=crm&endUserId=user-1", &[AUTH], None).await;
+    let r = call(
+        &h,
+        "GET",
+        "/connections?integrationId=crm&endUserId=user-1",
+        &[AUTH],
+        None,
+    )
+    .await;
     let list = r.json()["connections"].as_array().unwrap().clone();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0]["connection_id"], id);
@@ -225,7 +405,14 @@ async fn connections_over_http() {
     assert_eq!(list[0]["end_user"]["id"], "user-1");
     assert!(list[0].get("credentials").is_none());
 
-    let r = call(&h, "GET", &format!("/connections/{id}?provider_config_key=crm"), &[AUTH], None).await;
+    let r = call(
+        &h,
+        "GET",
+        &format!("/connections/{id}?provider_config_key=crm"),
+        &[AUTH],
+        None,
+    )
+    .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
     let full = r.json();
     assert_eq!(full["credentials"]["type"], "OAUTH2");
@@ -233,38 +420,127 @@ async fn connections_over_http() {
     assert_eq!(full["connection_config"]["instance_id"], "inst-7");
     assert_eq!(full["errors"], json!([]));
     assert!(full["last_fetched_at"].is_string());
-    let r = call(&h, "GET", &format!("/connection/{id}?provider_config_key=crm"), &[AUTH], None).await;
+    let r = call(
+        &h,
+        "GET",
+        &format!("/connection/{id}?provider_config_key=crm"),
+        &[AUTH],
+        None,
+    )
+    .await;
     assert_eq!(r.status, StatusCode::OK, "the legacy path works");
-    h.http.reply("POST", "https://auth.crm.example.com/token", token_reply("at-2", None, Some(3_600)));
-    let r = call(&h, "GET", &format!("/connections/{id}?provider_config_key=crm&force_refresh=true"), &[AUTH], None).await;
+    h.http.reply(
+        "POST",
+        "https://auth.crm.example.com/token",
+        token_reply("at-2", None, Some(3_600)),
+    );
+    let r = call(
+        &h,
+        "GET",
+        &format!("/connections/{id}?provider_config_key=crm&force_refresh=true"),
+        &[AUTH],
+        None,
+    )
+    .await;
     assert_eq!(r.json()["credentials"]["access_token"], "at-2");
-    assert_eq!(call(&h, "GET", &format!("/connections/{id}"), &[AUTH], None).await.status, StatusCode::BAD_REQUEST);
-    assert_eq!(call(&h, "GET", "/connections/nope?provider_config_key=crm", &[AUTH], None).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        call(&h, "GET", &format!("/connections/{id}"), &[AUTH], None)
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(
+            &h,
+            "GET",
+            "/connections/nope?provider_config_key=crm",
+            &[AUTH],
+            None
+        )
+        .await
+        .status,
+        StatusCode::NOT_FOUND
+    );
 
     let r = call(&h, "POST", "/connections/metadata", &[AUTH], Some(json!({"connection_id": id, "provider_config_key": "crm", "metadata": {"a": 1, "b": 2}}))).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
     let r = call(&h, "PATCH", "/connections/metadata", &[AUTH], Some(json!({"connection_id": [id.clone()], "provider_config_key": "crm", "metadata": {"b": 3}}))).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
-    let r = call(&h, "GET", &format!("/connections/{id}?provider_config_key=crm"), &[AUTH], None).await;
+    let r = call(
+        &h,
+        "GET",
+        &format!("/connections/{id}?provider_config_key=crm"),
+        &[AUTH],
+        None,
+    )
+    .await;
     assert_eq!(r.json()["metadata"], json!({"a": 1, "b": 3}));
-    let r = call(&h, "PATCH", &format!("/connections/{id}?provider_config_key=crm"), &[AUTH], Some(json!({"tags": {"x": "y"}}))).await;
+    let r = call(
+        &h,
+        "PATCH",
+        &format!("/connections/{id}?provider_config_key=crm"),
+        &[AUTH],
+        Some(json!({"tags": {"x": "y"}})),
+    )
+    .await;
     assert_eq!(r.json()["success"], true);
 
     let r = call(&h, "POST", "/connections", &[AUTH], Some(json!({"connection_id": "imp", "provider_config_key": "keyed", "credentials": {"type": "API_KEY", "apiKey": "zz"}}))).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
     assert_eq!(r.json()["connection_id"], "imp");
 
-    assert_eq!(call(&h, "DELETE", &format!("/connections/{id}?provider_config_key=crm"), &[AUTH], None).await.status, StatusCode::NO_CONTENT);
-    assert_eq!(call(&h, "DELETE", &format!("/connections/{id}?provider_config_key=crm"), &[AUTH], None).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        call(
+            &h,
+            "DELETE",
+            &format!("/connections/{id}?provider_config_key=crm"),
+            &[AUTH],
+            None
+        )
+        .await
+        .status,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        call(
+            &h,
+            "DELETE",
+            &format!("/connections/{id}?provider_config_key=crm"),
+            &[AUTH],
+            None
+        )
+        .await
+        .status,
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
 async fn proxy_over_http() {
     let h = ready().await;
     let conn = connect_crm(&h, "at-1", Some("rt-1"), Some(3_600)).await;
-    h.http.reply("POST", "https://api.crm.example.com/v3/notes", HttpResponse::new(201, r#"{"id":"n1"}"#).header("content-type", "application/json").header("x-upstream", "1"));
-    let headers = [AUTH, ("connection-id", conn.connection_id.as_str()), ("provider-config-key", "crm"), ("nango-proxy-x-trace", "t1"), ("retries", "1")];
-    let r = call(&h, "POST", "/proxy/v3/notes?draft=true", &headers, Some(json!({"text": "hi"}))).await;
+    h.http.reply(
+        "POST",
+        "https://api.crm.example.com/v3/notes",
+        HttpResponse::new(201, r#"{"id":"n1"}"#)
+            .header("content-type", "application/json")
+            .header("x-upstream", "1"),
+    );
+    let headers = [
+        AUTH,
+        ("connection-id", conn.connection_id.as_str()),
+        ("provider-config-key", "crm"),
+        ("nango-proxy-x-trace", "t1"),
+        ("retries", "1"),
+    ];
+    let r = call(
+        &h,
+        "POST",
+        "/proxy/v3/notes?draft=true",
+        &headers,
+        Some(json!({"text": "hi"})),
+    )
+    .await;
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.text());
     assert_eq!(r.json()["id"], "n1");
     assert_eq!(r.header("x-upstream"), Some("1"));
@@ -274,15 +550,49 @@ async fn proxy_over_http() {
     assert_eq!(sent.header_value("authorization"), Some("Bearer at-1"));
     assert_eq!(sent.header_value("content-type"), Some("application/json"));
     assert_eq!(sent.body, br#"{"text":"hi"}"#);
-    assert!(sent.header_value("connection-id").is_none(), "control headers stay here");
+    assert!(
+        sent.header_value("connection-id").is_none(),
+        "control headers stay here"
+    );
 
-    let r = call(&h, "GET", "/proxy/v3/x", &[AUTH, ("provider-config-key", "crm")], None).await;
+    let r = call(
+        &h,
+        "GET",
+        "/proxy/v3/x",
+        &[AUTH, ("provider-config-key", "crm")],
+        None,
+    )
+    .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
     assert_eq!(r.json()["error"]["code"], "missing_field");
-    let r = call(&h, "GET", "/proxy/v3/x", &[AUTH, ("connection-id", &conn.connection_id), ("provider-config-key", "crm"), ("base-url-override", "https://evil.example.org")], None).await;
+    let r = call(
+        &h,
+        "GET",
+        "/proxy/v3/x",
+        &[
+            AUTH,
+            ("connection-id", &conn.connection_id),
+            ("provider-config-key", "crm"),
+            ("base-url-override", "https://evil.example.org"),
+        ],
+        None,
+    )
+    .await;
     assert_eq!(r.status, StatusCode::FORBIDDEN);
     assert_eq!(r.json()["error"]["code"], "forbidden_host");
-    let r = call(&h, "GET", "/proxy/v3/x", &[AUTH, ("connection-id", &conn.connection_id), ("provider-config-key", "crm"), ("retries", "lots")], None).await;
+    let r = call(
+        &h,
+        "GET",
+        "/proxy/v3/x",
+        &[
+            AUTH,
+            ("connection-id", &conn.connection_id),
+            ("provider-config-key", "crm"),
+            ("retries", "lots"),
+        ],
+        None,
+    )
+    .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
 }
 
@@ -290,20 +600,54 @@ async fn proxy_over_http() {
 async fn records_over_http() {
     let h = ready().await;
     let conn = connect_crm(&h, "at-1", None, None).await;
-    h.san.save_records("dev", &conn.key(), "Contact", (0..3).map(|i| json!({"id": i.to_string()})).collect()).await.unwrap();
-    let headers = [AUTH, ("connection-id", conn.connection_id.as_str()), ("provider-config-key", "crm")];
+    h.san
+        .save_records(
+            "dev",
+            &conn.key(),
+            "Contact",
+            (0..3).map(|i| json!({"id": i.to_string()})).collect(),
+        )
+        .await
+        .unwrap();
+    let headers = [
+        AUTH,
+        ("connection-id", conn.connection_id.as_str()),
+        ("provider-config-key", "crm"),
+    ];
     let r = call(&h, "GET", "/records?model=Contact&limit=2", &headers, None).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
     let body = r.json();
     assert_eq!(body["records"].as_array().unwrap().len(), 2);
     let cursor = body["next_cursor"].as_str().unwrap().to_owned();
-    let r = call(&h, "GET", &format!("/records?model=Contact&cursor={cursor}"), &headers, None).await;
+    let r = call(
+        &h,
+        "GET",
+        &format!("/records?model=Contact&cursor={cursor}"),
+        &headers,
+        None,
+    )
+    .await;
     assert_eq!(r.json()["records"].as_array().unwrap().len(), 1);
     assert_eq!(r.json()["next_cursor"], Value::Null);
-    let r = call(&h, "GET", "/records?model=Contact&filter=added&ids=0,1", &headers, None).await;
+    let r = call(
+        &h,
+        "GET",
+        "/records?model=Contact&filter=added&ids=0,1",
+        &headers,
+        None,
+    )
+    .await;
     assert_eq!(r.json()["records"].as_array().unwrap().len(), 2);
-    assert_eq!(call(&h, "GET", "/records?model=Contact&limit=0", &headers, None).await.status, StatusCode::BAD_REQUEST);
-    assert_eq!(call(&h, "GET", "/records", &headers, None).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        call(&h, "GET", "/records?model=Contact&limit=0", &headers, None)
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(&h, "GET", "/records", &headers, None).await.status,
+        StatusCode::BAD_REQUEST
+    );
 }
 
 struct Tiny(Arc<AtomicUsize>);
@@ -311,7 +655,13 @@ struct Tiny(Arc<AtomicUsize>);
 #[async_trait]
 impl SyncFunction for Tiny {
     fn spec(&self) -> SyncSpec {
-        SyncSpec { name: "tiny".into(), integration: "crm".into(), models: vec!["T".into()], frequency: Duration::from_secs(60), auto_start: false }
+        SyncSpec {
+            name: "tiny".into(),
+            integration: "crm".into(),
+            models: vec!["T".into()],
+            frequency: Duration::from_secs(60),
+            auto_start: false,
+        }
     }
     async fn run(&self, ctx: &SyncContext) -> Result<()> {
         self.0.fetch_add(1, Ordering::SeqCst);
@@ -325,7 +675,10 @@ struct Echo;
 #[async_trait]
 impl ActionFunction for Echo {
     fn spec(&self) -> ActionSpec {
-        ActionSpec { name: "echo".into(), integration: "crm".into() }
+        ActionSpec {
+            name: "echo".into(),
+            integration: "crm".into(),
+        }
     }
     async fn run(&self, _ctx: &ActionContext, input: Value) -> Result<Value> {
         Ok(json!({"echo": input}))
@@ -342,11 +695,28 @@ async fn syncs_and_actions_over_http() {
     assert_eq!(r.json()["success"], true);
     h.san.flush().await;
     assert_eq!(runs.load(Ordering::SeqCst), 1);
-    let r = call(&h, "POST", "/sync/trigger", &[AUTH], Some(json!({"syncs": [{"name": "tiny"}], "provider_config_key": "crm"}))).await;
+    let r = call(
+        &h,
+        "POST",
+        "/sync/trigger",
+        &[AUTH],
+        Some(json!({"syncs": [{"name": "tiny"}], "provider_config_key": "crm"})),
+    )
+    .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
     h.san.flush().await;
     assert_eq!(runs.load(Ordering::SeqCst), 2);
-    let r = call(&h, "GET", &format!("/sync/status?provider_config_key=crm&syncs=*&connection_id={}", conn.connection_id), &[AUTH], None).await;
+    let r = call(
+        &h,
+        "GET",
+        &format!(
+            "/sync/status?provider_config_key=crm&syncs=*&connection_id={}",
+            conn.connection_id
+        ),
+        &[AUTH],
+        None,
+    )
+    .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
     let s = r.json()["syncs"][0].clone();
     assert_eq!(s["name"], "tiny");
@@ -354,16 +724,48 @@ async fn syncs_and_actions_over_http() {
     assert_eq!(s["connection_id"], conn.connection_id);
     assert_eq!(s["latestResult"]["added"], 0);
     assert!(s["finishedAt"].is_string());
-    let r = call(&h, "POST", "/sync/pause", &[AUTH], Some(json!({"syncs": ["tiny"], "provider_config_key": "crm"}))).await;
+    let r = call(
+        &h,
+        "POST",
+        "/sync/pause",
+        &[AUTH],
+        Some(json!({"syncs": ["tiny"], "provider_config_key": "crm"})),
+    )
+    .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
-    let r = call(&h, "POST", "/sync/start", &[AUTH], Some(json!({"syncs": ["tiny"], "provider_config_key": "crm"}))).await;
+    let r = call(
+        &h,
+        "POST",
+        "/sync/start",
+        &[AUTH],
+        Some(json!({"syncs": ["tiny"], "provider_config_key": "crm"})),
+    )
+    .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
 
-    let headers = [AUTH, ("connection-id", conn.connection_id.as_str()), ("provider-config-key", "crm")];
-    let r = call(&h, "POST", "/action/trigger", &headers, Some(json!({"action_name": "echo", "input": {"a": 1}}))).await;
+    let headers = [
+        AUTH,
+        ("connection-id", conn.connection_id.as_str()),
+        ("provider-config-key", "crm"),
+    ];
+    let r = call(
+        &h,
+        "POST",
+        "/action/trigger",
+        &headers,
+        Some(json!({"action_name": "echo", "input": {"a": 1}})),
+    )
+    .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
     assert_eq!(r.json(), json!({"echo": {"a": 1}}));
-    let r = call(&h, "POST", "/action/trigger", &headers, Some(json!({"action_name": "nope"}))).await;
+    let r = call(
+        &h,
+        "POST",
+        "/action/trigger",
+        &headers,
+        Some(json!({"action_name": "nope"})),
+    )
+    .await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
     assert_eq!(r.json()["error"]["code"], "unknown_function");
 }
@@ -372,7 +774,14 @@ async fn syncs_and_actions_over_http() {
 async fn the_connect_page_lists_integrations_and_escapes_text() {
     let h = ready().await;
     let token = session_token(&h, json!({"end_user": {"id": "u1"}, "allowed_integrations": ["crm", "keyed", "basic", "open"]})).await;
-    let r = call(&h, "GET", &format!("/connect?session_token={token}"), &[], None).await;
+    let r = call(
+        &h,
+        "GET",
+        &format!("/connect?session_token={token}"),
+        &[],
+        None,
+    )
+    .await;
     assert_eq!(r.status, StatusCode::OK);
     assert!(r.header("content-type").unwrap().starts_with("text/html"));
     assert!(r.header("content-security-policy").is_some());
@@ -393,13 +802,40 @@ async fn the_route_list_matches_the_router() {
     let h = ready().await;
     assert!(san_mateo::api::ROUTES.len() >= 30);
     for spec in san_mateo::api::ROUTES {
-        let path = spec.path.replace("{key}", "crm").replace("{id}", "c1").replace("{name}", "crm").replace("{*path}", "x");
-        let method = if spec.method == "ANY" { "GET" } else { spec.method };
+        let path = spec
+            .path
+            .replace("{key}", "crm")
+            .replace("{id}", "c1")
+            .replace("{name}", "crm")
+            .replace("{*path}", "x");
+        let method = if spec.method == "ANY" {
+            "GET"
+        } else {
+            spec.method
+        };
         let r = call(&h, method, &path, &[], None).await;
-        assert_ne!(r.status, StatusCode::NOT_FOUND, "{} {}", spec.method, spec.path);
-        assert_ne!(r.status, StatusCode::METHOD_NOT_ALLOWED, "{} {}", spec.method, spec.path);
+        assert_ne!(
+            r.status,
+            StatusCode::NOT_FOUND,
+            "{} {}",
+            spec.method,
+            spec.path
+        );
+        assert_ne!(
+            r.status,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{} {}",
+            spec.method,
+            spec.path
+        );
         if spec.secret_key {
-            assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{} {}", spec.method, spec.path);
+            assert_eq!(
+                r.status,
+                StatusCode::UNAUTHORIZED,
+                "{} {}",
+                spec.method,
+                spec.path
+            );
         }
     }
 }

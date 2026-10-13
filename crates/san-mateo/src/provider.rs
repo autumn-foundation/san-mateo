@@ -262,7 +262,7 @@ pub struct Provider {
     /// A link to the provider API docs.
     #[serde(default)]
     pub docs: Option<String>,
-    /// The OAuth2 authorization URL. It can be a template.
+    /// The `OAuth2` authorization URL. It can be a template.
     #[serde(default)]
     pub authorization_url: Option<String>,
     /// Extra authorization query parameters. Values can be templates.
@@ -346,8 +346,10 @@ impl Provider {
     /// Returns the refresh margin in ms.
     #[must_use]
     pub fn refresh_buffer_ms(&self) -> u64 {
-        self.token_expiration_buffer
-            .map_or(crate::policy::DEFAULT_REFRESH_BUFFER_MS, crate::policy::secs_to_ms)
+        self.token_expiration_buffer.map_or(
+            crate::policy::DEFAULT_REFRESH_BUFFER_MS,
+            crate::policy::secs_to_ms,
+        )
     }
 
     /// Returns the scope separator.
@@ -403,7 +405,11 @@ impl Catalog {
         let entries = match root {
             serde_yaml::Value::Mapping(m) => m,
             serde_yaml::Value::Null => serde_yaml::Mapping::new(),
-            _ => return Err(Error::Invalid("the catalog must be a map of providers".to_owned())),
+            _ => {
+                return Err(Error::Invalid(
+                    "the catalog must be a map of providers".to_owned(),
+                ));
+            }
         };
         let mut raw = BTreeMap::new();
         for (k, v) in entries {
@@ -454,7 +460,8 @@ impl Catalog {
     ///
     /// [`Error::UnknownProvider`] when the catalog does not have it.
     pub fn require(&self, name: &str) -> Result<Arc<Provider>> {
-        self.get(name).ok_or_else(|| Error::UnknownProvider(name.to_owned()))
+        self.get(name)
+            .ok_or_else(|| Error::UnknownProvider(name.to_owned()))
     }
 
     /// Returns all providers, sorted by name.
@@ -489,7 +496,10 @@ fn scalar_to_string(v: serde_yaml::Value) -> Option<String> {
 const MAX_ALIAS_DEPTH: usize = 8;
 
 /// Returns the entry with its alias chain merged in (shallow, own keys win).
-fn resolve_alias(raw: &BTreeMap<String, serde_yaml::Value>, name: &str) -> Result<serde_yaml::Value> {
+fn resolve_alias(
+    raw: &BTreeMap<String, serde_yaml::Value>,
+    name: &str,
+) -> Result<serde_yaml::Value> {
     let alias_key = serde_yaml::Value::String("alias".to_owned());
     let mut chain = vec![name.to_owned()];
     let mut current = raw
@@ -577,7 +587,9 @@ fn de_string_map<'de, D: Deserializer<'de>>(
 fn de_string_vec<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Vec<String>, D::Error> {
     let v = serde_yaml::Value::deserialize(d)?;
     Ok(match v {
-        serde_yaml::Value::Sequence(items) => items.into_iter().filter_map(scalar_to_string).collect(),
+        serde_yaml::Value::Sequence(items) => {
+            items.into_iter().filter_map(scalar_to_string).collect()
+        }
         other => scalar_to_string(other).into_iter().collect(),
     })
 }
@@ -666,14 +678,23 @@ two-step:
         assert_eq!(p.refresh_buffer_ms(), 120_000);
         assert_eq!(p.body_format, Some(BodyFormat::Json));
         assert_eq!(p.token_request_auth_method, Some(TokenAuthMethod::Basic));
-        assert_eq!(p.token_url_for(&AuthMode::OAuth2), Some("https://auth.example.com/token"));
+        assert_eq!(
+            p.token_url_for(&AuthMode::OAuth2),
+            Some("https://auth.example.com/token")
+        );
         let retry = p.proxy.as_ref().unwrap().retry.as_ref().unwrap();
         assert_eq!(retry.at, vec!["x-reset"]);
         assert_eq!(retry.after, vec!["retry-after", "x-wait"]);
         assert_eq!(retry.error_code, vec!["429", "5xx"]);
-        assert!(matches!(p.proxy.as_ref().unwrap().paginate, Some(PaginationConfig::Cursor { .. })));
+        assert!(matches!(
+            p.proxy.as_ref().unwrap().paginate,
+            Some(PaginationConfig::Cursor { .. })
+        ));
         assert_eq!(p.connection_config["subdomain"].allowed, vec!["a", "b"]);
-        assert_eq!(p.base_url(), Some("https://${connectionConfig.subdomain}.example.com"));
+        assert_eq!(
+            p.base_url(),
+            Some("https://${connectionConfig.subdomain}.example.com")
+        );
     }
 
     #[test]
@@ -694,11 +715,26 @@ two-step:
         let k = c.get("key-api").unwrap();
         assert_eq!(k.scope_separator(), " ");
         assert!(k.uses_pkce());
-        assert_eq!(k.refresh_buffer_ms(), crate::policy::DEFAULT_REFRESH_BUFFER_MS);
+        assert_eq!(
+            k.refresh_buffer_ms(),
+            crate::policy::DEFAULT_REFRESH_BUFFER_MS
+        );
         assert!(!k.expires_in_ms());
-        assert_eq!(k.proxy.as_ref().unwrap().verification.as_ref().unwrap().method, "GET");
+        assert_eq!(
+            k.proxy
+                .as_ref()
+                .unwrap()
+                .verification
+                .as_ref()
+                .unwrap()
+                .method,
+            "GET"
+        );
         let cc = c.get("cc-api").unwrap();
-        assert_eq!(cc.token_url_for(&AuthMode::OAuth2ClientCredentials), Some("https://cc.example.com/token"));
+        assert_eq!(
+            cc.token_url_for(&AuthMode::OAuth2ClientCredentials),
+            Some("https://cc.example.com/token")
+        );
         assert_eq!(cc.token_url_for(&AuthMode::OAuth2), None);
     }
 
@@ -732,7 +768,10 @@ two-step:
     #[test]
     fn merge_and_require() {
         let a = Catalog::from_yaml_str("x:\n  display_name: A\n  auth_mode: NONE\n").unwrap();
-        let b = Catalog::from_yaml_str("x:\n  display_name: B\n  auth_mode: NONE\ny:\n  display_name: Y\n  auth_mode: NONE\n").unwrap();
+        let b = Catalog::from_yaml_str(
+            "x:\n  display_name: B\n  auth_mode: NONE\ny:\n  display_name: Y\n  auth_mode: NONE\n",
+        )
+        .unwrap();
         let m = a.merge(b);
         assert_eq!(m.len(), 2);
         assert_eq!(m.get("x").unwrap().display_name, "B");
@@ -745,13 +784,23 @@ two-step:
     fn builtin_catalog_covers_each_supported_mode() {
         let c = Catalog::builtin().unwrap();
         assert!(c.len() >= 25, "{}", c.len());
-        for mode in [AuthMode::OAuth2, AuthMode::OAuth2ClientCredentials, AuthMode::ApiKey, AuthMode::Basic, AuthMode::None] {
+        for mode in [
+            AuthMode::OAuth2,
+            AuthMode::OAuth2ClientCredentials,
+            AuthMode::ApiKey,
+            AuthMode::Basic,
+            AuthMode::None,
+        ] {
             assert!(c.iter().any(|p| p.auth_mode == mode), "{mode:?}");
         }
         for p in c.iter() {
             assert!(p.auth_mode.is_supported(), "{}", p.name);
             assert!(!p.display_name.is_empty(), "{}", p.name);
-            assert!(p.docs.as_deref().is_some_and(|d| d.starts_with("https://")), "{}", p.name);
+            assert!(
+                p.docs.as_deref().is_some_and(|d| d.starts_with("https://")),
+                "{}",
+                p.name
+            );
             assert!(p.base_url().is_some(), "{}", p.name);
             if p.auth_mode == AuthMode::OAuth2 {
                 assert!(p.authorization_url.is_some(), "{}", p.name);

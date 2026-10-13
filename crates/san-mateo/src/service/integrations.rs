@@ -10,7 +10,9 @@ use crate::store::IntegrationRow;
 pub(crate) fn valid_key(key: &str) -> bool {
     !key.is_empty()
         && key.len() <= 100
-        && key.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
 }
 
 impl SanMateo {
@@ -33,10 +35,19 @@ impl SanMateo {
         }
     }
 
-    fn seal_client_secret(&self, env: &str, key: &str, secret: Option<&Secret>) -> Result<Option<String>> {
+    fn seal_client_secret(
+        &self,
+        env: &str,
+        key: &str,
+        secret: Option<&Secret>,
+    ) -> Result<Option<String>> {
         secret
             .filter(|s| !s.is_empty())
-            .map(|s| self.inner.keys.seal(s.expose().as_bytes(), &Self::integration_aad(env, key)))
+            .map(|s| {
+                self.inner
+                    .keys
+                    .seal(s.expose().as_bytes(), &Self::integration_aad(env, key))
+            })
             .transpose()
     }
 
@@ -54,11 +65,13 @@ impl SanMateo {
         row.client_secret
             .as_deref()
             .map(|sealed| {
-                let bytes = self
-                    .inner
-                    .keys
-                    .open(sealed, &Self::integration_aad(&row.environment, &row.unique_key))?;
-                String::from_utf8(bytes).map(Secret::new).map_err(|_| Error::Crypto)
+                let bytes = self.inner.keys.open(
+                    sealed,
+                    &Self::integration_aad(&row.environment, &row.unique_key),
+                )?;
+                String::from_utf8(bytes)
+                    .map(Secret::new)
+                    .map_err(|_| Error::Crypto)
             })
             .transpose()
     }
@@ -68,16 +81,26 @@ impl SanMateo {
     /// # Errors
     ///
     /// [`Error::UnknownProvider`], [`Error::Conflict`], [`Error::Invalid`].
-    pub async fn create_integration(&self, env: &str, input: NewIntegration) -> Result<Integration> {
+    pub async fn create_integration(
+        &self,
+        env: &str,
+        input: NewIntegration,
+    ) -> Result<Integration> {
         self.environment(env)?;
         if !valid_key(&input.unique_key) {
-            return Err(invalid("the integration key must be 1 to 100 chars of [A-Za-z0-9_.-]"));
+            return Err(invalid(
+                "the integration key must be 1 to 100 chars of [A-Za-z0-9_.-]",
+            ));
         }
         self.catalog().require(&input.provider)?;
         let now = self.now();
         let row = IntegrationRow {
             environment: env.to_owned(),
-            client_secret: self.seal_client_secret(env, &input.unique_key, input.client_secret.as_ref())?,
+            client_secret: self.seal_client_secret(
+                env,
+                &input.unique_key,
+                input.client_secret.as_ref(),
+            )?,
             unique_key: input.unique_key,
             provider: input.provider,
             display_name: input.display_name.filter(|d| !d.is_empty()),

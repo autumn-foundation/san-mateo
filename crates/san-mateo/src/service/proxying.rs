@@ -25,7 +25,12 @@ struct Prepared {
 }
 
 impl SanMateo {
-    fn prepare(&self, conn: &Connection, provider: &Provider, request: &ProxyRequest) -> Result<Prepared> {
+    fn prepare(
+        &self,
+        conn: &Connection,
+        provider: &Provider,
+        request: &ProxyRequest,
+    ) -> Result<Prepared> {
         let vars = Self::vars_for(&conn.credentials, &conn.connection_config, &conn.metadata);
         let provider_base = provider
             .base_url()
@@ -34,23 +39,35 @@ impl SanMateo {
         let (base, is_override) = match &request.base_url_override {
             Some(b) => (b.clone(), true),
             None => (
-                provider_base
-                    .clone()?
-                    .ok_or_else(|| invalid(format!("provider {} has no proxy base URL", provider.name)))?,
+                provider_base.clone()?.ok_or_else(|| {
+                    invalid(format!("provider {} has no proxy base URL", provider.name))
+                })?,
                 false,
             ),
         };
-        let provider_host = provider_base.ok().flatten().as_deref().and_then(px::host_of);
+        let provider_host = provider_base
+            .ok()
+            .flatten()
+            .as_deref()
+            .and_then(px::host_of);
         let mut query = px::provider_query(provider, &vars)?;
         query.extend(request.params.iter().cloned());
         let url = px::add_query(&px::join_url(&base, &request.endpoint)?, &query)?;
-        px::check_upstream(&url, provider_host.as_deref(), is_override, &self.inner.config.proxy)?;
-        let headers = px::merge_headers(px::provider_headers(provider, &vars)?, px::auth_headers(&conn.credentials, provider));
+        px::check_upstream(
+            &url,
+            provider_host.as_deref(),
+            is_override,
+            &self.inner.config.proxy,
+        )?;
+        let headers = px::merge_headers(
+            px::provider_headers(provider, &vars)?,
+            px::auth_headers(&conn.credentials, provider),
+        );
         let headers = px::strip_hop_by_hop(px::merge_headers(headers, request.headers.clone()));
         Ok(Prepared { url, headers })
     }
 
-    fn can_refresh(conn: &Connection) -> bool {
+    const fn can_refresh(conn: &Connection) -> bool {
         match &conn.credentials {
             crate::Credentials::OAuth2(o) => o.refresh_token.is_some(),
             crate::Credentials::OAuth2ClientCredentials(_) => true,
@@ -64,7 +81,12 @@ impl SanMateo {
     ///
     /// Connection errors, [`Error::ForbiddenHost`], [`Error::Upstream`],
     /// [`Error::UpstreamTooLarge`].
-    pub async fn proxy(&self, env: &str, key: &ConnectionKey, request: ProxyRequest) -> Result<ProxyResponse> {
+    pub async fn proxy(
+        &self,
+        env: &str,
+        key: &ConnectionKey,
+        request: ProxyRequest,
+    ) -> Result<ProxyResponse> {
         let mut conn = self.get_connection(env, key, GetOptions::default()).await?;
         let provider = self.catalog().require(&conn.provider)?;
         let retry = provider.proxy.as_ref().and_then(|p| p.retry.as_ref());
@@ -78,7 +100,8 @@ impl SanMateo {
         let mut refreshed = false;
         let mut attempt = 1_u32;
         loop {
-            let mut send = HttpRequest::new(&request.method, prepared.url.clone()).body(request.body.clone());
+            let mut send =
+                HttpRequest::new(&request.method, prepared.url.clone()).body(request.body.clone());
             send.headers.clone_from(&prepared.headers);
             let result = self.inner.transport.send(send).await;
             let step = match &result {
@@ -86,18 +109,28 @@ impl SanMateo {
                     if reply.status == 401 && !refreshed && Self::can_refresh(&conn) {
                         refreshed = true;
                         if let Ok((row, creds)) = self.refresh(env, key, RefreshMode::Force).await {
-                            conn = self.to_connection(row, creds);
+                            conn = Self::to_connection(row, creds);
                             prepared = self.prepare(&conn, &provider, &request)?;
                             continue;
                         }
                     }
-                    let (outcome, opted_in) = px::classify(reply.status, &reply.headers, retry, &request.retry_on);
+                    let (outcome, opted_in) =
+                        px::classify(reply.status, &reply.headers, retry, &request.retry_on);
                     let wait = px::header_wait_ms(&reply.headers, retry, self.now_ms());
                     policy::decide(outcome, attempt, idempotent, opted_in, wait, &rule)
                 }
                 Err(TransportError::BodyTooLarge) => return Err(Error::UpstreamTooLarge),
-                Err(TransportError::Invalid(m)) => return Err(invalid(format!("the upstream request is not valid: {m}"))),
-                Err(_) => policy::decide(Outcome::NetworkError, attempt, idempotent, false, None, &rule),
+                Err(TransportError::Invalid(m)) => {
+                    return Err(invalid(format!("the upstream request is not valid: {m}")));
+                }
+                Err(_) => policy::decide(
+                    Outcome::NetworkError,
+                    attempt,
+                    idempotent,
+                    false,
+                    None,
+                    &rule,
+                ),
             };
             match step {
                 Step::Retry(wait_ms) => {
@@ -138,7 +171,12 @@ impl SanMateo {
             .config
             .clone()
             .or_else(|| provider.proxy.as_ref().and_then(|p| p.paginate.clone()))
-            .ok_or_else(|| invalid(format!("provider {} has no pagination config", provider.name)))?;
+            .ok_or_else(|| {
+                invalid(format!(
+                    "provider {} has no pagination config",
+                    provider.name
+                ))
+            })?;
         let mut paginator = Paginator::new(config, options.limit);
         let max_pages = options.max_pages.unwrap_or(DEFAULT_MAX_PAGES).max(1);
         let mut page = request.clone();
@@ -147,7 +185,10 @@ impl SanMateo {
         for _ in 0..max_pages {
             let reply = self.proxy(env, key, page.clone()).await?;
             if !reply.is_success() {
-                return Err(Error::Upstream(format!("a page reply has status {}", reply.status)));
+                return Err(Error::Upstream(format!(
+                    "a page reply has status {}",
+                    reply.status
+                )));
             }
             let body: Value = reply.json()?;
             records.extend(paginator.records(&body));
@@ -156,7 +197,11 @@ impl SanMateo {
             };
             match next.link {
                 Some(link) => {
-                    let (base, endpoint) = split_link(&link, page.base_url_override.as_deref(), provider.base_url())?;
+                    let (base, endpoint) = split_link(
+                        &link,
+                        page.base_url_override.as_deref(),
+                        provider.base_url(),
+                    )?;
                     page.base_url_override = base;
                     page.endpoint = endpoint;
                     page.params.clear();
@@ -170,7 +215,11 @@ impl SanMateo {
 
 /// Sets the query of a page: the caller params, with the page params in place
 /// of params with the same name.
-fn set_params(page: &mut ProxyRequest, caller: &[(String, String)], page_params: Vec<(String, String)>) {
+fn set_params(
+    page: &mut ProxyRequest,
+    caller: &[(String, String)],
+    page_params: Vec<(String, String)>,
+) {
     let mut params: Vec<(String, String)> = caller
         .iter()
         .filter(|(k, _)| !page_params.iter().any(|(p, _)| p == k))
@@ -184,7 +233,11 @@ fn set_params(page: &mut ProxyRequest, caller: &[(String, String)], page_params:
 ///
 /// An absolute link uses its own origin, so the proxy checks its host. A path
 /// uses the origin of the current base.
-fn split_link(link: &str, current_override: Option<&str>, provider_base: Option<&str>) -> Result<(Option<String>, String)> {
+fn split_link(
+    link: &str,
+    current_override: Option<&str>,
+    provider_base: Option<&str>,
+) -> Result<(Option<String>, String)> {
     let origin = |u: &url::Url| u.origin().ascii_serialization();
     if let Ok(abs) = url::Url::parse(link) {
         let mut endpoint = abs.path().to_owned();

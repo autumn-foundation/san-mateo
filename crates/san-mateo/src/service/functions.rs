@@ -88,22 +88,39 @@ impl SanMateo {
     ///
     /// [`Error::UnknownFunction`], [`Error::UnknownConnection`],
     /// [`Error::Conflict`] when the sync runs already.
-    pub async fn run_sync(&self, env: &str, key: &ConnectionKey, sync_name: &str) -> Result<SyncRunReport> {
+    pub async fn run_sync(
+        &self,
+        env: &str,
+        key: &ConnectionKey,
+        sync_name: &str,
+    ) -> Result<SyncRunReport> {
         let sync = self.sync_fn(&key.provider_config_key, sync_name)?;
         let conn = self.connection_row(env, key).await?;
         self.run_sync_row(env, &conn, sync).await
     }
 
-    async fn run_sync_row(&self, env: &str, conn: &ConnectionRow, sync: Arc<dyn SyncFunction>) -> Result<SyncRunReport> {
+    async fn run_sync_row(
+        &self,
+        env: &str,
+        conn: &ConnectionRow,
+        sync: Arc<dyn SyncFunction>,
+    ) -> Result<SyncRunReport> {
         let spec = sync.spec();
         let run_key = (conn.id, spec.name.clone());
         {
-            let mut running = self.inner.running_syncs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut running = self
+                .inner
+                .running_syncs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if !running.insert(run_key.clone()) {
                 return Err(Error::Conflict(format!("sync {} runs already", spec.name)));
             }
         }
-        let _guard = Running { set: &self.inner.running_syncs, key: run_key };
+        let _guard = Running {
+            set: &self.inner.running_syncs,
+            key: run_key,
+        };
         let mut state = self.state_of(conn.id, sync.as_ref()).await?;
         let started = self.now();
         state.status = SyncStatus::Running;
@@ -120,10 +137,21 @@ impl SanMateo {
             last_success_at: state.last_success_at,
             outcome: Mutex::new(BatchOutcome::default()),
         };
-        let result = AssertUnwindSafe(sync.run(&ctx)).catch_unwind().await.unwrap_or_else(|_| Err(panic_text()));
-        let run_counts = counts(&ctx.outcome.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        let result = AssertUnwindSafe(sync.run(&ctx))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| Err(panic_text()));
+        let run_counts = counts(
+            &ctx.outcome
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
         let finished = self.now();
-        state.status = if result.is_ok() { SyncStatus::Success } else { SyncStatus::Error };
+        state.status = if result.is_ok() {
+            SyncStatus::Success
+        } else {
+            SyncStatus::Error
+        };
         state.last_finished_at = Some(finished);
         if result.is_ok() {
             state.last_success_at = Some(finished);
@@ -146,7 +174,10 @@ impl SanMateo {
                 success: result.is_ok(),
                 modified_after: started,
                 counts: run_counts,
-                error: result.as_ref().err().map(|e| ErrorPayload { kind: e.code().to_owned(), description: e.to_string() }),
+                error: result.as_ref().err().map(|e| ErrorPayload {
+                    kind: e.code().to_owned(),
+                    description: e.to_string(),
+                }),
             }),
         );
         Ok(SyncRunReport {
@@ -159,24 +190,35 @@ impl SanMateo {
     }
 
     /// Returns the syncs by name, or all syncs of the integration.
-    fn pick_syncs(&self, integration: &str, names: &[String]) -> Result<Vec<Arc<dyn SyncFunction>>> {
+    fn pick_syncs(
+        &self,
+        integration: &str,
+        names: &[String],
+    ) -> Result<Vec<Arc<dyn SyncFunction>>> {
         if names.is_empty() || names.iter().any(|n| n == "*") {
             return Ok(self.registry().syncs_for(integration));
         }
         names.iter().map(|n| self.sync_fn(integration, n)).collect()
     }
 
-    async fn pick_connections(&self, env: &str, integration: &str, connection_id: Option<&str>) -> Result<Vec<ConnectionRow>> {
+    async fn pick_connections(
+        &self,
+        env: &str,
+        integration: &str,
+        connection_id: Option<&str>,
+    ) -> Result<Vec<ConnectionRow>> {
         self.integration_row(env, integration).await?;
-        match connection_id {
-            Some(id) => Ok(vec![self.connection_row(env, &ConnectionKey::new(integration, id)).await?]),
-            None => {
-                let filter = ConnectionFilter {
-                    provider_config_key: Some(integration.to_owned()),
-                    ..ConnectionFilter::default()
-                };
-                self.inner.store.list_connections(env, &filter).await
-            }
+        if let Some(id) = connection_id {
+            Ok(vec![
+                self.connection_row(env, &ConnectionKey::new(integration, id))
+                    .await?,
+            ])
+        } else {
+            let filter = ConnectionFilter {
+                provider_config_key: Some(integration.to_owned()),
+                ..ConnectionFilter::default()
+            };
+            self.inner.store.list_connections(env, &filter).await
         }
     }
 
@@ -193,7 +235,9 @@ impl SanMateo {
         connection_id: Option<&str>,
         syncs: &[String],
     ) -> Result<usize> {
-        let conns = self.pick_connections(env, integration, connection_id).await?;
+        let conns = self
+            .pick_connections(env, integration, connection_id)
+            .await?;
         let picked = self.pick_syncs(integration, syncs)?;
         let mut started = 0;
         for conn in conns {
@@ -227,7 +271,10 @@ impl SanMateo {
         paused: bool,
     ) -> Result<()> {
         let picked = self.pick_syncs(integration, syncs)?;
-        for conn in self.pick_connections(env, integration, connection_id).await? {
+        for conn in self
+            .pick_connections(env, integration, connection_id)
+            .await?
+        {
             for sync in &picked {
                 let mut state = self.state_of(conn.id, sync.as_ref()).await?;
                 state.paused = paused;
@@ -251,20 +298,30 @@ impl SanMateo {
     ) -> Result<Vec<SyncStatusEntry>> {
         let picked = self.pick_syncs(integration, syncs)?;
         let mut out = Vec::new();
-        for conn in self.pick_connections(env, integration, connection_id).await? {
+        for conn in self
+            .pick_connections(env, integration, connection_id)
+            .await?
+        {
             for sync in &picked {
                 let state = self.state_of(conn.id, sync.as_ref()).await?;
                 let frequency = Duration::from_millis(state.frequency_ms);
                 let next = (sync.spec().auto_start && !state.paused).then(|| {
                     state.last_started_at.map_or_else(
                         || self.now(),
-                        |t| t + chrono::Duration::from_std(frequency).unwrap_or(chrono::Duration::zero()),
+                        |t| {
+                            t + chrono::Duration::from_std(frequency)
+                                .unwrap_or(chrono::Duration::zero())
+                        },
                     )
                 });
                 out.push(SyncStatusEntry {
                     name: state.sync_name.clone(),
                     connection_id: conn.connection_id.clone(),
-                    status: if state.paused { SyncStatus::Paused } else { state.status },
+                    status: if state.paused {
+                        SyncStatus::Paused
+                    } else {
+                        state.status
+                    },
                     frequency,
                     finished_at: state.last_finished_at,
                     next_scheduled_at: next,
@@ -286,22 +343,38 @@ impl SanMateo {
         for env in &self.inner.config.environments {
             for sync in self.registry().syncs() {
                 let spec = sync.spec();
-                if !spec.auto_start || self.inner.store.get_integration(&env.id, &spec.integration).await?.is_none() {
+                if !spec.auto_start
+                    || self
+                        .inner
+                        .store
+                        .get_integration(&env.id, &spec.integration)
+                        .await?
+                        .is_none()
+                {
                     continue;
                 }
-                for conn in self.pick_connections(&env.id, &spec.integration, None).await? {
+                for conn in self
+                    .pick_connections(&env.id, &spec.integration, None)
+                    .await?
+                {
                     let state = self.state_of(conn.id, sync.as_ref()).await?;
-                    let next = state
-                        .last_started_at
-                        .map_or(0, |t| crate::clock::to_ms(t).saturating_add(frequency_ms(sync.as_ref())));
+                    let next = state.last_started_at.map_or(0, |t| {
+                        crate::clock::to_ms(t).saturating_add(frequency_ms(sync.as_ref()))
+                    });
                     if !state.paused && now_ms >= next {
                         due.push((env.id.clone(), conn, sync.clone()));
                     }
                 }
             }
         }
-        let runs = due.into_iter().map(|(env, conn, sync)| async move { self.run_sync_row(&env, &conn, sync).await });
-        Ok(futures::future::join_all(runs).await.into_iter().filter_map(Result::ok).collect())
+        let runs = due
+            .into_iter()
+            .map(|(env, conn, sync)| async move { self.run_sync_row(&env, &conn, sync).await });
+        Ok(futures::future::join_all(runs)
+            .await
+            .into_iter()
+            .filter_map(Result::ok)
+            .collect())
     }
 
     /// Runs an action and returns its output.
@@ -310,18 +383,29 @@ impl SanMateo {
     ///
     /// [`Error::UnknownFunction`], [`Error::UnknownConnection`], and the
     /// errors of the action.
-    pub async fn run_action(&self, env: &str, key: &ConnectionKey, action: &str, input: Value) -> Result<Value> {
+    pub async fn run_action(
+        &self,
+        env: &str,
+        key: &ConnectionKey,
+        action: &str,
+        input: Value,
+    ) -> Result<Value> {
         let f = self
             .registry()
             .get_action(&key.provider_config_key, action)
-            .ok_or_else(|| Error::UnknownFunction(format!("{}/{action}", key.provider_config_key)))?;
+            .ok_or_else(|| {
+                Error::UnknownFunction(format!("{}/{action}", key.provider_config_key))
+            })?;
         self.connection_row(env, key).await?;
         let ctx = ActionContext {
             san: self.clone(),
             environment: env.to_owned(),
             key: key.clone(),
         };
-        AssertUnwindSafe(f.run(&ctx, input)).catch_unwind().await.unwrap_or_else(|_| Err(panic_text()))
+        AssertUnwindSafe(f.run(&ctx, input))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| Err(panic_text()))
     }
 
     /// Starts the background loops: refresh sweep, sync scheduler and session
@@ -341,18 +425,24 @@ impl SanMateo {
                 }
             }
         });
-        Background { stop, task: Some(task) }
+        Background {
+            stop,
+            task: Some(task),
+        }
     }
 
     /// One tick of the background loops. Errors go to the log.
     async fn tick(&self, settings: BackgroundSettings) {
-        if let Err(e) = self.refresh_due(settings.refresh_within, settings.refresh_batch).await {
+        if let Err(e) = self
+            .refresh_due(settings.refresh_within, settings.refresh_batch)
+            .await
+        {
             tracing::warn!(code = e.code(), "the refresh sweep failed");
         }
-        if settings.run_syncs {
-            if let Err(e) = self.run_due_syncs().await {
-                tracing::warn!(code = e.code(), "the sync scheduler failed");
-            }
+        if settings.run_syncs
+            && let Err(e) = self.run_due_syncs().await
+        {
+            tracing::warn!(code = e.code(), "the sync scheduler failed");
         }
         if let Err(e) = self.inner.store.purge_expired(self.now()).await {
             tracing::warn!(code = e.code(), "the session purge failed");

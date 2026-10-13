@@ -1,4 +1,7 @@
 //! HTTP transport. Only this module does network I/O.
+
+// The fake holds its lock for each whole call, so each call is atomic.
+#![allow(clippy::significant_drop_tightening)]
 //!
 //! - [`ReqwestTransport`]: real HTTPS. It never follows redirects.
 //! - [`MemoryTransport`]: a fake for tests. It records requests and replies
@@ -39,7 +42,11 @@ impl std::fmt::Debug for HttpRequest {
             .headers
             .iter()
             .map(|(k, v)| {
-                let v = if is_secret_header(k) { "<redacted>" } else { v.as_str() };
+                let v = if is_secret_header(k) {
+                    "<redacted>"
+                } else {
+                    v.as_str()
+                };
                 (k.as_str(), v)
             })
             .collect();
@@ -145,7 +152,10 @@ impl HttpResponse {
 /// Returns the first value of a header. The name match ignores case.
 #[must_use]
 pub fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
 }
 
 /// A transport failure with no HTTP reply.
@@ -246,7 +256,11 @@ impl HttpTransport for ReqwestTransport {
                 .map_err(|_| TransportError::Invalid("bad header value".to_owned()))?;
             builder = builder.header(name, value);
         }
-        let mut response = builder.body(request.body).send().await.map_err(Self::map_error)?;
+        let mut response = builder
+            .body(request.body)
+            .send()
+            .await
+            .map_err(Self::map_error)?;
         if response
             .content_length()
             .is_some_and(|n| n > self.max_body_bytes as u64)
@@ -257,7 +271,12 @@ impl HttpTransport for ReqwestTransport {
         let headers = response
             .headers()
             .iter()
-            .map(|(k, v)| (k.as_str().to_owned(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_owned(),
+                    String::from_utf8_lossy(v.as_bytes()).into_owned(),
+                )
+            })
             .collect();
         let mut body = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(Self::map_error)? {
@@ -266,7 +285,11 @@ impl HttpTransport for ReqwestTransport {
             }
             body.extend_from_slice(&chunk);
         }
-        Ok(HttpResponse { status, headers, body })
+        Ok(HttpResponse {
+            status,
+            headers,
+            body,
+        })
     }
 }
 
@@ -377,8 +400,14 @@ mod tests {
         assert_eq!(r.header_value("authorization"), Some("Bearer secret-1"));
         assert_eq!(r.header_value("ACCEPT"), Some("application/json"));
         let d = format!("{r:?}");
-        assert!(!d.contains("secret-1") && !d.contains("secret-2") && !d.contains("secret-body"), "{d}");
-        assert!(d.contains("application/json") && d.contains("body_len"), "{d}");
+        assert!(
+            !d.contains("secret-1") && !d.contains("secret-2") && !d.contains("secret-body"),
+            "{d}"
+        );
+        assert!(
+            d.contains("application/json") && d.contains("body_len"),
+            "{d}"
+        );
     }
 
     #[test]
@@ -387,7 +416,10 @@ mod tests {
         assert_eq!(r.status, 201);
         assert_eq!(r.header_value("content-type"), Some("application/json"));
         assert_eq!(r.header_value("retry-after"), Some("5"));
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()["a"], 1);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()["a"],
+            1
+        );
     }
 
     #[tokio::test]
@@ -400,7 +432,13 @@ mod tests {
         assert_eq!(send("https://a/x").await.unwrap().status, 200);
         assert_eq!(send("https://a/x").await.unwrap().status, 200);
         assert_eq!(send("https://a/other").await.unwrap().status, 404);
-        assert_eq!(t.send(HttpRequest::new("POST", "https://a/x")).await.unwrap().status, 404);
+        assert_eq!(
+            t.send(HttpRequest::new("POST", "https://a/x"))
+                .await
+                .unwrap()
+                .status,
+            404
+        );
         assert_eq!(t.requests().len(), 5);
         assert_eq!(t.requests_to("https://a/x").len(), 4, "all methods");
     }
@@ -409,7 +447,10 @@ mod tests {
     async fn memory_failures() {
         let t = MemoryTransport::new();
         t.fail("GET", "https://a/x", TransportError::Timeout);
-        assert_eq!(t.send(HttpRequest::new("GET", "https://a/x")).await, Err(TransportError::Timeout));
+        assert_eq!(
+            t.send(HttpRequest::new("GET", "https://a/x")).await,
+            Err(TransportError::Timeout)
+        );
     }
 
     #[tokio::test]
@@ -420,11 +461,23 @@ mod tests {
             max_body_bytes: 1024,
         })
         .unwrap();
-        let err = t.send(HttpRequest::new("GET", "http://127.0.0.1:9/")).await.unwrap_err();
-        assert!(matches!(err, TransportError::Connect(_) | TransportError::Timeout), "{err:?}");
-        let err = t.send(HttpRequest::new("GET", "not a url")).await.unwrap_err();
+        let err = t
+            .send(HttpRequest::new("GET", "http://127.0.0.1:9/"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, TransportError::Connect(_) | TransportError::Timeout),
+            "{err:?}"
+        );
+        let err = t
+            .send(HttpRequest::new("GET", "not a url"))
+            .await
+            .unwrap_err();
         assert!(matches!(err, TransportError::Invalid(_)), "{err:?}");
-        let err = t.send(HttpRequest::new("BAD METHOD", "http://127.0.0.1:9/")).await.unwrap_err();
+        let err = t
+            .send(HttpRequest::new("BAD METHOD", "http://127.0.0.1:9/"))
+            .await
+            .unwrap_err();
         assert!(matches!(err, TransportError::Invalid(_)), "{err:?}");
     }
 }

@@ -137,8 +137,14 @@ impl SyncContext {
     /// # Errors
     ///
     /// The errors of [`SanMateo::paginate`].
-    pub async fn paginate(&self, request: ProxyRequest, options: PaginateOptions) -> Result<Vec<Value>> {
-        self.san.paginate(&self.environment, &self.key, request, options).await
+    pub async fn paginate(
+        &self,
+        request: ProxyRequest,
+        options: PaginateOptions,
+    ) -> Result<Vec<Value>> {
+        self.san
+            .paginate(&self.environment, &self.key, request, options)
+            .await
     }
 
     /// Saves records of `model`. Each record must have an `id`.
@@ -147,13 +153,18 @@ impl SyncContext {
     ///
     /// The errors of [`SanMateo::save_records`].
     pub async fn batch_save(&self, model: &str, records: Vec<Value>) -> Result<BatchOutcome> {
-        let out = self.san.save_records(&self.environment, &self.key, model, records).await?;
+        let out = self
+            .san
+            .save_records(&self.environment, &self.key, model, records)
+            .await?;
         self.lock_outcome().extend(out.clone());
         Ok(out)
     }
 
     fn lock_outcome(&self) -> std::sync::MutexGuard<'_, BatchOutcome> {
-        self.outcome.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.outcome
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Marks records of `model` as deleted. Each record must have an `id`.
@@ -162,7 +173,10 @@ impl SyncContext {
     ///
     /// The errors of [`SanMateo::delete_records`].
     pub async fn batch_delete(&self, model: &str, records: Vec<Value>) -> Result<BatchOutcome> {
-        let out = self.san.delete_records(&self.environment, &self.key, model, records).await?;
+        let out = self
+            .san
+            .delete_records(&self.environment, &self.key, model, records)
+            .await?;
         self.lock_outcome().extend(out.clone());
         Ok(out)
     }
@@ -173,7 +187,10 @@ impl SyncContext {
     ///
     /// [`crate::Error::UnknownConnection`] when the connection is gone.
     pub async fn metadata(&self) -> Result<Value> {
-        let row = self.san.connection_row(&self.environment, &self.key).await?;
+        let row = self
+            .san
+            .connection_row(&self.environment, &self.key)
+            .await?;
         Ok(row.metadata)
     }
 
@@ -182,7 +199,11 @@ impl SyncContext {
     pub fn counts(&self) -> SyncCounts {
         let o = self.lock_outcome();
         let n = |v: &Vec<String>| u64::try_from(v.len()).unwrap_or(u64::MAX);
-        SyncCounts { added: n(&o.added), updated: n(&o.updated), deleted: n(&o.deleted) }
+        SyncCounts {
+            added: n(&o.added),
+            updated: n(&o.updated),
+            deleted: n(&o.deleted),
+        }
     }
 
     /// Returns the internal id of the connection.
@@ -235,8 +256,14 @@ impl ActionContext {
     /// # Errors
     ///
     /// The errors of [`SanMateo::paginate`].
-    pub async fn paginate(&self, request: ProxyRequest, options: PaginateOptions) -> Result<Vec<Value>> {
-        self.san.paginate(&self.environment, &self.key, request, options).await
+    pub async fn paginate(
+        &self,
+        request: ProxyRequest,
+        options: PaginateOptions,
+    ) -> Result<Vec<Value>> {
+        self.san
+            .paginate(&self.environment, &self.key, request, options)
+            .await
     }
 
     /// Returns the connection metadata.
@@ -245,7 +272,10 @@ impl ActionContext {
     ///
     /// [`crate::Error::UnknownConnection`] when the connection is gone.
     pub async fn metadata(&self) -> Result<Value> {
-        let row = self.san.connection_row(&self.environment, &self.key).await?;
+        let row = self
+            .san
+            .connection_row(&self.environment, &self.key)
+            .await?;
         Ok(row.metadata)
     }
 }
@@ -304,13 +334,17 @@ impl Registry {
     /// Returns a sync.
     #[must_use]
     pub fn get_sync(&self, integration: &str, name: &str) -> Option<Arc<dyn SyncFunction>> {
-        self.syncs.get(&(integration.to_owned(), name.to_owned())).cloned()
+        self.syncs
+            .get(&(integration.to_owned(), name.to_owned()))
+            .cloned()
     }
 
     /// Returns an action.
     #[must_use]
     pub fn get_action(&self, integration: &str, name: &str) -> Option<Arc<dyn ActionFunction>> {
-        self.actions.get(&(integration.to_owned(), name.to_owned())).cloned()
+        self.actions
+            .get(&(integration.to_owned(), name.to_owned()))
+            .cloned()
     }
 
     /// Returns all syncs, sorted by (integration, name).
@@ -363,7 +397,10 @@ mod tests {
     #[async_trait]
     impl ActionFunction for A {
         fn spec(&self) -> ActionSpec {
-            ActionSpec { name: self.0.into(), integration: "gh".into() }
+            ActionSpec {
+                name: self.0.into(),
+                integration: "gh".into(),
+            }
         }
         async fn run(&self, _ctx: &ActionContext, input: Value) -> Result<Value> {
             Ok(input)
@@ -372,7 +409,11 @@ mod tests {
 
     #[test]
     fn registry_lookup() {
-        let r = Registry::new().sync(S("gh", "b")).sync(S("gh", "a")).sync(S("slack", "a")).action(A("create"));
+        let r = Registry::new()
+            .sync(S("gh", "b"))
+            .sync(S("gh", "a"))
+            .sync(S("slack", "a"))
+            .action(A("create"));
         assert!(r.get_sync("gh", "a").is_some());
         assert!(r.get_sync("gh", "zz").is_none());
         assert!(r.get_action("gh", "create").is_some());

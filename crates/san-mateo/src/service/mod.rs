@@ -15,11 +15,10 @@ use crate::clock::{Clock, Entropy, OsEntropy, SystemClock};
 use crate::credentials::Credentials;
 use crate::crypto::KeyRing;
 use crate::error::{Error, Result};
-use crate::functions::{ActionFunction, PaginateOptions, Registry, SyncFunction};
+use crate::functions::{ActionFunction, Registry, SyncFunction};
 use crate::model::{ConnectionKey, EndUser, IntegrationDefaults, Organization, Tags};
 use crate::provider::Catalog;
-use crate::proxy::{ProxyRequest, ProxyResponse, ProxySettings};
-use crate::records::BatchOutcome;
+use crate::proxy::ProxySettings;
 use crate::secret::Secret;
 use crate::store::{MemoryStore, Store, SyncCounts, SyncStatus};
 use crate::transport::{HttpTransport, ReqwestTransport, TransportConfig};
@@ -208,7 +207,7 @@ pub struct ConnectSession {
 }
 
 /// Options for the start of an OAuth flow and for other connect calls.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConnectOptions {
     /// Connection config values from the end user.
     pub connection_config: Map<String, Value>,
@@ -219,7 +218,7 @@ pub struct ConnectOptions {
 }
 
 /// A connection with its credentials.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Connection {
     /// The internal id.
     pub id: Uuid,
@@ -260,7 +259,7 @@ impl Connection {
 }
 
 /// A connection with no credentials, for lists.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionSummary {
     /// The internal id.
     pub id: Uuid,
@@ -301,7 +300,7 @@ impl Default for GetOptions {
 }
 
 /// Input to import a connection with known credentials.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportConnection {
     /// The connection id. Default: a new UUID.
     pub connection_id: Option<String>,
@@ -329,6 +328,7 @@ pub struct ConnectionPatch {
     /// Tags.
     pub tags: Option<Tags>,
     /// The webhook URL. `Some(None)` removes it.
+    #[allow(clippy::option_option)]
     pub webhook_url_override: Option<Option<String>>,
 }
 
@@ -361,7 +361,7 @@ pub struct RecordsRequest {
 }
 
 /// One page of records.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordPage {
     /// The records, each with `_nango_metadata`.
     pub records: Vec<Value>,
@@ -553,7 +553,10 @@ impl SanMateoBuilder {
             if env.secret_key.is_empty() {
                 return Err(invalid("each environment needs a secret key"));
             }
-            if env_by_hash.insert(keys.lookup_hash(env.secret_key.expose()), i).is_some() {
+            if env_by_hash
+                .insert(keys.lookup_hash(env.secret_key.expose()), i)
+                .is_some()
+            {
                 return Err(invalid("two environments have the same secret key"));
             }
         }
@@ -622,7 +625,16 @@ impl std::fmt::Debug for SanMateo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SanMateo")
             .field("server_url", &self.inner.config.server_url)
-            .field("environments", &self.inner.config.environments.iter().map(|e| &e.id).collect::<Vec<_>>())
+            .field(
+                "environments",
+                &self
+                    .inner
+                    .config
+                    .environments
+                    .iter()
+                    .map(|e| &e.id)
+                    .collect::<Vec<_>>(),
+            )
             .field("providers", &self.inner.catalog.len())
             .finish_non_exhaustive()
     }
@@ -677,7 +689,10 @@ impl SanMateo {
             .get(&hash)
             .and_then(|i| self.inner.config.environments.get(*i))
             .ok_or_else(deny)?;
-        if crate::crypto::constant_time_eq(env.secret_key.expose().as_bytes(), secret_key.as_bytes()) {
+        if crate::crypto::constant_time_eq(
+            env.secret_key.expose().as_bytes(),
+            secret_key.as_bytes(),
+        ) {
             Ok(env)
         } else {
             Err(deny())
@@ -735,13 +750,20 @@ impl SanMateo {
     }
 
     /// Sends an event in the background.
-    pub(crate) fn spawn_webhook(&self, env: &str, url_override: Option<String>, event: WebhookEvent) {
+    pub(crate) fn spawn_webhook(
+        &self,
+        env: &str,
+        url_override: Option<String>,
+        event: WebhookEvent,
+    ) {
         let Ok(settings) = self.environment(env).map(|e| e.webhooks.clone()) else {
             return;
         };
         let sender = self.inner.webhooks.clone();
         self.inner.tasks.spawn(async move {
-            sender.deliver(&settings, url_override.as_deref(), &event).await;
+            sender
+                .deliver(&settings, url_override.as_deref(), &event)
+                .await;
         });
     }
 }

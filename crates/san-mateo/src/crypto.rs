@@ -143,7 +143,13 @@ impl KeyRing {
         let mut nonce = [0_u8; 12];
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
         let ct = cipher
-            .encrypt(Nonce::from_slice(&nonce), Payload { msg: plaintext, aad })
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
             .map_err(|_| Error::Crypto)?;
         Ok(format!(
             "{SEALED_PREFIX}.{}.{}.{}",
@@ -160,9 +166,13 @@ impl KeyRing {
     /// [`Error::Crypto`] when the format, the key id, the AAD or the tag is wrong.
     pub fn open(&self, sealed: &str, aad: &[u8]) -> Result<Vec<u8>> {
         let mut parts = sealed.split('.');
-        let (Some(prefix), Some(id), Some(nonce), Some(ct), None) =
-            (parts.next(), parts.next(), parts.next(), parts.next(), parts.next())
-        else {
+        let (Some(prefix), Some(id), Some(nonce), Some(ct), None) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) else {
             return Err(Error::Crypto);
         };
         if prefix != SEALED_PREFIX {
@@ -186,7 +196,8 @@ impl KeyRing {
     ///
     /// Fails when the value does not serialize.
     pub fn seal_json<T: serde::Serialize>(&self, value: &T, aad: &[u8]) -> Result<String> {
-        let bytes = serde_json::to_vec(value).map_err(|e| Error::Internal(format!("serialize: {e}")))?;
+        let bytes =
+            serde_json::to_vec(value).map_err(|e| Error::Internal(format!("serialize: {e}")))?;
         self.seal(&bytes, aad)
     }
 
@@ -235,8 +246,14 @@ fn hmac(key: &[u8], data: &[u8]) -> [u8; 32] {
 fn check_id(id: &str) -> Result<()> {
     let ok = !id.is_empty()
         && id.len() <= 32
-        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
-    if ok { Ok(()) } else { Err(invalid("a key id must be 1 to 32 chars of [A-Za-z0-9_-]")) }
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if ok {
+        Ok(())
+    } else {
+        Err(invalid("a key id must be 1 to 32 chars of [A-Za-z0-9_-]"))
+    }
 }
 
 fn decode_key(key_b64: &str) -> Result<[u8; 32]> {
@@ -312,7 +329,15 @@ mod tests {
     #[test]
     fn malformed_values_fail() {
         let r = ring();
-        for bad in ["", "sm1", "sm1.k1", "sm1.k1.x", "sm2.k1.AAAA.AAAA", "sm1.k1.!!.AAAA", "sm1.k1.AAAAAAAAAAAAAAAA.AAAA"] {
+        for bad in [
+            "",
+            "sm1",
+            "sm1.k1",
+            "sm1.k1.x",
+            "sm2.k1.AAAA.AAAA",
+            "sm1.k1.!!.AAAA",
+            "sm1.k1.AAAAAAAAAAAAAAAA.AAAA",
+        ] {
             assert_eq!(r.open(bad, b""), Err(Error::Crypto), "{bad}");
         }
     }
@@ -375,8 +400,15 @@ mod tests {
         assert_eq!(h, r.lookup_hash("token"));
         assert_ne!(h, r.lookup_hash("token2"));
         assert_ne!(h, KeyRing::new("k1", [8; 32]).unwrap().lookup_hash("token"));
-        assert_ne!(r.keyed_hash("records", b"token"), r.keyed_hash("other", b"token"));
-        let moved = r.clone().with_key("k9", [5; 32]).unwrap().lookup_with("k9").unwrap();
+        assert_ne!(
+            r.keyed_hash("records", b"token"),
+            r.keyed_hash("other", b"token")
+        );
+        let moved = r
+            .with_key("k9", [5; 32])
+            .unwrap()
+            .lookup_with("k9")
+            .unwrap();
         assert_ne!(moved.lookup_hash("token"), h);
     }
 
@@ -387,7 +419,10 @@ mod tests {
         let v: serde_json::Value = r.open_json(&s, b"j").unwrap();
         assert_eq!(v["a"], 1);
         let not_json = r.seal(b"{", b"j").unwrap();
-        assert_eq!(r.open_json::<serde_json::Value>(&not_json, b"j"), Err(Error::Crypto));
+        assert_eq!(
+            r.open_json::<serde_json::Value>(&not_json, b"j"),
+            Err(Error::Crypto)
+        );
     }
 
     #[test]

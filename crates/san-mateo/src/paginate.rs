@@ -82,9 +82,18 @@ impl PaginationConfig {
 
     fn limit_name(&self) -> Option<&str> {
         match self {
-            Self::Cursor { limit_name_in_request, .. }
-            | Self::Link { limit_name_in_request, .. }
-            | Self::Offset { limit_name_in_request, .. } => limit_name_in_request.as_deref(),
+            Self::Cursor {
+                limit_name_in_request,
+                ..
+            }
+            | Self::Link {
+                limit_name_in_request,
+                ..
+            }
+            | Self::Offset {
+                limit_name_in_request,
+                ..
+            } => limit_name_in_request.as_deref(),
         }
     }
 }
@@ -113,7 +122,9 @@ impl Paginator {
     #[must_use]
     pub fn new(config: PaginationConfig, limit: Option<u64>) -> Self {
         let offset = match &config {
-            PaginationConfig::Offset { offset_start_value, .. } => offset_start_value.unwrap_or(0),
+            PaginationConfig::Offset {
+                offset_start_value, ..
+            } => offset_start_value.unwrap_or(0),
             _ => 0,
         };
         Self {
@@ -125,14 +136,21 @@ impl Paginator {
     }
 
     fn limit_param(&self) -> Option<(String, String)> {
-        Some((self.config.limit_name()?.to_owned(), self.limit?.to_string()))
+        Some((
+            self.config.limit_name()?.to_owned(),
+            self.limit?.to_string(),
+        ))
     }
 
     /// Returns the query for the first page.
     #[must_use]
     pub fn first(&self) -> PageQuery {
         let mut params = Vec::new();
-        if let PaginationConfig::Offset { offset_name_in_request, .. } = &self.config {
+        if let PaginationConfig::Offset {
+            offset_name_in_request,
+            ..
+        } = &self.config
+        {
             params.push((offset_name_in_request.clone(), self.offset.to_string()));
         }
         params.extend(self.limit_param());
@@ -144,7 +162,11 @@ impl Paginator {
     pub fn advance(&mut self, headers: &[(String, String)], body: &Value) -> Option<PageQuery> {
         let count = self.records(body).len();
         match &self.config {
-            PaginationConfig::Cursor { cursor_path_in_response, cursor_name_in_request, .. } => {
+            PaginationConfig::Cursor {
+                cursor_path_in_response,
+                cursor_name_in_request,
+                ..
+            } => {
                 if count == 0 {
                     return None;
                 }
@@ -157,7 +179,11 @@ impl Paginator {
                 params.extend(self.limit_param());
                 Some(PageQuery { params, link: None })
             }
-            PaginationConfig::Link { link_rel_in_response_header, link_path_in_response_body, .. } => {
+            PaginationConfig::Link {
+                link_rel_in_response_header,
+                link_path_in_response_body,
+                ..
+            } => {
                 let rel = link_rel_in_response_header.as_deref().unwrap_or("next");
                 let from_body = link_path_in_response_body
                     .as_deref()
@@ -166,22 +192,30 @@ impl Paginator {
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned);
                 let next = from_body.or_else(|| {
-                    crate::transport::header_value(headers, "link").and_then(|h| parse_link_header(h, rel))
+                    crate::transport::header_value(headers, "link")
+                        .and_then(|h| parse_link_header(h, rel))
                 })?;
                 if self.last_link.as_deref() == Some(next.as_str()) {
                     return None;
                 }
                 self.last_link = Some(next.clone());
-                Some(PageQuery { params: Vec::new(), link: Some(next) })
+                Some(PageQuery {
+                    params: Vec::new(),
+                    link: Some(next),
+                })
             }
-            PaginationConfig::Offset { offset_name_in_request, offset_calculation_method, .. } => {
+            PaginationConfig::Offset {
+                offset_name_in_request,
+                offset_calculation_method,
+                ..
+            } => {
                 if count == 0 {
                     return None;
                 }
-                if let Some(limit) = self.limit {
-                    if (count as u64) < limit {
-                        return None;
-                    }
+                if let Some(limit) = self.limit
+                    && (count as u64) < limit
+                {
+                    return None;
                 }
                 let step = match offset_calculation_method.unwrap_or_default() {
                     OffsetMethod::ByResponseSize => count as u64,
@@ -206,10 +240,7 @@ impl Paginator {
 /// A value that is not an array gives no records.
 #[must_use]
 pub fn records_from(body: &Value, path: Option<&str>) -> Vec<Value> {
-    let target = match path {
-        Some(p) => crate::template::lookup(body, p),
-        None => Some(body),
-    };
+    let target = path.map_or(Some(body), |p| crate::template::lookup(body, p));
     match target {
         Some(Value::Array(items)) => items.clone(),
         _ => Vec::new(),
@@ -232,7 +263,12 @@ pub fn parse_link_header(value: &str, rel: &str) -> Option<String> {
             p.strip_prefix("rel")
                 .map(str::trim_start)
                 .and_then(|p| p.strip_prefix('='))
-                .is_some_and(|v| v.trim().trim_matches('"').split_whitespace().any(|r| r.eq_ignore_ascii_case(rel)))
+                .is_some_and(|v| {
+                    v.trim()
+                        .trim_matches('"')
+                        .split_whitespace()
+                        .any(|r| r.eq_ignore_ascii_case(rel))
+                })
         });
         if has_rel {
             return Some(url.to_owned());
@@ -260,34 +296,71 @@ mod tests {
     #[test]
     fn parses_each_kind() {
         assert!(matches!(cursor(), PaginationConfig::Cursor { .. }));
-        let l: PaginationConfig = serde_json::from_value(json!({"type": "link", "link_rel_in_response_header": "next"})).unwrap();
+        let l: PaginationConfig =
+            serde_json::from_value(json!({"type": "link", "link_rel_in_response_header": "next"}))
+                .unwrap();
         assert!(matches!(l, PaginationConfig::Link { .. }));
         let o: PaginationConfig = serde_json::from_value(json!({"type": "offset", "offset_name_in_request": "offset", "offset_calculation_method": "per-page"})).unwrap();
-        assert!(matches!(o, PaginationConfig::Offset { offset_calculation_method: Some(OffsetMethod::PerPage), .. }));
+        assert!(matches!(
+            o,
+            PaginationConfig::Offset {
+                offset_calculation_method: Some(OffsetMethod::PerPage),
+                ..
+            }
+        ));
         assert!(serde_json::from_value::<PaginationConfig>(json!({"type": "page"})).is_err());
     }
 
     #[test]
     fn cursor_flow() {
         let mut p = Paginator::new(cursor(), Some(50));
-        assert_eq!(p.first().params, vec![("limit".to_owned(), "50".to_owned())]);
+        assert_eq!(
+            p.first().params,
+            vec![("limit".to_owned(), "50".to_owned())]
+        );
         let page1 = json!({"results": [{"id": 1}], "paging": {"next": {"after": "c2"}}});
         assert_eq!(p.records(&page1).len(), 1);
         let next = p.advance(&[], &page1).unwrap();
-        assert_eq!(next.params, vec![("after".to_owned(), "c2".to_owned()), ("limit".to_owned(), "50".to_owned())]);
+        assert_eq!(
+            next.params,
+            vec![
+                ("after".to_owned(), "c2".to_owned()),
+                ("limit".to_owned(), "50".to_owned())
+            ]
+        );
         assert_eq!(p.advance(&[], &json!({"results": [{"id": 2}]})), None);
-        assert_eq!(p.advance(&[], &json!({"results": [], "paging": {"next": {"after": "c3"}}})), None);
-        assert_eq!(p.advance(&[], &json!({"results": [{"id": 3}], "paging": {"next": {"after": ""}}})), None);
+        assert_eq!(
+            p.advance(
+                &[],
+                &json!({"results": [], "paging": {"next": {"after": "c3"}}})
+            ),
+            None
+        );
+        assert_eq!(
+            p.advance(
+                &[],
+                &json!({"results": [{"id": 3}], "paging": {"next": {"after": ""}}})
+            ),
+            None
+        );
     }
 
     #[test]
     fn link_header_flow() {
-        let cfg: PaginationConfig = serde_json::from_value(json!({"type": "link", "limit_name_in_request": "per_page"})).unwrap();
+        let cfg: PaginationConfig =
+            serde_json::from_value(json!({"type": "link", "limit_name_in_request": "per_page"}))
+                .unwrap();
         let mut p = Paginator::new(cfg, Some(10));
-        assert_eq!(p.first().params, vec![("per_page".to_owned(), "10".to_owned())]);
+        assert_eq!(
+            p.first().params,
+            vec![("per_page".to_owned(), "10".to_owned())]
+        );
         let h = vec![("link".to_owned(), "<https://api.example.com/x?page=2>; rel=\"next\", <https://api.example.com/x?page=9>; rel=\"last\"".to_owned())];
         let next = p.advance(&h, &json!([{"id": 1}])).unwrap();
-        assert_eq!(next.link.as_deref(), Some("https://api.example.com/x?page=2"));
+        assert_eq!(
+            next.link.as_deref(),
+            Some("https://api.example.com/x?page=2")
+        );
         assert!(next.params.is_empty());
         // The same link again ends the loop.
         assert_eq!(p.advance(&h, &json!([{"id": 1}])), None);
@@ -298,16 +371,30 @@ mod tests {
     fn link_in_body() {
         let cfg: PaginationConfig = serde_json::from_value(json!({"type": "link", "link_path_in_response_body": "links.next", "response_path": "data"})).unwrap();
         let mut p = Paginator::new(cfg, None);
-        let next = p.advance(&[], &json!({"data": [1], "links": {"next": "/v1/items?page=2"}})).unwrap();
+        let next = p
+            .advance(
+                &[],
+                &json!({"data": [1], "links": {"next": "/v1/items?page=2"}}),
+            )
+            .unwrap();
         assert_eq!(next.link.as_deref(), Some("/v1/items?page=2"));
-        assert_eq!(p.advance(&[], &json!({"data": [1], "links": {"next": null}})), None);
+        assert_eq!(
+            p.advance(&[], &json!({"data": [1], "links": {"next": null}})),
+            None
+        );
     }
 
     #[test]
     fn offset_flow() {
         let cfg: PaginationConfig = serde_json::from_value(json!({"type": "offset", "offset_name_in_request": "offset", "limit_name_in_request": "limit"})).unwrap();
         let mut p = Paginator::new(cfg, Some(2));
-        assert_eq!(p.first().params, vec![("offset".to_owned(), "0".to_owned()), ("limit".to_owned(), "2".to_owned())]);
+        assert_eq!(
+            p.first().params,
+            vec![
+                ("offset".to_owned(), "0".to_owned()),
+                ("limit".to_owned(), "2".to_owned())
+            ]
+        );
         let next = p.advance(&[], &json!([1, 2])).unwrap();
         assert_eq!(next.params[0], ("offset".to_owned(), "2".to_owned()));
         // Fewer records than the limit: the end.
@@ -319,14 +406,20 @@ mod tests {
         let cfg: PaginationConfig = serde_json::from_value(json!({"type": "offset", "offset_name_in_request": "page", "offset_start_value": 1, "offset_calculation_method": "per-page"})).unwrap();
         let mut p = Paginator::new(cfg, None);
         assert_eq!(p.first().params, vec![("page".to_owned(), "1".to_owned())]);
-        assert_eq!(p.advance(&[], &json!([1, 2, 3])).unwrap().params, vec![("page".to_owned(), "2".to_owned())]);
+        assert_eq!(
+            p.advance(&[], &json!([1, 2, 3])).unwrap().params,
+            vec![("page".to_owned(), "2".to_owned())]
+        );
         assert_eq!(p.advance(&[], &json!([])), None);
     }
 
     #[test]
     fn records_paths() {
         assert_eq!(records_from(&json!([1, 2]), None).len(), 2);
-        assert_eq!(records_from(&json!({"a": {"b": [1]}}), Some("a.b")).len(), 1);
+        assert_eq!(
+            records_from(&json!({"a": {"b": [1]}}), Some("a.b")).len(),
+            1
+        );
         assert!(records_from(&json!({"a": 1}), Some("a")).is_empty());
         assert!(records_from(&json!({"a": 1}), None).is_empty());
     }
@@ -334,10 +427,19 @@ mod tests {
     #[test]
     fn link_header_parsing() {
         let v = r#"<https://a/x?p=1>; rel="prev",   <https://a/x?p=3> ; rel=next"#;
-        assert_eq!(parse_link_header(v, "next").as_deref(), Some("https://a/x?p=3"));
-        assert_eq!(parse_link_header(v, "prev").as_deref(), Some("https://a/x?p=1"));
+        assert_eq!(
+            parse_link_header(v, "next").as_deref(),
+            Some("https://a/x?p=3")
+        );
+        assert_eq!(
+            parse_link_header(v, "prev").as_deref(),
+            Some("https://a/x?p=1")
+        );
         assert_eq!(parse_link_header(v, "last"), None);
-        assert_eq!(parse_link_header(r#"<https://a/1>; rel="next last""#, "last").as_deref(), Some("https://a/1"));
+        assert_eq!(
+            parse_link_header(r#"<https://a/1>; rel="next last""#, "last").as_deref(),
+            Some("https://a/1")
+        );
         assert_eq!(parse_link_header("garbage", "next"), None);
     }
 }

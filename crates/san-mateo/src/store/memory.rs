@@ -1,6 +1,9 @@
 //! A store in memory. Data is lost at exit. Use it for tests and local
 //! development.
 
+// Each operation holds the lock from start to end, so each operation is atomic.
+#![allow(clippy::significant_drop_tightening)]
+
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
@@ -9,8 +12,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::{
-    ConnectSessionRow, ConnectionFilter, ConnectionRow, IntegrationRow, OAuthSessionRow,
-    RecordRow, RecordWrite, Store, SyncStateRow, Upserted,
+    ConnectSessionRow, ConnectionFilter, ConnectionRow, IntegrationRow, OAuthSessionRow, RecordRow,
+    RecordWrite, Store, SyncStateRow, Upserted,
 };
 use crate::error::{Error, Result};
 use crate::records::{Change, RecordQuery, RecordState, classify_delete, classify_upsert};
@@ -59,20 +62,22 @@ impl MemoryStore {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
 fn record_matches(row: &RecordRow, query: &RecordQuery) -> bool {
-    if let Some(c) = &query.cursor {
-        if (row.updated_at.timestamp_micros(), row.id) <= (c.updated_at_us, c.id) {
-            return false;
-        }
+    if let Some(c) = &query.cursor
+        && (row.updated_at.timestamp_micros(), row.id) <= (c.updated_at_us, c.id)
+    {
+        return false;
     }
-    if let Some(after) = query.modified_after_us {
-        if row.updated_at.timestamp_micros() < after {
-            return false;
-        }
+    if let Some(after) = query.modified_after_us
+        && row.updated_at.timestamp_micros() < after
+    {
+        return false;
     }
     if !query.filter.is_empty() && !query.filter.contains(&row.last_action()) {
         return false;
@@ -86,7 +91,10 @@ impl Store for MemoryStore {
         let mut g = self.lock();
         let key = (row.environment.clone(), row.unique_key.clone());
         if g.integrations.contains_key(&key) {
-            return Err(Error::Conflict(format!("integration {} exists", row.unique_key)));
+            return Err(Error::Conflict(format!(
+                "integration {} exists",
+                row.unique_key
+            )));
         }
         g.integrations.insert(key, row);
         Ok(())
@@ -95,17 +103,18 @@ impl Store for MemoryStore {
     async fn update_integration(&self, row: IntegrationRow) -> Result<bool> {
         let mut g = self.lock();
         let key = (row.environment.clone(), row.unique_key.clone());
-        match g.integrations.get_mut(&key) {
-            Some(slot) => {
-                *slot = row;
-                Ok(true)
-            }
-            None => Ok(false),
-        }
+        Ok(g.integrations.get_mut(&key).is_some_and(|slot| {
+            *slot = row;
+            true
+        }))
     }
 
     async fn get_integration(&self, env: &str, key: &str) -> Result<Option<IntegrationRow>> {
-        Ok(self.lock().integrations.get(&(env.to_owned(), key.to_owned())).cloned())
+        Ok(self
+            .lock()
+            .integrations
+            .get(&(env.to_owned(), key.to_owned()))
+            .cloned())
     }
 
     async fn list_integrations(&self, env: &str) -> Result<Vec<IntegrationRow>> {
@@ -120,7 +129,10 @@ impl Store for MemoryStore {
 
     async fn delete_integration(&self, env: &str, key: &str) -> Result<bool> {
         let mut g = self.lock();
-        if g.integrations.remove(&(env.to_owned(), key.to_owned())).is_none() {
+        if g.integrations
+            .remove(&(env.to_owned(), key.to_owned()))
+            .is_none()
+        {
             return Ok(false);
         }
         let ids: Vec<Uuid> = g
@@ -138,7 +150,11 @@ impl Store for MemoryStore {
     async fn upsert_connection(&self, mut row: ConnectionRow) -> Result<Upserted> {
         let mut g = self.lock();
         let key = key_of(&row);
-        let existing = g.by_key.get(&key).and_then(|id| g.connections.get(id)).cloned();
+        let existing = g
+            .by_key
+            .get(&key)
+            .and_then(|id| g.connections.get(id))
+            .cloned();
         let created = existing.is_none();
         if let Some(old) = existing {
             row.id = old.id;
@@ -158,7 +174,10 @@ impl Store for MemoryStore {
     ) -> Result<Option<ConnectionRow>> {
         let g = self.lock();
         let k = (env.to_owned(), key.to_owned(), connection_id.to_owned());
-        Ok(g.by_key.get(&k).and_then(|id| g.connections.get(id)).cloned())
+        Ok(g.by_key
+            .get(&k)
+            .and_then(|id| g.connections.get(id))
+            .cloned())
     }
 
     async fn list_connections(
@@ -171,8 +190,18 @@ impl Store for MemoryStore {
             .connections
             .values()
             .filter(|c| c.environment == env)
-            .filter(|c| filter.provider_config_key.as_ref().is_none_or(|k| &c.provider_config_key == k))
-            .filter(|c| filter.connection_id.as_ref().is_none_or(|k| &c.connection_id == k))
+            .filter(|c| {
+                filter
+                    .provider_config_key
+                    .as_ref()
+                    .is_none_or(|k| &c.provider_config_key == k)
+            })
+            .filter(|c| {
+                filter
+                    .connection_id
+                    .as_ref()
+                    .is_none_or(|k| &c.connection_id == k)
+            })
             .filter(|c| {
                 filter
                     .end_user_id
@@ -181,7 +210,7 @@ impl Store for MemoryStore {
             })
             .cloned()
             .collect();
-        rows.sort_by(|a, b| (a.created_at, a.id).cmp(&(b.created_at, b.id)));
+        rows.sort_by_key(|a| (a.created_at, a.id));
         Ok(rows)
     }
 
@@ -225,7 +254,9 @@ impl Store for MemoryStore {
         let mut rows: Vec<ConnectionRow> = g
             .connections
             .values()
-            .filter(|c| !c.refresh_exhausted && c.credentials_expires_at.is_some_and(|t| t < before))
+            .filter(|c| {
+                !c.refresh_exhausted && c.credentials_expires_at.is_some_and(|t| t < before)
+            })
             .cloned()
             .collect();
         rows.sort_by_key(|c| (c.credentials_expires_at, c.id));
@@ -241,20 +272,26 @@ impl Store for MemoryStore {
         ttl_ms: u64,
     ) -> Result<bool> {
         let mut g = self.lock();
-        if let Some((holder, until)) = g.leases.get(name) {
-            if holder != owner && *until > now {
-                return Ok(false);
-            }
+        if let Some((holder, until)) = g.leases.get(name)
+            && holder != owner
+            && *until > now
+        {
+            return Ok(false);
         }
         let ttl = chrono::Duration::milliseconds(i64::try_from(ttl_ms).unwrap_or(i64::MAX));
-        let until = now.checked_add_signed(ttl).unwrap_or(DateTime::<Utc>::MAX_UTC);
+        let until = now
+            .checked_add_signed(ttl)
+            .unwrap_or(DateTime::<Utc>::MAX_UTC);
         g.leases.insert(name.to_owned(), (owner.to_owned(), until));
         Ok(true)
     }
 
     async fn release_lease(&self, name: &str, owner: &str) -> Result<()> {
         let mut g = self.lock();
-        if g.leases.get(name).is_some_and(|(holder, _)| holder == owner) {
+        if g.leases
+            .get(name)
+            .is_some_and(|(holder, _)| holder == owner)
+        {
             g.leases.remove(name);
         }
         Ok(())
@@ -283,7 +320,9 @@ impl Store for MemoryStore {
     }
 
     async fn insert_oauth_session(&self, row: OAuthSessionRow) -> Result<()> {
-        self.lock().oauth_sessions.insert(row.state_hash.clone(), row);
+        self.lock()
+            .oauth_sessions
+            .insert(row.state_hash.clone(), row);
         Ok(())
     }
 
@@ -362,11 +401,11 @@ impl Store for MemoryStore {
                 deleted: r.deleted_at.is_some(),
             });
             let change = classify_delete(state.as_ref());
-            if change == Change::Deleted {
-                if let Some(r) = g.records.get_mut(&key) {
-                    r.deleted_at = Some(now);
-                    r.updated_at = now;
-                }
+            if change == Change::Deleted
+                && let Some(r) = g.records.get_mut(&key)
+            {
+                r.deleted_at = Some(now);
+                r.updated_at = now;
             }
             out.push((external, change));
         }
@@ -395,7 +434,11 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    async fn get_sync_state(&self, connection: Uuid, sync_name: &str) -> Result<Option<SyncStateRow>> {
+    async fn get_sync_state(
+        &self,
+        connection: Uuid,
+        sync_name: &str,
+    ) -> Result<Option<SyncStateRow>> {
         Ok(self
             .lock()
             .sync_states

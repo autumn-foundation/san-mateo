@@ -1,4 +1,4 @@
-//! OAuth2: authorize URL, PKCE (RFC 7636), token requests and token reply
+//! `OAuth2`: authorize URL, PKCE (RFC 7636), token requests and token reply
 //! parsing. This module does no I/O. See ADR 0002.
 
 use std::collections::BTreeMap;
@@ -56,7 +56,10 @@ fn set(list: &mut Vec<(String, String)>, key: &str, value: &str) {
 }
 
 fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
-    items.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+    items
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect()
 }
 
 /// Builds the authorization URL.
@@ -142,9 +145,15 @@ pub fn refresh_params(
     refresh_params: &BTreeMap<String, String>,
     token_params: &BTreeMap<String, String>,
 ) -> Vec<(String, String)> {
-    let mut list = pairs(&[("grant_type", "refresh_token"), ("refresh_token", refresh_token)]);
+    let mut list = pairs(&[
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+    ]);
     if refresh_params.is_empty() {
-        for (k, v) in token_params.iter().filter(|(k, _)| k.as_str() != "grant_type") {
+        for (k, v) in token_params
+            .iter()
+            .filter(|(k, _)| k.as_str() != "grant_type")
+        {
             set(&mut list, k, v);
         }
     } else {
@@ -189,8 +198,12 @@ pub fn token_request(
         .header("user-agent", USER_AGENT);
     if uses_basic(provider) {
         let id: String = url::form_urlencoded::byte_serialize(client_id.as_bytes()).collect();
-        let secret: String = url::form_urlencoded::byte_serialize(client_secret.as_bytes()).collect();
-        req = req.header("authorization", format!("Basic {}", STANDARD.encode(format!("{id}:{secret}"))));
+        let secret: String =
+            url::form_urlencoded::byte_serialize(client_secret.as_bytes()).collect();
+        req = req.header(
+            "authorization",
+            format!("Basic {}", STANDARD.encode(format!("{id}:{secret}"))),
+        );
     } else {
         params.push(("client_id".to_owned(), client_id.to_owned()));
         if !client_secret.is_empty() {
@@ -206,8 +219,10 @@ pub fn token_request(
                 .body(body.into_bytes())
         }
         BodyFormat::Json => {
-            let obj: serde_json::Map<String, Value> =
-                params.into_iter().map(|(k, v)| (k, Value::String(v))).collect();
+            let obj: serde_json::Map<String, Value> = params
+                .into_iter()
+                .map(|(k, v)| (k, Value::String(v)))
+                .collect();
             req.header("content-type", "application/json")
                 .body(Value::Object(obj).to_string().into_bytes())
         }
@@ -215,7 +230,7 @@ pub fn token_request(
 }
 
 /// A parsed token reply.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TokenReply {
     /// The access token.
     pub access_token: Secret,
@@ -254,7 +269,7 @@ fn as_count(v: &Value) -> Option<u64> {
             let f = n.as_f64()?;
             // The check keeps the value inside `u64`.
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            (f.is_finite() && f >= 0.0 && f < 1.8e19).then(|| f as u64)
+            (f.is_finite() && (0.0..1.8e19).contains(&f)).then_some(f as u64)
         }),
         Value::String(s) => s.trim().parse().ok(),
         _ => None,
@@ -268,11 +283,17 @@ pub fn reply_error(body: &[u8]) -> Option<String> {
     let obj = parse_body(body)?;
     let error = match obj.get("error")? {
         Value::String(s) => s.clone(),
-        Value::Object(o) => non_empty_str(o.get("code")).or_else(|| non_empty_str(o.get("type")))?.to_owned(),
+        Value::Object(o) => non_empty_str(o.get("code"))
+            .or_else(|| non_empty_str(o.get("type")))?
+            .to_owned(),
         _ => return None,
     };
     let description = non_empty_str(obj.get("error_description")).unwrap_or("");
-    Some(if description.is_empty() { error } else { format!("{error}: {description}") })
+    Some(if description.is_empty() {
+        error
+    } else {
+        format!("{error}: {description}")
+    })
 }
 
 /// Parses a token reply body.
@@ -295,7 +316,8 @@ pub fn parse_token_reply(
     now: DateTime<Utc>,
     code: &'static str,
 ) -> Result<TokenReply> {
-    let raw = parse_body(body).ok_or_else(|| provider_error(code, "the token reply is not a JSON object"))?;
+    let raw = parse_body(body)
+        .ok_or_else(|| provider_error(code, "the token reply is not a JSON object"))?;
     if raw.contains_key("error") {
         let msg = reply_error(body).unwrap_or_else(|| "the provider gave an error".to_owned());
         return Err(provider_error(code, msg));
@@ -340,14 +362,19 @@ pub fn extract_metadata(raw: &Value, paths: &[String]) -> serde_json::Map<String
     paths
         .iter()
         .filter_map(|p| match crate::template::lookup(raw, p)? {
-            v @ (Value::String(_) | Value::Number(_) | Value::Bool(_)) => Some((p.clone(), v.clone())),
+            v @ (Value::String(_) | Value::Number(_) | Value::Bool(_)) => {
+                Some((p.clone(), v.clone()))
+            }
             _ => None,
         })
         .collect()
 }
 
 const fn uses_basic(provider: &Provider) -> bool {
-    matches!(provider.token_request_auth_method, Some(TokenAuthMethod::Basic))
+    matches!(
+        provider.token_request_auth_method,
+        Some(TokenAuthMethod::Basic)
+    )
 }
 
 fn body_format(provider: &Provider) -> BodyFormat {
@@ -417,7 +444,10 @@ mod tests {
             params: &params,
         })
         .unwrap();
-        assert_eq!(url, "https://auth.example.com/authorize?response_type=code&client_id=cid&redirect_uri=https%3A%2F%2Fcb&state=st");
+        assert_eq!(
+            url,
+            "https://auth.example.com/authorize?response_type=code&client_id=cid&redirect_uri=https%3A%2F%2Fcb&state=st"
+        );
         let bad = AuthorizeRequest {
             authorization_url: "not a url",
             client_id: "c",
@@ -467,7 +497,10 @@ mod tests {
         );
         assert_eq!(
             client_credentials_params(&["a".to_owned(), "b".to_owned()], " ", &BTreeMap::new()),
-            vec![("grant_type".to_owned(), "client_credentials".to_owned()), ("scope".to_owned(), "a b".to_owned())]
+            vec![
+                ("grant_type".to_owned(), "client_credentials".to_owned()),
+                ("scope".to_owned(), "a b".to_owned())
+            ]
         );
         assert_eq!(
             client_credentials_params(&[], " ", &BTreeMap::new()),
@@ -478,14 +511,26 @@ mod tests {
     #[test]
     fn token_request_form_and_body_auth() {
         let p = Provider::default();
-        let r = token_request(&p, "https://t/token", "id", "s&cret", vec![("code".to_owned(), "a b".to_owned())]);
+        let r = token_request(
+            &p,
+            "https://t/token",
+            "id",
+            "s&cret",
+            vec![("code".to_owned(), "a b".to_owned())],
+        );
         assert_eq!(r.method, "POST");
         assert_eq!(r.url, "https://t/token");
-        assert_eq!(r.header_value("content-type"), Some("application/x-www-form-urlencoded"));
+        assert_eq!(
+            r.header_value("content-type"),
+            Some("application/x-www-form-urlencoded")
+        );
         assert_eq!(r.header_value("accept"), Some("application/json"));
         assert_eq!(r.header_value("user-agent"), Some(USER_AGENT));
         assert_eq!(r.header_value("authorization"), None);
-        assert_eq!(String::from_utf8(r.body).unwrap(), "code=a+b&client_id=id&client_secret=s%26cret");
+        assert_eq!(
+            String::from_utf8(r.body).unwrap(),
+            "code=a+b&client_id=id&client_secret=s%26cret"
+        );
     }
 
     #[test]
@@ -495,11 +540,23 @@ mod tests {
             token_request_auth_method: Some(TokenAuthMethod::Basic),
             ..Provider::default()
         };
-        let r = token_request(&p, "https://t/token", "id", "sec:ret", vec![("code".to_owned(), "c".to_owned())]);
+        let r = token_request(
+            &p,
+            "https://t/token",
+            "id",
+            "sec:ret",
+            vec![("code".to_owned(), "c".to_owned())],
+        );
         assert_eq!(r.header_value("content-type"), Some("application/json"));
         // RFC 6749 2.3.1: form-encode the id and the secret, then base64.
-        assert_eq!(r.header_value("authorization"), Some("Basic aWQ6c2VjJTNBcmV0"));
-        assert_eq!(serde_json::from_slice::<Value>(&r.body).unwrap(), json!({"code": "c"}));
+        assert_eq!(
+            r.header_value("authorization"),
+            Some("Basic aWQ6c2VjJTNBcmV0")
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&r.body).unwrap(),
+            json!({"code": "c"})
+        );
     }
 
     #[test]
@@ -515,18 +572,55 @@ mod tests {
     #[test]
     fn parse_quirky_replies() {
         // expires_in as a string, in ms.
-        let r = parse_token_reply(br#"{"access_token":"at","expires_in":"5000"}"#, None, true, now(), "x").unwrap();
-        assert_eq!(r.expires_at, Some(now() + chrono::Duration::milliseconds(5000)));
+        let r = parse_token_reply(
+            br#"{"access_token":"at","expires_in":"5000"}"#,
+            None,
+            true,
+            now(),
+            "x",
+        )
+        .unwrap();
+        assert_eq!(
+            r.expires_at,
+            Some(now() + chrono::Duration::milliseconds(5000))
+        );
         // expires_at as epoch seconds and as an ISO string.
-        let r = parse_token_reply(br#"{"access_token":"at","expires_at":1700003600}"#, None, false, now(), "x").unwrap();
-        assert_eq!(r.expires_at, Some(Utc.timestamp_opt(1_700_003_600, 0).unwrap()));
-        let r = parse_token_reply(br#"{"access_token":"at","expires_at":"2023-11-15T00:00:00Z"}"#, None, false, now(), "x").unwrap();
-        assert_eq!(r.expires_at, Some(Utc.timestamp_opt(1_700_006_400, 0).unwrap()));
+        let r = parse_token_reply(
+            br#"{"access_token":"at","expires_at":1700003600}"#,
+            None,
+            false,
+            now(),
+            "x",
+        )
+        .unwrap();
+        assert_eq!(
+            r.expires_at,
+            Some(Utc.timestamp_opt(1_700_003_600, 0).unwrap())
+        );
+        let r = parse_token_reply(
+            br#"{"access_token":"at","expires_at":"2023-11-15T00:00:00Z"}"#,
+            None,
+            false,
+            now(),
+            "x",
+        )
+        .unwrap();
+        assert_eq!(
+            r.expires_at,
+            Some(Utc.timestamp_opt(1_700_006_400, 0).unwrap())
+        );
         // No expiry.
         let r = parse_token_reply(br#"{"access_token":"at"}"#, None, false, now(), "x").unwrap();
         assert_eq!(r.expires_at, None);
         // A form body (GitHub with no Accept header).
-        let r = parse_token_reply(b"access_token=gho_1&scope=repo&token_type=bearer", None, false, now(), "x").unwrap();
+        let r = parse_token_reply(
+            b"access_token=gho_1&scope=repo&token_type=bearer",
+            None,
+            false,
+            now(),
+            "x",
+        )
+        .unwrap();
         assert_eq!(r.access_token.expose(), "gho_1");
         assert_eq!(r.raw["scope"], "repo");
     }
@@ -540,14 +634,33 @@ mod tests {
         assert_eq!(r.expires_at, Some(now() + chrono::Duration::seconds(60)));
         // The root token wins when it exists.
         let body = br#"{"access_token":"xoxb","authed_user":{"access_token":"xoxp"}}"#;
-        assert_eq!(parse_token_reply(body, Some("authed_user"), false, now(), "x").unwrap().access_token.expose(), "xoxb");
+        assert_eq!(
+            parse_token_reply(body, Some("authed_user"), false, now(), "x")
+                .unwrap()
+                .access_token
+                .expose(),
+            "xoxb"
+        );
         let body = br#"{"data":{"token":"x"},"tok":"abc"}"#;
-        assert_eq!(parse_token_reply(body, Some("tok"), false, now(), "x").unwrap().access_token.expose(), "abc");
+        assert_eq!(
+            parse_token_reply(body, Some("tok"), false, now(), "x")
+                .unwrap()
+                .access_token
+                .expose(),
+            "abc"
+        );
     }
 
     #[test]
     fn parse_errors_have_no_secrets() {
-        let e = parse_token_reply(br#"{"error":"invalid_grant","error_description":"bad code"}"#, None, false, now(), "token_exchange_failed").unwrap_err();
+        let e = parse_token_reply(
+            br#"{"error":"invalid_grant","error_description":"bad code"}"#,
+            None,
+            false,
+            now(),
+            "token_exchange_failed",
+        )
+        .unwrap_err();
         match e {
             Error::Provider { code, message, .. } => {
                 assert_eq!(code, "token_exchange_failed");
@@ -555,8 +668,21 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        let e = parse_token_reply(br#"{"refresh_token":"secret-rt"}"#, None, false, now(), "refresh_failed").unwrap_err();
-        assert!(matches!(e, Error::Provider { code: "refresh_failed", .. }));
+        let e = parse_token_reply(
+            br#"{"refresh_token":"secret-rt"}"#,
+            None,
+            false,
+            now(),
+            "refresh_failed",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            e,
+            Error::Provider {
+                code: "refresh_failed",
+                ..
+            }
+        ));
         assert!(!e.to_string().contains("secret-rt"));
         assert!(parse_token_reply(b"\xff\xfe", None, false, now(), "x").is_err());
         assert!(parse_token_reply(b"[1,2]", None, false, now(), "x").is_err());
@@ -565,7 +691,17 @@ mod tests {
     #[test]
     fn metadata_copies_scalars_only() {
         let raw = json!({"instance_url": "https://na1.example.com", "team": {"id": "T1", "obj": {"a": 1}}, "n": 5, "b": true});
-        let m = extract_metadata(&raw, &["instance_url".into(), "team.id".into(), "team.obj".into(), "n".into(), "b".into(), "missing".into()]);
+        let m = extract_metadata(
+            &raw,
+            &[
+                "instance_url".into(),
+                "team.id".into(),
+                "team.obj".into(),
+                "n".into(),
+                "b".into(),
+                "missing".into(),
+            ],
+        );
         assert_eq!(m.len(), 4);
         assert_eq!(m["instance_url"], "https://na1.example.com");
         assert_eq!(m["team.id"], "T1");

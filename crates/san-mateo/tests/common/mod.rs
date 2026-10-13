@@ -11,9 +11,8 @@ use san_mateo::clock::{Clock, ManualClock, SeqEntropy};
 use san_mateo::transport::HttpResponse;
 use san_mateo::webhook::WebhookSettings;
 use san_mateo::{
-    Catalog, ConnectOptions, ConnectSessionInput, Connection, EndUser, EnvironmentConfig,
-    KeyRing, MemoryStore, MemoryTransport, NewIntegration, ProxySettings, Registry, SanMateo,
-    Secret,
+    Catalog, ConnectOptions, ConnectSessionInput, Connection, EndUser, EnvironmentConfig, KeyRing,
+    MemoryStore, MemoryTransport, NewIntegration, ProxySettings, Registry, SanMateo, Secret,
 };
 use serde_json::{Value, json};
 
@@ -154,7 +153,13 @@ pub fn harness_with(registry: Registry) -> Harness {
         .registry(registry)
         .build()
         .unwrap();
-    Harness { san, http, clock, store, keys: keys() }
+    Harness {
+        san,
+        http,
+        clock,
+        store,
+        keys: keys(),
+    }
 }
 
 pub fn harness() -> Harness {
@@ -165,7 +170,13 @@ pub fn harness() -> Harness {
 pub async fn ready_with(registry: Registry) -> Harness {
     let h = harness_with(registry);
     for (key, provider, id, secret, scopes) in [
-        ("crm", "crm", Some("crm-client"), Some("crm-secret"), vec!["read", "write"]),
+        (
+            "crm",
+            "crm",
+            Some("crm-client"),
+            Some("crm-secret"),
+            vec!["read", "write"],
+        ),
         ("zen", "zen", Some("zen-client"), Some("zen-secret"), vec![]),
         ("keyed", "keyed", None, None, vec![]),
         ("basic", "basic", None, None, vec![]),
@@ -204,20 +215,33 @@ pub fn end_user() -> EndUser {
 }
 
 pub async fn session(h: &Harness) -> String {
-    session_with(h, ConnectSessionInput {
-        end_user: Some(end_user()),
-        tags: BTreeMap::from([("plan".to_owned(), "pro".to_owned())]),
-        ..ConnectSessionInput::default()
-    })
+    session_with(
+        h,
+        ConnectSessionInput {
+            end_user: Some(end_user()),
+            tags: BTreeMap::from([("plan".to_owned(), "pro".to_owned())]),
+            ..ConnectSessionInput::default()
+        },
+    )
     .await
 }
 
 pub async fn session_with(h: &Harness, input: ConnectSessionInput) -> String {
-    h.san.create_connect_session("dev", input).await.unwrap().token.expose().to_owned()
+    h.san
+        .create_connect_session("dev", input)
+        .await
+        .unwrap()
+        .token
+        .expose()
+        .to_owned()
 }
 
 pub fn query_of(url: &str) -> BTreeMap<String, String> {
-    url::Url::parse(url).unwrap().query_pairs().into_owned().collect()
+    url::Url::parse(url)
+        .unwrap()
+        .query_pairs()
+        .into_owned()
+        .collect()
 }
 
 pub fn token_reply(access: &str, refresh: Option<&str>, expires_in: Option<i64>) -> HttpResponse {
@@ -232,10 +256,23 @@ pub fn token_reply(access: &str, refresh: Option<&str>, expires_in: Option<i64>)
 }
 
 /// Runs the OAuth flow for `crm` and returns the connection.
-pub async fn connect_crm(h: &Harness, access: &str, refresh: Option<&str>, expires_in: Option<i64>) -> Connection {
-    h.http.reply("POST", "https://auth.crm.example.com/token", token_reply(access, refresh, expires_in));
+pub async fn connect_crm(
+    h: &Harness,
+    access: &str,
+    refresh: Option<&str>,
+    expires_in: Option<i64>,
+) -> Connection {
+    h.http.reply(
+        "POST",
+        "https://auth.crm.example.com/token",
+        token_reply(access, refresh, expires_in),
+    );
     let token = session(h).await;
-    let url = h.san.oauth_start(&token, "crm", ConnectOptions::default()).await.unwrap();
+    let url = h
+        .san
+        .oauth_start(&token, "crm", ConnectOptions::default())
+        .await
+        .unwrap();
     let q = query_of(&url);
     let mut cb = BTreeMap::new();
     cb.insert("code".to_owned(), "code-1".to_owned());

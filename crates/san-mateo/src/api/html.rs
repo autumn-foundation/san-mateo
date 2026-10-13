@@ -34,7 +34,10 @@ pub(crate) fn escape(s: &str) -> String {
 
 /// Makes JSON safe inside a `<script>` element.
 fn script_json(v: &serde_json::Value) -> String {
-    v.to_string().replace('<', "\\u003c").replace('>', "\\u003e").replace('&', "\\u0026")
+    v.to_string()
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
 }
 
 const STYLE: &str = "body{font-family:system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem;color:#222}\
@@ -75,7 +78,10 @@ fn error_page(san: &SanMateo, e: &Error) -> Response {
         escape(e.code())
     );
     let msg = json!({"type": "san-mateo:auth", "eventType": "AUTHORIZATION_FAILED", "error": {"type": e.code()}});
-    let script = format!("if (window.opener) {{ window.opener.postMessage({}, '*'); }}", script_json(&msg));
+    let script = format!(
+        "if (window.opener) {{ window.opener.postMessage({}, '*'); }}",
+        script_json(&msg)
+    );
     page(san, status, "Connection failed", &body, &script)
 }
 
@@ -112,7 +118,11 @@ fn field_inputs(provider: &Provider, names: &[(&str, &str)]) -> String {
             "<label>{}<input name=\"{}\" type=\"{}\" required></label>",
             escape(label),
             escape(name),
-            if name.contains("password") || name.contains("secret") || name.contains("apiKey") { "password" } else { "text" }
+            if name.contains("password") || name.contains("secret") || name.contains("apiKey") {
+                "password"
+            } else {
+                "text"
+            }
         );
     }
     for (name, schema) in &provider.connection_config {
@@ -125,8 +135,16 @@ fn field_inputs(provider: &Provider, names: &[(&str, &str)]) -> String {
             "<label>{}<input name=\"params[{}]\" type=\"text\"{}{}></label>",
             escape(&label),
             escape(name),
-            schema.example.as_deref().map(|e| format!(" placeholder=\"{}\"", escape(e))).unwrap_or_default(),
-            if schema.optional.unwrap_or(false) { "" } else { " required" }
+            schema
+                .example
+                .as_deref()
+                .map(|e| format!(" placeholder=\"{}\"", escape(e)))
+                .unwrap_or_default(),
+            if schema.optional.unwrap_or(false) {
+                ""
+            } else {
+                " required"
+            }
         );
     }
     out
@@ -135,10 +153,17 @@ fn field_inputs(provider: &Provider, names: &[(&str, &str)]) -> String {
 fn integration_section(san: &SanMateo, token: &str, key: &str, provider: &Provider) -> String {
     let server = san.config().server_url.trim_end_matches('/');
     let title = format!("<h2>{}</h2>", escape(&provider.display_name));
-    let token_q = format!("connect_session_token={}", crate::oauth2::encode_component(token));
+    let token_q = format!(
+        "connect_session_token={}",
+        crate::oauth2::encode_component(token)
+    );
     let (path, fields): (&str, Vec<(&str, &str)>) = match provider.auth_mode {
         AuthMode::OAuth2 => {
-            if provider.connection_config.values().all(|s| s.automated.unwrap_or(false)) {
+            if provider
+                .connection_config
+                .values()
+                .all(|s| s.automated.unwrap_or(false))
+            {
                 return format!(
                     "<section>{title}<a class=\"button\" href=\"{server}/oauth/connect/{}?{token_q}\">Connect</a></section>",
                     escape(key)
@@ -152,8 +177,17 @@ fn integration_section(san: &SanMateo, token: &str, key: &str, provider: &Provid
             );
         }
         AuthMode::ApiKey => ("api-auth/api-key", vec![("apiKey", "API key")]),
-        AuthMode::Basic => ("api-auth/basic", vec![("username", "User name"), ("password", "Password")]),
-        AuthMode::OAuth2ClientCredentials => ("oauth2/auth", vec![("client_id", "Client id"), ("client_secret", "Client secret")]),
+        AuthMode::Basic => (
+            "api-auth/basic",
+            vec![("username", "User name"), ("password", "Password")],
+        ),
+        AuthMode::OAuth2ClientCredentials => (
+            "oauth2/auth",
+            vec![
+                ("client_id", "Client id"),
+                ("client_secret", "Client secret"),
+            ],
+        ),
         AuthMode::None => ("auth/unauthenticated", vec![]),
         AuthMode::Other(_) => return String::new(),
     };
@@ -198,7 +232,10 @@ pub(crate) async fn connect_page(State(san): State<SanMateo>, RawQuery(q): RawQu
     };
     let allowed = |key: &str| match &session.reconnect {
         Some(k) => k.provider_config_key == key,
-        None => session.allowed_integrations.is_empty() || session.allowed_integrations.iter().any(|a| a == key),
+        None => {
+            session.allowed_integrations.is_empty()
+                || session.allowed_integrations.iter().any(|a| a == key)
+        }
     };
     let mut sections = String::new();
     for i in integrations.iter().filter(|i| allowed(&i.unique_key)) {
@@ -212,7 +249,13 @@ pub(crate) async fn connect_page(State(san): State<SanMateo>, RawQuery(q): RawQu
         sections.push_str("<p>No integration is available for this session.</p>");
     }
     let body = format!("<h1>Connect an account</h1>{sections}");
-    page(&san, StatusCode::OK, "Connect an account", &body, FORM_SCRIPT)
+    page(
+        &san,
+        StatusCode::OK,
+        "Connect an account",
+        &body,
+        FORM_SCRIPT,
+    )
 }
 
 #[cfg(test)]
@@ -221,9 +264,18 @@ mod tests {
 
     #[test]
     fn escapes_markup() {
-        assert_eq!(escape("<a href=\"x\">'&'</a>"), "&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;");
+        assert_eq!(
+            escape("<a href=\"x\">'&'</a>"),
+            "&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;"
+        );
         let safe = script_json(&json!({"a": "</script>&"}));
-        assert!(!safe.contains('<') && !safe.contains('>') && !safe.contains('&'), "{safe}");
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&safe).unwrap()["a"], "</script>&");
+        assert!(
+            !safe.contains('<') && !safe.contains('>') && !safe.contains('&'),
+            "{safe}"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&safe).unwrap()["a"],
+            "</script>&"
+        );
     }
 }

@@ -56,12 +56,10 @@ pub const fn expires_at_ms(now_ms: u64, expires_in: u64, in_ms: bool) -> u64 {
 
 /// Returns the wait until `at_ms`. A past instant gives zero.
 #[must_use]
+// The body is the same text as in the Verus spec.
+#[allow(clippy::implicit_saturating_sub)]
 pub const fn wait_until_ms(now_ms: u64, at_ms: u64) -> u64 {
-    if at_ms > now_ms {
-        at_ms - now_ms
-    } else {
-        0
-    }
+    if at_ms > now_ms { at_ms - now_ms } else { 0 }
 }
 
 /// Returns `true` while a session is live. It ends at `expires_at_ms`.
@@ -252,7 +250,11 @@ mod tests {
             .or_else(|| text.find(&format!("pub const fn {name}(")))
             .unwrap_or_else(|| panic!("no fn {name}"));
         let open = if spec { "\n{\n" } else { " {\n" };
-        let start = at + text[at..].find(open).unwrap_or_else(|| panic!("no body for {name}")) + open.len();
+        let start = at
+            + text[at..]
+                .find(open)
+                .unwrap_or_else(|| panic!("no body for {name}"))
+            + open.len();
         let mut depth = 1_i32;
         let mut end = text.len();
         for (i, c) in text[start..].char_indices() {
@@ -337,7 +339,10 @@ mod tests {
         assert_eq!(refresh_gate(true, true, Some(10), 10, c), Gate::Proceed);
         assert_eq!(refresh_gate(false, true, None, 10, c), Gate::Exhausted);
         assert_eq!(refresh_gate(false, false, None, 10, c), Gate::Proceed);
-        assert_eq!(refresh_gate(false, false, Some(0), c - 1, c), Gate::Cooldown);
+        assert_eq!(
+            refresh_gate(false, false, Some(0), c - 1, c),
+            Gate::Cooldown
+        );
         assert_eq!(refresh_gate(false, false, Some(0), c, c), Gate::Proceed);
         // A failure time in the future (clock skew) is inside the cooldown.
         assert_eq!(refresh_gate(false, false, Some(50), 10, c), Gate::Cooldown);
@@ -383,23 +388,59 @@ mod tests {
     fn decide_examples() {
         use Outcome::{ClientError, NetworkError, RateLimited, ServerError, Success};
         assert_eq!(decide(Success, 1, true, true, None, &RULE), Step::Done);
-        assert_eq!(decide(RateLimited, 1, false, false, None, &RULE), Step::Retry(100));
-        assert_eq!(decide(RateLimited, 1, false, false, Some(700), &RULE), Step::Retry(700));
-        assert_eq!(decide(RateLimited, 1, false, false, Some(1_001), &RULE), Step::GiveUp);
-        assert_eq!(decide(RateLimited, 3, true, false, None, &RULE), Step::GiveUp);
-        assert_eq!(decide(ServerError, 2, true, false, None, &RULE), Step::Retry(200));
-        assert_eq!(decide(ServerError, 1, false, false, None, &RULE), Step::Done);
-        assert_eq!(decide(ServerError, 1, false, true, None, &RULE), Step::Retry(100));
-        assert_eq!(decide(NetworkError, 1, true, false, None, &RULE), Step::Retry(100));
-        assert_eq!(decide(NetworkError, 1, false, false, None, &RULE), Step::Done);
+        assert_eq!(
+            decide(RateLimited, 1, false, false, None, &RULE),
+            Step::Retry(100)
+        );
+        assert_eq!(
+            decide(RateLimited, 1, false, false, Some(700), &RULE),
+            Step::Retry(700)
+        );
+        assert_eq!(
+            decide(RateLimited, 1, false, false, Some(1_001), &RULE),
+            Step::GiveUp
+        );
+        assert_eq!(
+            decide(RateLimited, 3, true, false, None, &RULE),
+            Step::GiveUp
+        );
+        assert_eq!(
+            decide(ServerError, 2, true, false, None, &RULE),
+            Step::Retry(200)
+        );
+        assert_eq!(
+            decide(ServerError, 1, false, false, None, &RULE),
+            Step::Done
+        );
+        assert_eq!(
+            decide(ServerError, 1, false, true, None, &RULE),
+            Step::Retry(100)
+        );
+        assert_eq!(
+            decide(NetworkError, 1, true, false, None, &RULE),
+            Step::Retry(100)
+        );
+        assert_eq!(
+            decide(NetworkError, 1, false, false, None, &RULE),
+            Step::Done
+        );
         assert_eq!(decide(ClientError, 1, true, false, None, &RULE), Step::Done);
-        assert_eq!(decide(ClientError, 1, false, true, Some(5), &RULE), Step::Retry(5));
+        assert_eq!(
+            decide(ClientError, 1, false, true, Some(5), &RULE),
+            Step::Retry(5)
+        );
         let big = RetryRule {
             max_attempts: u32::MAX,
             ..RULE
         };
-        assert_eq!(decide(RateLimited, MAX_ATTEMPTS, true, true, None, &big), Step::GiveUp);
-        assert_eq!(decide(RateLimited, MAX_ATTEMPTS - 1, true, true, None, &big), Step::Retry(1_000));
+        assert_eq!(
+            decide(RateLimited, MAX_ATTEMPTS, true, true, None, &big),
+            Step::GiveUp
+        );
+        assert_eq!(
+            decide(RateLimited, MAX_ATTEMPTS - 1, true, true, None, &big),
+            Step::Retry(1_000)
+        );
     }
 
     fn any_outcome() -> impl Strategy<Value = Outcome> {

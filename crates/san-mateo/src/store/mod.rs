@@ -48,7 +48,7 @@ pub struct IntegrationRow {
 }
 
 /// A stored connection.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionRow {
     /// The internal id.
     pub id: Uuid,
@@ -101,7 +101,7 @@ impl ConnectionRow {
 }
 
 /// The result of [`Store::upsert_connection`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Upserted {
     /// The stored row.
     pub row: ConnectionRow,
@@ -121,7 +121,7 @@ pub struct ConnectionFilter {
 }
 
 /// A stored connect session.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectSessionRow {
     /// The id.
     pub id: Uuid,
@@ -150,7 +150,7 @@ pub struct ConnectSessionRow {
 }
 
 /// A stored OAuth session (one authorization request).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthSessionRow {
     /// The keyed hash of `state`.
     pub state_hash: String,
@@ -324,8 +324,13 @@ pub trait Store: Send + Sync + 'static {
 
     /// Takes the lease `name` for `ttl_ms`. Returns `false` when another owner
     /// holds a lease that has not expired.
-    async fn try_lease(&self, name: &str, owner: &str, now: DateTime<Utc>, ttl_ms: u64)
-    -> Result<bool>;
+    async fn try_lease(
+        &self,
+        name: &str,
+        owner: &str,
+        now: DateTime<Utc>,
+        ttl_ms: u64,
+    ) -> Result<bool>;
     /// Gives back a lease. Only the owner can give it back.
     async fn release_lease(&self, name: &str, owner: &str) -> Result<()>;
 
@@ -371,8 +376,11 @@ pub trait Store: Send + Sync + 'static {
     /// Writes the state of a sync.
     async fn put_sync_state(&self, row: SyncStateRow) -> Result<()>;
     /// Reads the state of a sync.
-    async fn get_sync_state(&self, connection: Uuid, sync_name: &str)
-    -> Result<Option<SyncStateRow>>;
+    async fn get_sync_state(
+        &self,
+        connection: Uuid,
+        sync_name: &str,
+    ) -> Result<Option<SyncStateRow>>;
     /// Lists the sync states of a connection, sorted by name.
     async fn list_sync_states(&self, connection: Uuid) -> Result<Vec<SyncStateRow>>;
 }

@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use crate::provider::AuthMode;
 use crate::secret::Secret;
 
-/// OAuth2 authorization code credentials.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+/// `OAuth2` authorization code credentials.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuth2Credentials {
     /// The access token.
     pub access_token: Secret,
@@ -23,8 +23,8 @@ pub struct OAuth2Credentials {
     pub raw: Value,
 }
 
-/// OAuth2 client credentials.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+/// `OAuth2` client credentials.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientCredentials {
     /// The access token.
     pub token: Secret,
@@ -41,13 +41,13 @@ pub struct ClientCredentials {
 }
 
 /// The credentials of one connection.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Credentials {
-    /// OAuth2 authorization code.
+    /// `OAuth2` authorization code.
     #[serde(rename = "OAUTH2")]
     OAuth2(OAuth2Credentials),
-    /// OAuth2 client credentials.
+    /// `OAuth2` client credentials.
     #[serde(rename = "OAUTH2_CC")]
     OAuth2ClientCredentials(ClientCredentials),
     /// An API key.
@@ -111,7 +111,7 @@ impl Credentials {
         }
     }
 
-    /// Returns the bearer token for OAuth2 modes.
+    /// Returns the bearer token for `OAuth2` modes.
     #[must_use]
     pub fn bearer_token(&self) -> Option<&str> {
         match self {
@@ -179,17 +179,31 @@ mod tests {
             json!({"type": "OAUTH2", "access_token": "at-1", "refresh_token": "rt-1", "expires_at": "2023-11-14T22:13:20Z", "raw": {"access_token": "at-1", "scope": "a b"}})
         );
         assert_eq!(
-            serde_json::to_value(Credentials::ApiKey { api_key: "k".into() }).unwrap(),
+            serde_json::to_value(Credentials::ApiKey {
+                api_key: "k".into()
+            })
+            .unwrap(),
             json!({"type": "API_KEY", "apiKey": "k"})
         );
         assert_eq!(
-            serde_json::to_value(Credentials::Basic { username: "u".into(), password: "p".into() }).unwrap(),
+            serde_json::to_value(Credentials::Basic {
+                username: "u".into(),
+                password: "p".into()
+            })
+            .unwrap(),
             json!({"type": "BASIC", "username": "u", "password": "p"})
         );
-        assert_eq!(serde_json::to_value(Credentials::Unauthenticated).unwrap(), json!({"type": "NONE"}));
-        let cc: Credentials = serde_json::from_value(json!({"type": "OAUTH2_CC", "token": "t", "client_id": "id", "client_secret": "s"})).unwrap();
+        assert_eq!(
+            serde_json::to_value(Credentials::Unauthenticated).unwrap(),
+            json!({"type": "NONE"})
+        );
+        let cc: Credentials = serde_json::from_value(
+            json!({"type": "OAUTH2_CC", "token": "t", "client_id": "id", "client_secret": "s"}),
+        )
+        .unwrap();
         assert_eq!(cc.auth_mode(), AuthMode::OAuth2ClientCredentials);
-        let back: Credentials = serde_json::from_value(serde_json::to_value(oauth()).unwrap()).unwrap();
+        let back: Credentials =
+            serde_json::from_value(serde_json::to_value(oauth()).unwrap()).unwrap();
         assert_eq!(back, oauth());
     }
 
@@ -197,8 +211,13 @@ mod tests {
     fn debug_hides_secrets() {
         let all = [
             oauth(),
-            Credentials::ApiKey { api_key: "key-secret".into() },
-            Credentials::Basic { username: "u".into(), password: "pw-secret".into() },
+            Credentials::ApiKey {
+                api_key: "key-secret".into(),
+            },
+            Credentials::Basic {
+                username: "u".into(),
+                password: "pw-secret".into(),
+            },
             Credentials::OAuth2ClientCredentials(ClientCredentials {
                 token: "tok-secret".into(),
                 expires_at: None,
@@ -209,7 +228,14 @@ mod tests {
         ];
         for c in all {
             let d = format!("{c:?}");
-            for s in ["at-1", "rt-1", "key-secret", "pw-secret", "tok-secret", "cs-secret"] {
+            for s in [
+                "at-1",
+                "rt-1",
+                "key-secret",
+                "pw-secret",
+                "tok-secret",
+                "cs-secret",
+            ] {
                 assert!(!d.contains(s), "{d}");
             }
         }
@@ -222,20 +248,36 @@ mod tests {
         assert_eq!(o.bearer_token(), Some("at-1"));
         assert_eq!(o.refresh_token(), Some("rt-1"));
         assert!(o.expires_at().is_some());
-        let k = Credentials::ApiKey { api_key: "k".into() };
+        let k = Credentials::ApiKey {
+            api_key: "k".into(),
+        };
         assert_eq!(k.auth_mode(), AuthMode::ApiKey);
         assert_eq!(k.bearer_token(), None);
         assert_eq!(k.expires_at(), None);
         assert_eq!(Credentials::Unauthenticated.auth_mode(), AuthMode::None);
-        assert_eq!(Credentials::Basic { username: "u".into(), password: "p".into() }.auth_mode(), AuthMode::Basic);
+        assert_eq!(
+            Credentials::Basic {
+                username: "u".into(),
+                password: "p".into()
+            }
+            .auth_mode(),
+            AuthMode::Basic
+        );
     }
 
     #[test]
     fn template_vars_by_mode() {
-        let v = Credentials::ApiKey { api_key: "k".into() }.template_vars();
+        let v = Credentials::ApiKey {
+            api_key: "k".into(),
+        }
+        .template_vars();
         assert_eq!(v["apiKey"], "k");
         assert_eq!(v["credentials"]["apiKey"], "k");
-        let v = Credentials::Basic { username: "u".into(), password: "p".into() }.template_vars();
+        let v = Credentials::Basic {
+            username: "u".into(),
+            password: "p".into(),
+        }
+        .template_vars();
         assert_eq!(v["credentials"]["username"], "u");
         assert_eq!(v["credentials"]["password"], "p");
         let v = oauth().template_vars();

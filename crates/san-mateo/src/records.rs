@@ -80,7 +80,7 @@ pub fn classify_upsert(existing: Option<&RecordState>, new_hash: &str) -> Change
 
 /// Classifies a delete.
 #[must_use]
-pub fn classify_delete(existing: Option<&RecordState>) -> Change {
+pub const fn classify_delete(existing: Option<&RecordState>) -> Change {
     match existing {
         Some(s) if !s.deleted => Change::Deleted,
         _ => Change::Ignored,
@@ -192,7 +192,7 @@ impl Cursor {
 
 /// Truncates a time to whole microseconds. Stores keep microseconds.
 #[must_use]
-pub fn to_micros(t: DateTime<Utc>) -> i64 {
+pub const fn to_micros(t: DateTime<Utc>) -> i64 {
     t.timestamp_micros()
 }
 
@@ -267,7 +267,10 @@ pub fn check_limit(limit: Option<u32>) -> Result<u32> {
 /// [`Error::Invalid`] for an unknown action.
 pub fn parse_filter(s: &str) -> Result<Vec<LastAction>> {
     s.split(',')
-        .map(|part| LastAction::parse(part).ok_or_else(|| invalid("the filter must be added, updated or deleted")))
+        .map(|part| {
+            LastAction::parse(part)
+                .ok_or_else(|| invalid("the filter must be added, updated or deleted"))
+        })
         .collect()
 }
 
@@ -283,8 +286,14 @@ mod tests {
 
     #[test]
     fn upsert_classes() {
-        let live = RecordState { data_hash: "h1".into(), deleted: false };
-        let dead = RecordState { data_hash: "h1".into(), deleted: true };
+        let live = RecordState {
+            data_hash: "h1".into(),
+            deleted: false,
+        };
+        let dead = RecordState {
+            data_hash: "h1".into(),
+            deleted: true,
+        };
         assert_eq!(classify_upsert(None, "h1"), Change::Added);
         assert_eq!(classify_upsert(Some(&live), "h1"), Change::Unchanged);
         assert_eq!(classify_upsert(Some(&live), "h2"), Change::Updated);
@@ -311,14 +320,23 @@ mod tests {
     fn external_ids() {
         assert_eq!(external_id(&json!({"id": "a1"})).unwrap(), "a1");
         assert_eq!(external_id(&json!({"id": 7})).unwrap(), "7");
-        for bad in [json!({}), json!({"id": ""}), json!({"id": null}), json!({"id": [1]}), json!(5)] {
+        for bad in [
+            json!({}),
+            json!({"id": ""}),
+            json!({"id": null}),
+            json!({"id": [1]}),
+            json!(5),
+        ] {
             assert!(external_id(&bad).is_err(), "{bad}");
         }
     }
 
     #[test]
     fn canonical_json_sorts_keys() {
-        assert_eq!(canonical_json(&json!({"b": 1, "a": {"d": [2, {"z": 1, "y": 2}], "c": null}})), r#"{"a":{"c":null,"d":[2,{"y":2,"z":1}]},"b":1}"#);
+        assert_eq!(
+            canonical_json(&json!({"b": 1, "a": {"d": [2, {"z": 1, "y": 2}], "c": null}})),
+            r#"{"a":{"c":null,"d":[2,{"y":2,"z":1}]},"b":1}"#
+        );
         assert_eq!(canonical_json(&json!("x\"y")), r#""x\"y""#);
     }
 
@@ -328,12 +346,21 @@ mod tests {
         let h1 = data_hash(&k, &json!({"a": 1, "b": 2}));
         assert_eq!(h1, data_hash(&k, &json!({"b": 2, "a": 1})));
         assert_ne!(h1, data_hash(&k, &json!({"a": 1, "b": 3})));
-        assert_ne!(h1, data_hash(&KeyRing::new("k", [2; 32]).unwrap(), &json!({"a": 1, "b": 2})));
+        assert_ne!(
+            h1,
+            data_hash(
+                &KeyRing::new("k", [2; 32]).unwrap(),
+                &json!({"a": 1, "b": 2})
+            )
+        );
     }
 
     #[test]
     fn cursor_round_trip_and_errors() {
-        let c = Cursor { updated_at_us: 1_700_000_000_123_456, id: Uuid::from_u128(99) };
+        let c = Cursor {
+            updated_at_us: 1_700_000_000_123_456,
+            id: Uuid::from_u128(99),
+        };
         assert_eq!(Cursor::decode(&c.encode()).unwrap(), c);
         assert!(!c.encode().contains('='));
         for bad in ["", "!!!", "YWJj", "MTI6bm90LWEtdXVpZA"] {
@@ -349,7 +376,15 @@ mod tests {
         b.push("3".into(), Change::Deleted);
         b.push("4".into(), Change::Unchanged);
         b.push("5".into(), Change::Ignored);
-        assert_eq!((b.added.len(), b.updated.len(), b.deleted.len(), b.unchanged.len()), (1, 1, 1, 1));
+        assert_eq!(
+            (
+                b.added.len(),
+                b.updated.len(),
+                b.deleted.len(),
+                b.unchanged.len()
+            ),
+            (1, 1, 1, 1)
+        );
         let mut c = BatchOutcome::default();
         c.extend(b);
         assert_eq!(c.added, vec!["1"]);
@@ -362,11 +397,17 @@ mod tests {
         assert_eq!(check_limit(Some(MAX_LIMIT)).unwrap(), MAX_LIMIT);
         assert!(check_limit(Some(0)).is_err());
         assert!(check_limit(Some(MAX_LIMIT + 1)).is_err());
-        assert_eq!(parse_filter("added,UPDATED").unwrap(), vec![LastAction::Added, LastAction::Updated]);
+        assert_eq!(
+            parse_filter("added,UPDATED").unwrap(),
+            vec![LastAction::Added, LastAction::Updated]
+        );
         assert_eq!(parse_filter("deleted").unwrap(), vec![LastAction::Deleted]);
         assert!(parse_filter("added,nope").is_err());
         assert_eq!(LastAction::parse("Deleted"), Some(LastAction::Deleted));
-        assert_eq!(serde_json::to_value(LastAction::Added).unwrap(), json!("ADDED"));
+        assert_eq!(
+            serde_json::to_value(LastAction::Added).unwrap(),
+            json!("ADDED")
+        );
     }
 
     proptest! {

@@ -40,7 +40,7 @@ pub fn encode_component(s: &str) -> String {
 enum Node {
     Text(String),
     Path(String),
-    Call(String, Vec<Node>),
+    Call(String, Vec<Self>),
 }
 
 /// A render failure inside one alternative.
@@ -203,14 +203,22 @@ fn matching(s: &str, start: usize) -> Option<usize> {
 
 fn is_ident(s: &str) -> bool {
     let mut chars = s.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn is_path(s: &str) -> bool {
     s.split('.').all(|part| {
-        !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    }) && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }) && s
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
 }
 
 fn parse_expr(inner: &str) -> Result<Node> {
@@ -221,7 +229,10 @@ fn parse_expr(inner: &str) -> Result<Node> {
     if let Some(open) = t.find('(') {
         let name = &t[..open];
         if t.ends_with(')') && is_ident(name) {
-            return Ok(Node::Call(name.to_owned(), parse(&t[open + 1..t.len() - 1])?));
+            return Ok(Node::Call(
+                name.to_owned(),
+                parse(&t[open + 1..t.len() - 1])?,
+            ));
         }
         return Err(syntax("a function call is not closed"));
     }
@@ -285,7 +296,9 @@ fn eval(nodes: &[Node], vars: &Value, url: bool) -> std::result::Result<String, 
             out.push_str(&value);
         } else if in_authority(&out) {
             if !is_host_part(&value) {
-                return Err(Fail::Bad("a value in the host part of a URL is not a valid host name part".to_owned()));
+                return Err(Fail::Bad(
+                    "a value in the host part of a URL is not a valid host name part".to_owned(),
+                ));
             }
             out.push_str(&value);
         } else {
@@ -306,7 +319,8 @@ fn is_host_part(v: &str) -> bool {
     let edge_ok = |c: char| c.is_ascii_alphanumeric() || c == '_';
     !v.is_empty()
         && !v.contains("..")
-        && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
         && v.chars().next().is_some_and(edge_ok)
         && v.chars().last().is_some_and(edge_ok)
 }
@@ -333,7 +347,14 @@ mod tests {
     fn plain_values() {
         let v = vars();
         assert_eq!(render("Bearer ${apiKey}", &v).unwrap(), "Bearer k-1");
-        assert_eq!(render("${connectionConfig.subdomain}-${connectionConfig.region}", &v).unwrap(), "acme-eu-west-1");
+        assert_eq!(
+            render(
+                "${connectionConfig.subdomain}-${connectionConfig.region}",
+                &v
+            )
+            .unwrap(),
+            "acme-eu-west-1"
+        );
         assert_eq!(render("${port}/${flag}", &v).unwrap(), "8443/true");
         assert_eq!(render("no placeholders", &v).unwrap(), "no placeholders");
         assert_eq!(render("${ apiKey }", &v).unwrap(), "k-1");
@@ -342,7 +363,12 @@ mod tests {
     #[test]
     fn missing_values_fail() {
         let v = vars();
-        for t in ["${nope}", "${connectionConfig.nope}", "${empty}", "x ${credentials.username.deep}"] {
+        for t in [
+            "${nope}",
+            "${connectionConfig.nope}",
+            "${empty}",
+            "x ${credentials.username.deep}",
+        ] {
             assert!(matches!(render(t, &v), Err(Error::Template(_))), "{t}");
         }
         assert!(matches!(render("${obj}", &v), Err(Error::Template(_))));
@@ -351,26 +377,56 @@ mod tests {
     #[test]
     fn fallback_uses_the_first_complete_alternative() {
         let v = vars();
-        assert_eq!(render("https://${connectionConfig.host} || https://default.example.com", &v).unwrap(), "https://default.example.com");
-        assert_eq!(render("https://${connectionConfig.subdomain}.example.com || https://default.example.com", &v).unwrap(), "https://acme.example.com");
-        assert_eq!(render("${connectionConfig.version} || 2025-05-05", &v).unwrap(), "2025-05-05");
-        assert!(matches!(render("${a} || ${b}", &v), Err(Error::Template(_))));
+        assert_eq!(
+            render(
+                "https://${connectionConfig.host} || https://default.example.com",
+                &v
+            )
+            .unwrap(),
+            "https://default.example.com"
+        );
+        assert_eq!(
+            render(
+                "https://${connectionConfig.subdomain}.example.com || https://default.example.com",
+                &v
+            )
+            .unwrap(),
+            "https://acme.example.com"
+        );
+        assert_eq!(
+            render("${connectionConfig.version} || 2025-05-05", &v).unwrap(),
+            "2025-05-05"
+        );
+        assert!(matches!(
+            render("${a} || ${b}", &v),
+            Err(Error::Template(_))
+        ));
     }
 
     #[test]
     fn functions() {
         let v = vars();
         assert_eq!(
-            render("Basic ${base64(${credentials.username}:${credentials.password})}", &v).unwrap(),
+            render(
+                "Basic ${base64(${credentials.username}:${credentials.password})}",
+                &v
+            )
+            .unwrap(),
             "Basic dXNlcjpwQHNz"
         );
         assert_eq!(
             render("${sha256Hex(abc)}", &v).unwrap(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
-        assert_eq!(render("${sha256Base64(abc)}", &v).unwrap(), "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=");
+        assert_eq!(
+            render("${sha256Base64(abc)}", &v).unwrap(),
+            "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0="
+        );
         assert!(matches!(render("${nope(x)}", &v), Err(Error::Template(_))));
-        assert!(matches!(render("${base64(${missing})}", &v), Err(Error::Template(_))));
+        assert!(matches!(
+            render("${base64(${missing})}", &v),
+            Err(Error::Template(_))
+        ));
     }
 
     #[test]
@@ -384,18 +440,47 @@ mod tests {
     #[test]
     fn url_positions() {
         let v = vars();
-        assert_eq!(render_url("https://${connectionConfig.subdomain}.zendesk.com/api", &v).unwrap(), "https://acme.zendesk.com/api");
-        assert_eq!(render_url("https://api.example.com/${connectionConfig.path}?q=${connectionConfig.path}", &v).unwrap(), "https://api.example.com/a%20b%2Fc?q=a%20b%2Fc");
-        assert_eq!(render_url("${connectionConfig.url}", &v).unwrap(), "https://x.example.com/v1");
-        assert_eq!(render_url("${connectionConfig.url}/users", &v).unwrap(), "https://x.example.com/v1/users");
+        assert_eq!(
+            render_url("https://${connectionConfig.subdomain}.zendesk.com/api", &v).unwrap(),
+            "https://acme.zendesk.com/api"
+        );
+        assert_eq!(
+            render_url(
+                "https://api.example.com/${connectionConfig.path}?q=${connectionConfig.path}",
+                &v
+            )
+            .unwrap(),
+            "https://api.example.com/a%20b%2Fc?q=a%20b%2Fc"
+        );
+        assert_eq!(
+            render_url("${connectionConfig.url}", &v).unwrap(),
+            "https://x.example.com/v1"
+        );
+        assert_eq!(
+            render_url("${connectionConfig.url}/users", &v).unwrap(),
+            "https://x.example.com/v1/users"
+        );
     }
 
     #[test]
     fn host_injection_is_rejected() {
-        for bad in ["evil.com/x", "a@b", "a:80", "a?b", "a#b", "..", "a b", "-a", "a\\b"] {
+        for bad in [
+            "evil.com/x",
+            "a@b",
+            "a:80",
+            "a?b",
+            "a#b",
+            "..",
+            "a b",
+            "-a",
+            "a\\b",
+        ] {
             let v = json!({"connectionConfig": {"subdomain": bad}});
             assert!(
-                matches!(render_url("https://${connectionConfig.subdomain}.zendesk.com", &v), Err(Error::Template(_))),
+                matches!(
+                    render_url("https://${connectionConfig.subdomain}.zendesk.com", &v),
+                    Err(Error::Template(_))
+                ),
                 "{bad}"
             );
         }
@@ -407,7 +492,11 @@ mod tests {
     fn url_fallback() {
         let v = vars();
         assert_eq!(
-            render_url("https://${connectionConfig.hostname}/auth || https://login.example.com/auth", &v).unwrap(),
+            render_url(
+                "https://${connectionConfig.hostname}/auth || https://login.example.com/auth",
+                &v
+            )
+            .unwrap(),
             "https://login.example.com/auth"
         );
     }
@@ -419,7 +508,10 @@ mod tests {
             vec!["a.b", "c", "d.e", "f"]
         );
         let v = vars();
-        assert_eq!(lookup(&v, "connectionConfig.subdomain"), Some(&json!("acme")));
+        assert_eq!(
+            lookup(&v, "connectionConfig.subdomain"),
+            Some(&json!("acme"))
+        );
         assert_eq!(lookup(&v, "connectionConfig.nope"), None);
         assert!(has_placeholders("${x}"));
         assert!(!has_placeholders("x"));

@@ -165,17 +165,37 @@ mod tests {
             (Error::InvalidConnectSession, "invalid_connect_session", 401),
             (Error::InvalidOAuthState, "invalid_oauth_state", 400),
             (Error::UnknownProvider("x".into()), "unknown_provider", 404),
-            (Error::UnknownIntegration("x".into()), "unknown_provider_config", 404),
-            (Error::UnknownConnection("x".into()), "unknown_connection", 404),
+            (
+                Error::UnknownIntegration("x".into()),
+                "unknown_provider_config",
+                404,
+            ),
+            (
+                Error::UnknownConnection("x".into()),
+                "unknown_connection",
+                404,
+            ),
             (Error::Invalid("x".into()), "invalid_body", 400),
             (Error::MissingField("x".into()), "missing_field", 400),
-            (Error::UnsupportedAuthMode("x".into()), "unsupported_auth_mode", 400),
-            (Error::IntegrationNotAllowed("x".into()), "integration_not_allowed", 403),
+            (
+                Error::UnsupportedAuthMode("x".into()),
+                "unsupported_auth_mode",
+                400,
+            ),
+            (
+                Error::IntegrationNotAllowed("x".into()),
+                "integration_not_allowed",
+                403,
+            ),
             (Error::Template("x".into()), "invalid_template", 400),
             (Error::ForbiddenHost("x".into()), "forbidden_host", 403),
             (Error::Conflict("x".into()), "conflict", 409),
             (
-                Error::Provider { code: "token_exchange_failed", status: Some(400), message: "m".into() },
+                Error::Provider {
+                    code: "token_exchange_failed",
+                    status: Some(400),
+                    message: "m".into(),
+                },
                 "token_exchange_failed",
                 502,
             ),
@@ -200,9 +220,30 @@ mod tests {
         assert!(Error::Upstream("x".into()).is_retryable());
         assert!(Error::RefreshCooldown.is_retryable());
         assert!(Error::Store("x".into()).is_retryable());
-        assert!(Error::Provider { code: "refresh_failed", status: Some(503), message: String::new() }.is_retryable());
-        assert!(Error::Provider { code: "refresh_failed", status: None, message: String::new() }.is_retryable());
-        assert!(!Error::Provider { code: "refresh_failed", status: Some(400), message: String::new() }.is_retryable());
+        assert!(
+            Error::Provider {
+                code: "refresh_failed",
+                status: Some(503),
+                message: String::new()
+            }
+            .is_retryable()
+        );
+        assert!(
+            Error::Provider {
+                code: "refresh_failed",
+                status: None,
+                message: String::new()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !Error::Provider {
+                code: "refresh_failed",
+                status: Some(400),
+                message: String::new()
+            }
+            .is_retryable()
+        );
         assert!(!Error::RefreshExhausted.is_retryable());
         assert!(!Error::Invalid("x".into()).is_retryable());
         assert!(!Error::Crypto.is_retryable());

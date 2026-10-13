@@ -1,4 +1,4 @@
-//! Connect sessions and auth flows: OAuth2, client credentials, API key,
+//! Connect sessions and auth flows: `OAuth2`, client credentials, API key,
 //! Basic and no auth.
 
 use std::collections::BTreeMap;
@@ -56,10 +56,10 @@ struct Target {
 
 impl Target {
     fn connection_id(&self, san: &SanMateo) -> String {
-        match &self.session.reconnect {
-            Some(k) => k.connection_id.clone(),
-            None => san.inner.entropy.uuid().to_string(),
-        }
+        self.session.reconnect.as_ref().map_or_else(
+            || san.inner.entropy.uuid().to_string(),
+            |k| k.connection_id.clone(),
+        )
     }
 }
 
@@ -76,7 +76,10 @@ impl SanMateo {
 
     fn connect_link(&self, token: &str) -> String {
         let base = self.inner.config.connect_url.clone().unwrap_or_else(|| {
-            format!("{}/connect", self.inner.config.server_url.trim_end_matches('/'))
+            format!(
+                "{}/connect",
+                self.inner.config.server_url.trim_end_matches('/')
+            )
         });
         format!("{base}?session_token={token}")
     }
@@ -96,7 +99,8 @@ impl SanMateo {
         }
         let token = format!("{CONNECT_TOKEN_PREFIX}{}", self.inner.entropy.hex(32));
         let now = self.now();
-        let ttl = Duration::from_std(self.inner.config.connect_session_ttl).unwrap_or(Duration::minutes(30));
+        let ttl = Duration::from_std(self.inner.config.connect_session_ttl)
+            .unwrap_or(Duration::minutes(30));
         let expires_at = now + ttl;
         let allowed = match &reconnect {
             Some(k) => vec![k.provider_config_key.clone()],
@@ -194,13 +198,18 @@ impl SanMateo {
             Some(k) => k.provider_config_key == integration,
             None => {
                 session.allowed_integrations.is_empty()
-                    || session.allowed_integrations.iter().any(|a| a == integration)
+                    || session
+                        .allowed_integrations
+                        .iter()
+                        .any(|a| a == integration)
             }
         };
         if !allowed {
             return Err(Error::IntegrationNotAllowed(integration.to_owned()));
         }
-        let row = self.integration_row(&session.environment, integration).await?;
+        let row = self
+            .integration_row(&session.environment, integration)
+            .await?;
         let provider = self.catalog().require(&row.provider)?;
         if &provider.auth_mode != mode {
             return Err(Error::UnsupportedAuthMode(format!(
@@ -224,7 +233,11 @@ impl SanMateo {
 
     /// Merges and checks connection config: end-user values, then the
     /// session defaults (they win).
-    fn connection_config(provider: &Provider, user: Map<String, Value>, defaults: &Map<String, Value>) -> Result<Map<String, Value>> {
+    fn connection_config(
+        provider: &Provider,
+        user: Map<String, Value>,
+        defaults: &Map<String, Value>,
+    ) -> Result<Map<String, Value>> {
         let mut cfg = user;
         for (k, v) in defaults {
             cfg.insert(k.clone(), v.clone());
@@ -239,7 +252,8 @@ impl SanMateo {
                 Some(_) => return Err(invalid(format!("connection config {name} must be text"))),
             };
             let Some(value) = value else {
-                let optional = schema.optional.unwrap_or(false) || schema.automated.unwrap_or(false);
+                let optional =
+                    schema.optional.unwrap_or(false) || schema.automated.unwrap_or(false);
                 if let Some(d) = &schema.default_value {
                     cfg.insert(name.clone(), json!(d));
                 } else if !optional {
@@ -248,21 +262,32 @@ impl SanMateo {
                 continue;
             };
             if let Some(pattern) = &schema.pattern {
-                let re = regex::Regex::new(pattern)
-                    .map_err(|_| Error::Internal(format!("the catalog pattern of {name} is not valid")))?;
+                let re = regex::Regex::new(pattern).map_err(|_| {
+                    Error::Internal(format!("the catalog pattern of {name} is not valid"))
+                })?;
                 if !re.is_match(&value) {
-                    return Err(invalid(format!("connection config {name} does not match its pattern")));
+                    return Err(invalid(format!(
+                        "connection config {name} does not match its pattern"
+                    )));
                 }
             }
             if !schema.allowed.is_empty() && !schema.allowed.contains(&value) {
-                return Err(invalid(format!("connection config {name} is not an allowed value")));
+                return Err(invalid(format!(
+                    "connection config {name} is not an allowed value"
+                )));
             }
         }
         Ok(cfg)
     }
 
     fn scopes(target: &Target, user_scopes: Option<&str>) -> Vec<String> {
-        let split = |s: &str| s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect::<Vec<_>>();
+        let split = |s: &str| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
         let mut scopes = match (target.defaults.user_scopes.as_deref(), user_scopes) {
             (Some(d), _) => split(d),
             (None, Some(u)) => split(u),
@@ -276,7 +301,10 @@ impl SanMateo {
         scopes
     }
 
-    fn render_params(params: &BTreeMap<String, String>, vars: &Value) -> Result<BTreeMap<String, String>> {
+    fn render_params(
+        params: &BTreeMap<String, String>,
+        vars: &Value,
+    ) -> Result<BTreeMap<String, String>> {
         params
             .iter()
             .map(|(k, v)| Ok((k.clone(), template::render(v, vars)?)))
@@ -284,28 +312,45 @@ impl SanMateo {
     }
 
     fn redirect_uri(&self, env: &str) -> Result<String> {
-        Ok(self.environment(env)?.callback_url.clone().unwrap_or_else(|| {
-            format!("{}/oauth/callback", self.inner.config.server_url.trim_end_matches('/'))
-        }))
+        Ok(self
+            .environment(env)?
+            .callback_url
+            .clone()
+            .unwrap_or_else(|| {
+                format!(
+                    "{}/oauth/callback",
+                    self.inner.config.server_url.trim_end_matches('/')
+                )
+            }))
     }
 
-    /// Starts an OAuth2 flow. Returns the provider URL for the browser.
+    /// Starts an `OAuth2` flow. Returns the provider URL for the browser.
     ///
     /// # Errors
     ///
     /// [`Error::InvalidConnectSession`], [`Error::IntegrationNotAllowed`],
     /// [`Error::UnknownIntegration`], [`Error::UnsupportedAuthMode`],
     /// [`Error::MissingField`], [`Error::Template`].
-    pub async fn oauth_start(&self, token: &str, integration: &str, options: ConnectOptions) -> Result<String> {
+    pub async fn oauth_start(
+        &self,
+        token: &str,
+        integration: &str,
+        options: ConnectOptions,
+    ) -> Result<String> {
         let t = self.target(token, integration, &AuthMode::OAuth2).await?;
         let env = t.session.environment.clone();
-        let cfg = Self::connection_config(&t.provider, options.connection_config, &t.defaults.connection_config)?;
+        let cfg = Self::connection_config(
+            &t.provider,
+            options.connection_config,
+            &t.defaults.connection_config,
+        )?;
         let vars = json!({ "connectionConfig": cfg });
-        let auth_url = t
-            .provider
-            .authorization_url
-            .as_deref()
-            .ok_or_else(|| Error::Internal(format!("provider {} has no authorization URL", t.provider.name)))?;
+        let auth_url = t.provider.authorization_url.as_deref().ok_or_else(|| {
+            Error::Internal(format!(
+                "provider {} has no authorization URL",
+                t.provider.name
+            ))
+        })?;
         let auth_url = template::render_url(auth_url, &vars)?;
         let mut params = Self::render_params(&t.provider.authorization_params, &vars)?;
         params.extend(options.authorization_params);
@@ -332,9 +377,14 @@ impl SanMateo {
             params: &params,
         })?;
         let now = self.now();
-        let ttl = Duration::from_std(self.inner.config.oauth_session_ttl).unwrap_or(Duration::minutes(15));
+        let ttl = Duration::from_std(self.inner.config.oauth_session_ttl)
+            .unwrap_or(Duration::minutes(15));
         let code_verifier = verifier
-            .map(|v| self.inner.keys.seal(v.as_bytes(), &crate::crypto::aad(&["oauth", &state_hash])))
+            .map(|v| {
+                self.inner
+                    .keys
+                    .seal(v.as_bytes(), &crate::crypto::aad(&["oauth", &state_hash]))
+            })
             .transpose()?;
         self.inner
             .store
@@ -355,7 +405,14 @@ impl SanMateo {
     }
 
     /// Sends an `auth` failure event for a connect call.
-    fn auth_failure(&self, env: &str, key: &ConnectionKey, provider: &Provider, session: Option<&ConnectSession>, err: &Error) {
+    fn auth_failure(
+        &self,
+        env: &str,
+        key: &ConnectionKey,
+        provider: &Provider,
+        session: Option<&ConnectSession>,
+        err: &Error,
+    ) {
         let event = WebhookEvent::Auth(AuthEvent {
             connection_id: key.connection_id.clone(),
             provider_config_key: key.provider_config_key.clone(),
@@ -371,17 +428,24 @@ impl SanMateo {
             tags: session.map(|s| s.tags.clone()).unwrap_or_default(),
             end_user: session.and_then(|s| s.end_user.clone()),
         });
-        self.spawn_webhook(env, session.and_then(|s| s.webhook_url_override.clone()), event);
+        self.spawn_webhook(
+            env,
+            session.and_then(|s| s.webhook_url_override.clone()),
+            event,
+        );
     }
 
-    /// Ends an OAuth2 flow with the callback query.
+    /// Ends an `OAuth2` flow with the callback query.
     ///
     /// # Errors
     ///
     /// [`Error::InvalidOAuthState`], [`Error::Provider`] when the provider
     /// gives an error or the code exchange fails.
     pub async fn oauth_callback(&self, query: &BTreeMap<String, String>) -> Result<Connection> {
-        let state = query.get("state").filter(|s| !s.is_empty()).ok_or(Error::InvalidOAuthState)?;
+        let state = query
+            .get("state")
+            .filter(|s| !s.is_empty())
+            .ok_or(Error::InvalidOAuthState)?;
         let state_hash = self.inner.keys.lookup_hash(state);
         let row = self
             .inner
@@ -394,13 +458,21 @@ impl SanMateo {
         }
         let env = row.environment.clone();
         let session = match row.connect_session_id {
-            Some(id) => self.inner.store.get_connect_session_by_id(id).await?.map(to_session),
+            Some(id) => self
+                .inner
+                .store
+                .get_connect_session_by_id(id)
+                .await?
+                .map(to_session),
             None => None,
         };
         let integration = self.integration_row(&env, &row.provider_config_key).await?;
         let provider = self.catalog().require(&integration.provider)?;
         let key = ConnectionKey::new(&row.provider_config_key, &row.connection_id);
-        match self.exchange_code(&row, &integration, &provider, query, session.as_ref()).await {
+        match self
+            .exchange_code(&row, &integration, &provider, query, session.as_ref())
+            .await
+        {
             Ok(conn) => Ok(conn),
             Err(e) => {
                 self.auth_failure(&env, &key, &provider, session.as_ref(), &e);
@@ -418,14 +490,24 @@ impl SanMateo {
         session: Option<&ConnectSession>,
     ) -> Result<Connection> {
         if let Some(error) = query.get("error") {
-            let desc = query.get("error_description").map(String::as_str).unwrap_or_default();
+            let desc = query
+                .get("error_description")
+                .map(String::as_str)
+                .unwrap_or_default();
             return Err(Error::Provider {
                 code: "authorization_denied",
                 status: None,
-                message: if desc.is_empty() { error.clone() } else { format!("{error}: {desc}") },
+                message: if desc.is_empty() {
+                    error.clone()
+                } else {
+                    format!("{error}: {desc}")
+                },
             });
         }
-        let code_param = provider.authorization_code_param_in_callback.as_deref().unwrap_or("code");
+        let code_param = provider
+            .authorization_code_param_in_callback
+            .as_deref()
+            .unwrap_or("code");
         let code = query
             .get(code_param)
             .filter(|c| !c.is_empty())
@@ -435,31 +517,50 @@ impl SanMateo {
             _ => Map::new(),
         };
         let vars = json!({ "connectionConfig": cfg });
-        let token_url = provider
-            .token_url_for(&AuthMode::OAuth2)
-            .ok_or_else(|| Error::Internal(format!("provider {} has no token URL", provider.name)))?;
+        let token_url = provider.token_url_for(&AuthMode::OAuth2).ok_or_else(|| {
+            Error::Internal(format!("provider {} has no token URL", provider.name))
+        })?;
         let token_url = template::render_url(token_url, &vars)?;
         crate::proxy::check_upstream(&token_url, None, false, &self.inner.config.proxy)?;
         let verifier = row
             .code_verifier
             .as_deref()
             .map(|sealed| {
-                let bytes = self.inner.keys.open(sealed, &crate::crypto::aad(&["oauth", &row.state_hash]))?;
+                let bytes = self
+                    .inner
+                    .keys
+                    .open(sealed, &crate::crypto::aad(&["oauth", &row.state_hash]))?;
                 String::from_utf8(bytes).map_err(|_| Error::Crypto)
             })
             .transpose()?;
         let token_params = Self::render_params(&provider.token_params, &vars)?;
-        let params = oauth2::code_exchange_params(code, &row.redirect_uri, verifier.as_deref(), &token_params);
+        let params = oauth2::code_exchange_params(
+            code,
+            &row.redirect_uri,
+            verifier.as_deref(),
+            &token_params,
+        );
         let client_id = integration.client_id.clone().unwrap_or_default();
         let client_secret = self.client_secret(integration)?.unwrap_or_default();
-        let request = oauth2::token_request(provider, &token_url, &client_id, client_secret.expose(), params);
-        let reply = self.token_call(request, provider, "token_exchange_failed").await?;
+        let request = oauth2::token_request(
+            provider,
+            &token_url,
+            &client_id,
+            client_secret.expose(),
+            params,
+        );
+        let reply = self
+            .token_call(request, provider, "token_exchange_failed")
+            .await?;
         for name in &provider.redirect_uri_metadata {
             if let Some(v) = query.get(name) {
                 cfg.insert(name.clone(), json!(v));
             }
         }
-        cfg.extend(oauth2::extract_metadata(&reply.raw, &provider.token_response_metadata));
+        cfg.extend(oauth2::extract_metadata(
+            &reply.raw,
+            &provider.token_response_metadata,
+        ));
         let creds = Credentials::OAuth2(OAuth2Credentials {
             access_token: reply.access_token,
             refresh_token: reply.refresh_token,
@@ -467,7 +568,8 @@ impl SanMateo {
             raw: reply.raw,
         });
         let key = ConnectionKey::new(&row.provider_config_key, &row.connection_id);
-        self.save_connection(&row.environment, &key, provider, creds, cfg, session, None).await
+        self.save_connection(&row.environment, &key, provider, creds, cfg, session, None)
+            .await
     }
 
     /// Sends a token request and parses the reply.
@@ -477,16 +579,22 @@ impl SanMateo {
         provider: &Provider,
         code: &'static str,
     ) -> Result<oauth2::TokenReply> {
-        let reply = self.inner.transport.send(request).await.map_err(|e| Error::Provider {
-            code,
-            status: None,
-            message: e.to_string(),
-        })?;
+        let reply = self
+            .inner
+            .transport
+            .send(request)
+            .await
+            .map_err(|e| Error::Provider {
+                code,
+                status: None,
+                message: e.to_string(),
+            })?;
         if !(200..300).contains(&reply.status) {
             return Err(Error::Provider {
                 code,
                 status: Some(reply.status),
-                message: oauth2::reply_error(&reply.body).unwrap_or_else(|| format!("HTTP {}", reply.status)),
+                message: oauth2::reply_error(&reply.body)
+                    .unwrap_or_else(|| format!("HTTP {}", reply.status)),
             });
         }
         oauth2::parse_token_reply(
@@ -526,24 +634,36 @@ impl SanMateo {
                 .or_else(|| existing.as_ref().map(|e| e.tags.clone()))
                 .unwrap_or_default()
         };
-        let (metadata, tags, end_user, webhook_url_override) = match import {
-            Some(i) => (
-                Value::Object(i.metadata.clone()),
-                i.tags.clone(),
-                i.end_user.clone(),
-                i.webhook_url_override.clone(),
-            ),
-            None => (
-                existing.as_ref().map_or_else(|| json!({}), |e| e.metadata.clone()),
-                pick_tags(session.map(|s| &s.tags)),
-                session
-                    .and_then(|s| s.end_user.clone())
-                    .or_else(|| existing.as_ref().and_then(|e| e.end_user.clone())),
-                session
-                    .and_then(|s| s.webhook_url_override.clone())
-                    .or_else(|| existing.as_ref().and_then(|e| e.webhook_url_override.clone())),
-            ),
-        };
+        // An import sets all fields. A connect call keeps the stored fields
+        // that the session does not set.
+        let (metadata, tags, end_user, webhook_url_override) = import.map_or_else(
+            || {
+                (
+                    existing
+                        .as_ref()
+                        .map_or_else(|| json!({}), |e| e.metadata.clone()),
+                    pick_tags(session.map(|s| &s.tags)),
+                    session
+                        .and_then(|s| s.end_user.clone())
+                        .or_else(|| existing.as_ref().and_then(|e| e.end_user.clone())),
+                    session
+                        .and_then(|s| s.webhook_url_override.clone())
+                        .or_else(|| {
+                            existing
+                                .as_ref()
+                                .and_then(|e| e.webhook_url_override.clone())
+                        }),
+                )
+            },
+            |i| {
+                (
+                    Value::Object(i.metadata.clone()),
+                    i.tags.clone(),
+                    i.end_user.clone(),
+                    i.webhook_url_override.clone(),
+                )
+            },
+        );
         let row = ConnectionRow {
             id: self.inner.entropy.uuid(),
             environment: env.to_owned(),
@@ -567,7 +687,7 @@ impl SanMateo {
             version: 0,
         };
         let up = self.inner.store.upsert_connection(row).await?;
-        let conn = self.to_connection(up.row, credentials);
+        let conn = Self::to_connection(up.row, credentials);
         self.spawn_webhook(
             env,
             conn.webhook_url_override.clone(),
@@ -577,7 +697,11 @@ impl SanMateo {
                 provider: conn.provider.clone(),
                 auth_mode: provider.auth_mode.as_str().to_owned(),
                 environment: env.to_owned(),
-                operation: if up.created { AuthOperation::Creation } else { AuthOperation::Override },
+                operation: if up.created {
+                    AuthOperation::Creation
+                } else {
+                    AuthOperation::Override
+                },
                 success: true,
                 error: None,
                 tags: conn.tags.clone(),
@@ -594,14 +718,22 @@ impl SanMateo {
         credentials: &Credentials,
         cfg: &Map<String, Value>,
     ) -> Result<()> {
-        let Some(check) = provider.proxy.as_ref().and_then(|p| p.verification.as_ref()) else {
+        let Some(check) = provider
+            .proxy
+            .as_ref()
+            .and_then(|p| p.verification.as_ref())
+        else {
             return Ok(());
         };
         if check.endpoints.is_empty() {
             return Ok(());
         }
         let vars = Self::vars_for(credentials, cfg, &Map::new());
-        let base = match check.base_url_override.as_deref().or_else(|| provider.base_url()) {
+        let base = match check
+            .base_url_override
+            .as_deref()
+            .or_else(|| provider.base_url())
+        {
             Some(b) => template::render_url(b, &vars)?,
             None => return Ok(()),
         };
@@ -611,7 +743,11 @@ impl SanMateo {
         );
         headers = crate::proxy::merge_headers(
             headers,
-            check.headers.iter().map(|(k, v)| (k.to_ascii_lowercase(), v.clone())).collect(),
+            check
+                .headers
+                .iter()
+                .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
+                .collect(),
         );
         let mut last = None;
         for endpoint in &check.endpoints {
@@ -644,12 +780,17 @@ impl SanMateo {
         make: impl FnOnce(&Target) -> Result<Credentials>,
     ) -> Result<Connection> {
         let t = self.target(token, integration, &mode).await?;
-        let cfg = Self::connection_config(&t.provider, options.connection_config, &t.defaults.connection_config)?;
+        let cfg = Self::connection_config(
+            &t.provider,
+            options.connection_config,
+            &t.defaults.connection_config,
+        )?;
         let creds = make(&t)?;
         self.verify_credentials(&t.provider, &creds, &cfg).await?;
         let key = ConnectionKey::new(integration, t.connection_id(self));
         let env = t.session.environment.clone();
-        self.save_connection(&env, &key, &t.provider, creds, cfg, Some(&t.session), None).await
+        self.save_connection(&env, &key, &t.provider, creds, cfg, Some(&t.session), None)
+            .await
     }
 
     /// Makes an API key connection.
@@ -706,8 +847,10 @@ impl SanMateo {
         integration: &str,
         options: ConnectOptions,
     ) -> Result<Connection> {
-        self.connect_with(token, integration, AuthMode::None, options, |_| Ok(Credentials::Unauthenticated))
-            .await
+        self.connect_with(token, integration, AuthMode::None, options, |_| {
+            Ok(Credentials::Unauthenticated)
+        })
+        .await
     }
 
     /// Gets a client credentials token.
@@ -723,12 +866,16 @@ impl SanMateo {
         let vars = json!({ "connectionConfig": cfg });
         let url = provider
             .token_url_for(&AuthMode::OAuth2ClientCredentials)
-            .ok_or_else(|| Error::Internal(format!("provider {} has no token URL", provider.name)))?;
+            .ok_or_else(|| {
+                Error::Internal(format!("provider {} has no token URL", provider.name))
+            })?;
         let url = template::render_url(url, &vars)?;
         crate::proxy::check_upstream(&url, None, false, &self.inner.config.proxy)?;
         let token_params = Self::render_params(&provider.token_params, &vars)?;
-        let params = oauth2::client_credentials_params(scopes, provider.scope_separator(), &token_params);
-        let request = oauth2::token_request(provider, &url, client_id, client_secret.expose(), params);
+        let params =
+            oauth2::client_credentials_params(scopes, provider.scope_separator(), &token_params);
+        let request =
+            oauth2::token_request(provider, &url, client_id, client_secret.expose(), params);
         let reply = self.token_call(request, provider, code).await?;
         Ok(ClientCredentials {
             token: reply.access_token,
@@ -739,7 +886,7 @@ impl SanMateo {
         })
     }
 
-    /// Makes an OAuth2 client credentials connection.
+    /// Makes an `OAuth2` client credentials connection.
     ///
     /// # Errors
     ///
@@ -752,22 +899,43 @@ impl SanMateo {
         client_secret: Secret,
         options: ConnectOptions,
     ) -> Result<Connection> {
-        let t = self.target(token, integration, &AuthMode::OAuth2ClientCredentials).await?;
+        let t = self
+            .target(token, integration, &AuthMode::OAuth2ClientCredentials)
+            .await?;
         if client_id.is_empty() {
             return Err(Error::MissingField("client_id".to_owned()));
         }
         if client_secret.is_empty() {
             return Err(Error::MissingField("client_secret".to_owned()));
         }
-        let cfg = Self::connection_config(&t.provider, options.connection_config, &t.defaults.connection_config)?;
+        let cfg = Self::connection_config(
+            &t.provider,
+            options.connection_config,
+            &t.defaults.connection_config,
+        )?;
         let scopes = Self::scopes(&t, options.user_scopes.as_deref());
         let creds = self
-            .client_credentials_token(&t.provider, &scopes, &cfg, &client_id, &client_secret, "token_exchange_failed")
+            .client_credentials_token(
+                &t.provider,
+                &scopes,
+                &cfg,
+                &client_id,
+                &client_secret,
+                "token_exchange_failed",
+            )
             .await?;
         let key = ConnectionKey::new(integration, t.connection_id(self));
         let env = t.session.environment.clone();
-        self.save_connection(&env, &key, &t.provider, Credentials::OAuth2ClientCredentials(creds), cfg, Some(&t.session), None)
-            .await
+        self.save_connection(
+            &env,
+            &key,
+            &t.provider,
+            Credentials::OAuth2ClientCredentials(creds),
+            cfg,
+            Some(&t.session),
+            None,
+        )
+        .await
     }
 
     /// Imports a connection with known credentials.
@@ -776,8 +944,14 @@ impl SanMateo {
     ///
     /// [`Error::UnknownIntegration`], [`Error::Invalid`] when the credentials
     /// do not match the auth mode.
-    pub async fn import_connection(&self, env: &str, input: ImportConnection) -> Result<Connection> {
-        let integration = self.integration_row(env, &input.provider_config_key).await?;
+    pub async fn import_connection(
+        &self,
+        env: &str,
+        input: ImportConnection,
+    ) -> Result<Connection> {
+        let integration = self
+            .integration_row(env, &input.provider_config_key)
+            .await?;
         let provider = self.catalog().require(&integration.provider)?;
         if input.credentials.auth_mode() != provider.auth_mode {
             return Err(invalid(format!(
@@ -791,11 +965,23 @@ impl SanMateo {
         }
         let connection_id = match &input.connection_id {
             Some(id) if valid_connection_id(id) => id.clone(),
-            Some(_) => return Err(invalid("the connection id must be 1 to 255 printable chars")),
+            Some(_) => {
+                return Err(invalid(
+                    "the connection id must be 1 to 255 printable chars",
+                ));
+            }
             None => self.inner.entropy.uuid().to_string(),
         };
         let key = ConnectionKey::new(&input.provider_config_key, connection_id);
-        self.save_connection(env, &key, &provider, input.credentials.clone(), input.connection_config.clone(), None, Some(&input))
-            .await
+        self.save_connection(
+            env,
+            &key,
+            &provider,
+            input.credentials.clone(),
+            input.connection_config.clone(),
+            None,
+            Some(&input),
+        )
+        .await
     }
 }

@@ -13,7 +13,9 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value, json};
 
-use super::{Connection, ConnectionPatch, ConnectionSummary, GetOptions, RefreshReport, SanMateo, invalid};
+use super::{
+    Connection, ConnectionPatch, ConnectionSummary, GetOptions, RefreshReport, SanMateo, invalid,
+};
 use crate::credentials::{Credentials, OAuth2Credentials};
 use crate::error::{Error, Result};
 use crate::model::ConnectionKey;
@@ -55,7 +57,7 @@ fn refreshable(c: &Credentials) -> bool {
 }
 
 impl SanMateo {
-    pub(crate) fn to_connection(&self, row: ConnectionRow, credentials: Credentials) -> Connection {
+    pub(crate) fn to_connection(row: ConnectionRow, credentials: Credentials) -> Connection {
         Connection {
             id: row.id,
             environment: row.environment,
@@ -75,7 +77,11 @@ impl SanMateo {
     }
 
     /// Returns the template variables of a connection.
-    pub(crate) fn vars_for(credentials: &Credentials, cfg: &Map<String, Value>, metadata: &Map<String, Value>) -> Value {
+    pub(crate) fn vars_for(
+        credentials: &Credentials,
+        cfg: &Map<String, Value>,
+        metadata: &Map<String, Value>,
+    ) -> Value {
         let mut vars = credentials.template_vars();
         if let Value::Object(m) = &mut vars {
             m.insert("connectionConfig".to_owned(), Value::Object(cfg.clone()));
@@ -85,7 +91,11 @@ impl SanMateo {
         vars
     }
 
-    pub(crate) async fn connection_row(&self, env: &str, key: &ConnectionKey) -> Result<ConnectionRow> {
+    pub(crate) async fn connection_row(
+        &self,
+        env: &str,
+        key: &ConnectionKey,
+    ) -> Result<ConnectionRow> {
         self.inner
             .store
             .get_connection(env, &key.provider_config_key, &key.connection_id)
@@ -96,7 +106,11 @@ impl SanMateo {
     pub(crate) fn open_credentials(&self, row: &ConnectionRow) -> Result<Credentials> {
         self.inner.keys.open_json(
             &row.credentials,
-            &Self::connection_aad(&row.environment, &row.provider_config_key, &row.connection_id),
+            &Self::connection_aad(
+                &row.environment,
+                &row.provider_config_key,
+                &row.connection_id,
+            ),
         )
     }
 
@@ -114,7 +128,9 @@ impl SanMateo {
                 return Ok(stored);
             }
         }
-        Err(Error::Store("the connection changed too often during a write".to_owned()))
+        Err(Error::Store(
+            "the connection changed too often during a write".to_owned(),
+        ))
     }
 
     /// Lists connections with no credentials.
@@ -122,7 +138,11 @@ impl SanMateo {
     /// # Errors
     ///
     /// Store errors.
-    pub async fn list_connections(&self, env: &str, filter: &ConnectionFilter) -> Result<Vec<ConnectionSummary>> {
+    pub async fn list_connections(
+        &self,
+        env: &str,
+        filter: &ConnectionFilter,
+    ) -> Result<Vec<ConnectionSummary>> {
         let rows = self.inner.store.list_connections(env, filter).await?;
         Ok(rows
             .into_iter()
@@ -146,7 +166,12 @@ impl SanMateo {
     ///
     /// [`Error::UnknownConnection`], [`Error::RefreshCooldown`],
     /// [`Error::RefreshExhausted`], [`Error::Provider`] with `refresh_failed`.
-    pub async fn get_connection(&self, env: &str, key: &ConnectionKey, options: GetOptions) -> Result<Connection> {
+    pub async fn get_connection(
+        &self,
+        env: &str,
+        key: &ConnectionKey,
+        options: GetOptions,
+    ) -> Result<Connection> {
         let row = self.connection_row(env, key).await?;
         let creds = self.open_credentials(&row)?;
         let mode = if options.force_refresh {
@@ -168,14 +193,19 @@ impl SanMateo {
             Ok(Some(stored)) => stored,
             _ => touched,
         };
-        Ok(self.to_connection(row, creds))
+        Ok(Self::to_connection(row, creds))
     }
 
     fn provider_of(&self, row: &ConnectionRow) -> Result<Arc<Provider>> {
         self.catalog().require(&row.provider)
     }
 
-    fn needs_refresh(&self, row: &ConnectionRow, creds: &Credentials, mode: RefreshMode) -> Result<bool> {
+    fn needs_refresh(
+        &self,
+        row: &ConnectionRow,
+        creds: &Credentials,
+        mode: RefreshMode,
+    ) -> Result<bool> {
         if !refreshable(creds) {
             return Ok(false);
         }
@@ -194,7 +224,11 @@ impl SanMateo {
     }
 
     fn flight(&self, name: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut map = self.inner.flights.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut map = self
+            .inner
+            .flights
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Drop locks that no task holds, so the map does not grow without end.
         map.retain(|_, l| Arc::strong_count(l) > 1);
         map.entry(name.to_owned()).or_default().clone()
@@ -207,7 +241,10 @@ impl SanMateo {
         key: &ConnectionKey,
         mode: RefreshMode,
     ) -> Result<(ConnectionRow, Credentials)> {
-        let name = format!("refresh:{env}:{}:{}", key.provider_config_key, key.connection_id);
+        let name = format!(
+            "refresh:{env}:{}:{}",
+            key.provider_config_key, key.connection_id
+        );
         let flight = self.flight(&name);
         let _local = flight.lock().await;
         let started = self.now();
@@ -229,12 +266,21 @@ impl SanMateo {
             Gate::Cooldown => return Err(Error::RefreshCooldown),
             Gate::Exhausted => return Err(Error::RefreshExhausted),
         }
-        let ttl = u64::try_from(self.inner.config.refresh_lease_ttl.as_millis()).unwrap_or(u64::MAX);
-        if !self.inner.store.try_lease(&name, &self.inner.owner, self.now(), ttl).await? {
+        let ttl =
+            u64::try_from(self.inner.config.refresh_lease_ttl.as_millis()).unwrap_or(u64::MAX);
+        if !self
+            .inner
+            .store
+            .try_lease(&name, &self.inner.owner, self.now(), ttl)
+            .await?
+        {
             return self.wait_for_other(env, key, mode, started).await;
         }
         let result = self.refresh_locked(env, key, mode).await;
-        self.inner.store.release_lease(&name, &self.inner.owner).await?;
+        self.inner
+            .store
+            .release_lease(&name, &self.inner.owner)
+            .await?;
         result
     }
 
@@ -278,7 +324,10 @@ impl SanMateo {
         match self.new_credentials(&row, &provider, &creds).await {
             Ok(fresh) => {
                 let now = self.now();
-                let sealed = self.inner.keys.seal_json(&fresh, &Self::connection_aad(env, &key.provider_config_key, &key.connection_id))?;
+                let sealed = self.inner.keys.seal_json(
+                    &fresh,
+                    &Self::connection_aad(env, &key.provider_config_key, &key.connection_id),
+                )?;
                 let stored = self
                     .update_row(env, key, |r| {
                         r.credentials.clone_from(&sealed);
@@ -298,9 +347,15 @@ impl SanMateo {
                 let today = self.now_ms() / policy::MS_PER_DAY;
                 let stored = self
                     .update_row(env, key, |r| {
-                        let last_day = r.last_refresh_failure.map(|t| crate::clock::to_ms(t) / policy::MS_PER_DAY);
-                        let (attempts, exhausted) =
-                            policy::record_failure(r.refresh_attempts, last_day, today, policy::MAX_FAILED_REFRESH_DAYS);
+                        let last_day = r
+                            .last_refresh_failure
+                            .map(|t| crate::clock::to_ms(t) / policy::MS_PER_DAY);
+                        let (attempts, exhausted) = policy::record_failure(
+                            r.refresh_attempts,
+                            last_day,
+                            today,
+                            policy::MAX_FAILED_REFRESH_DAYS,
+                        );
                         r.refresh_attempts = attempts;
                         r.refresh_exhausted = exhausted;
                         r.last_refresh_failure = Some(now);
@@ -318,9 +373,12 @@ impl SanMateo {
                         environment: env.to_owned(),
                         operation: AuthOperation::Refresh,
                         success: false,
-                        error: Some(ErrorPayload { kind: e.code().to_owned(), description: e.to_string() }),
+                        error: Some(ErrorPayload {
+                            kind: e.code().to_owned(),
+                            description: e.to_string(),
+                        }),
                         tags: stored.tags.clone(),
-                        end_user: stored.end_user.clone(),
+                        end_user: stored.end_user,
                     }),
                 );
                 Err(e)
@@ -329,7 +387,12 @@ impl SanMateo {
     }
 
     /// Asks the provider for new credentials.
-    async fn new_credentials(&self, row: &ConnectionRow, provider: &Provider, creds: &Credentials) -> Result<Credentials> {
+    async fn new_credentials(
+        &self,
+        row: &ConnectionRow,
+        provider: &Provider,
+        creds: &Credentials,
+    ) -> Result<Credentials> {
         let cfg = as_map(&row.connection_config);
         match creds {
             Credentials::OAuth2(old) => {
@@ -337,13 +400,17 @@ impl SanMateo {
                     .refresh_token
                     .as_ref()
                     .ok_or_else(|| invalid("the connection has no refresh token"))?;
-                let integration = self.integration_row(&row.environment, &row.provider_config_key).await?;
+                let integration = self
+                    .integration_row(&row.environment, &row.provider_config_key)
+                    .await?;
                 let vars = json!({ "connectionConfig": cfg });
                 let url = provider
                     .refresh_url
                     .as_deref()
                     .or_else(|| provider.token_url_for(&AuthMode::OAuth2))
-                    .ok_or_else(|| Error::Internal(format!("provider {} has no token URL", provider.name)))?;
+                    .ok_or_else(|| {
+                        Error::Internal(format!("provider {} has no token URL", provider.name))
+                    })?;
                 let url = crate::template::render_url(url, &vars)?;
                 crate::proxy::check_upstream(&url, None, false, &self.inner.config.proxy)?;
                 let render = |m: &std::collections::BTreeMap<String, String>| -> Result<std::collections::BTreeMap<String, String>> {
@@ -356,7 +423,13 @@ impl SanMateo {
                 );
                 let client_id = integration.client_id.clone().unwrap_or_default();
                 let client_secret = self.client_secret(&integration)?.unwrap_or_default();
-                let request = crate::oauth2::token_request(provider, &url, &client_id, client_secret.expose(), params);
+                let request = crate::oauth2::token_request(
+                    provider,
+                    &url,
+                    &client_id,
+                    client_secret.expose(),
+                    params,
+                );
                 let reply = self.token_call(request, provider, "refresh_failed").await?;
                 Ok(Credentials::OAuth2(OAuth2Credentials {
                     access_token: reply.access_token,
@@ -367,9 +440,18 @@ impl SanMateo {
                 }))
             }
             Credentials::OAuth2ClientCredentials(old) => {
-                let integration = self.integration_row(&row.environment, &row.provider_config_key).await?;
+                let integration = self
+                    .integration_row(&row.environment, &row.provider_config_key)
+                    .await?;
                 let fresh = self
-                    .client_credentials_token(provider, &integration.scopes, &cfg, &old.client_id, &old.client_secret, "refresh_failed")
+                    .client_credentials_token(
+                        provider,
+                        &integration.scopes,
+                        &cfg,
+                        &old.client_id,
+                        &old.client_secret,
+                        "refresh_failed",
+                    )
                     .await?;
                 Ok(Credentials::OAuth2ClientCredentials(fresh))
             }
@@ -389,7 +471,10 @@ impl SanMateo {
             .delete_connection(env, &key.provider_config_key, &key.connection_id)
             .await?
             .ok_or_else(|| Error::UnknownConnection(key.connection_id.clone()))?;
-        let auth_mode = self.provider_of(&row).map(|p| p.auth_mode.as_str().to_owned()).unwrap_or_else(|_| "unknown".to_owned());
+        let auth_mode = self.provider_of(&row).map_or_else(
+            |_| "unknown".to_owned(),
+            |p| p.auth_mode.as_str().to_owned(),
+        );
         self.spawn_webhook(
             env,
             row.webhook_url_override.clone(),
@@ -424,7 +509,11 @@ impl SanMateo {
         let now = self.now();
         let stored = self
             .update_row(env, key, |r| {
-                let mut next = if merge { as_map(&r.metadata) } else { Map::new() };
+                let mut next = if merge {
+                    as_map(&r.metadata)
+                } else {
+                    Map::new()
+                };
                 next.extend(metadata.clone());
                 r.metadata = Value::Object(next);
                 r.updated_at = now;
@@ -440,7 +529,12 @@ impl SanMateo {
     ///
     /// [`Error::UnknownConnection`], [`Error::Invalid`] for a webhook URL that
     /// is not HTTPS.
-    pub async fn patch_connection(&self, env: &str, key: &ConnectionKey, patch: ConnectionPatch) -> Result<()> {
+    pub async fn patch_connection(
+        &self,
+        env: &str,
+        key: &ConnectionKey,
+        patch: ConnectionPatch,
+    ) -> Result<()> {
         if let Some(Some(url)) = &patch.webhook_url_override {
             self.check_webhook_url(url)?;
         }
@@ -468,8 +562,13 @@ impl SanMateo {
     ///
     /// Store errors.
     pub async fn refresh_due(&self, within: Duration, limit: usize) -> Result<RefreshReport> {
-        let before = self.now() + chrono::Duration::from_std(within).unwrap_or(chrono::Duration::days(1));
-        let rows = self.inner.store.connections_expiring_before(before, limit).await?;
+        let before =
+            self.now() + chrono::Duration::from_std(within).unwrap_or(chrono::Duration::days(1));
+        let rows = self
+            .inner
+            .store
+            .connections_expiring_before(before, limit)
+            .await?;
         let mut report = RefreshReport::default();
         for row in rows {
             let refreshable_now = self.open_credentials(&row).is_ok_and(|c| refreshable(&c));
@@ -477,7 +576,10 @@ impl SanMateo {
                 report.skipped += 1;
                 continue;
             }
-            match self.refresh(&row.environment, &row.key(), RefreshMode::Before(before)).await {
+            match self
+                .refresh(&row.environment, &row.key(), RefreshMode::Before(before))
+                .await
+            {
                 Ok(_) => report.refreshed += 1,
                 Err(Error::RefreshCooldown | Error::RefreshExhausted) => report.skipped += 1,
                 Err(e) => {
