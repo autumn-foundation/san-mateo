@@ -35,10 +35,11 @@ pub const HOP_BY_HOP: &[&str] = &[
 /// Proxy settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxySettings {
-    /// Extra hosts for `Base-Url-Override`. `*.example.com` allows sub-domains.
+    /// Extra hosts for `Base-Url-Override` and for end-user host values.
+    /// `*.example.com` allows sub-domains.
     pub allowed_hosts: Vec<String>,
-    /// Allow private, loopback and link-local hosts. Only for tests and local
-    /// development.
+    /// Allow internal hosts (see [`check_upstream`]). Only for tests and
+    /// local development.
     pub allow_private_hosts: bool,
     /// Allow plain `http`. Only for tests and local development.
     pub allow_plain_http: bool,
@@ -271,8 +272,9 @@ pub(crate) fn host_allowed(host: &str, allowed: &[String]) -> bool {
 /// Checks an upstream URL before a send.
 ///
 /// - The scheme must be `https` (or `http` when `allow_plain_http`).
-/// - A private, loopback, link-local or unspecified IP literal, or
-///   `localhost`, is rejected unless `allow_private_hosts`.
+/// - The host must not be internal, unless `allow_private_hosts`. Internal
+///   hosts are `localhost`, `*.localhost`, and IP literals that are not
+///   public unicast addresses (also inside IPv6 forms).
 /// - With `base_url_override`, the host must be `provider_host` or a host in
 ///   `allowed_hosts`.
 ///
@@ -385,8 +387,8 @@ fn lacks_value(template: &str, vars: &Value) -> Result<bool> {
         }))
 }
 
-/// Renders each template of `map`. An entry with a missing value is left
-/// out, as in Nango. `lower` makes the names lower case.
+/// Renders each template of `map`. As in Nango, it skips an entry with a
+/// missing value. `lower` makes the names lower case.
 fn render_map(
     map: &std::collections::BTreeMap<String, String>,
     vars: &Value,
@@ -407,8 +409,8 @@ fn render_map(
     Ok(out)
 }
 
-/// Renders the provider `proxy.headers` with `vars`. A header with a missing
-/// value is left out.
+/// Renders the provider `proxy.headers` with `vars`. It skips a header with
+/// a missing value.
 ///
 /// # Errors
 ///
@@ -420,8 +422,8 @@ pub fn provider_headers(provider: &Provider, vars: &Value) -> Result<Vec<(String
         .map_or_else(|| Ok(Vec::new()), |p| render_map(&p.headers, vars, true))
 }
 
-/// Renders the provider `proxy.query` with `vars`. A parameter with a
-/// missing value is left out. Names keep their case.
+/// Renders the provider `proxy.query` with `vars`. It skips a parameter with
+/// a missing value. Names keep their case.
 ///
 /// # Errors
 ///

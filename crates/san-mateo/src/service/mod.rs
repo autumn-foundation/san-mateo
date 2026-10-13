@@ -213,7 +213,8 @@ pub struct ConnectOptions {
     pub connection_config: Map<String, Value>,
     /// Authorization parameters from the end user.
     pub authorization_params: BTreeMap<String, String>,
-    /// Scopes from the end user, comma separated.
+    /// User scopes from the end user, comma separated. The OAuth start
+    /// ignores them: as in Nango, only the session defaults set user scopes.
     pub user_scopes: Option<String>,
 }
 
@@ -534,9 +535,11 @@ impl SanMateoBuilder {
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] when there is no key ring, no environment, an
-    /// environment id or secret key that repeats or is empty, or a server
-    /// URL that is not valid.
+    /// [`Error::Invalid`] when:
+    ///
+    /// - there is no key ring or no environment,
+    /// - an environment id or a secret key is empty or repeats,
+    /// - the server URL is not valid.
     pub fn build(self) -> Result<SanMateo> {
         let keys = self.keys.ok_or_else(|| invalid("a key ring is required"))?;
         let config = self.config;
@@ -615,7 +618,7 @@ pub(crate) struct Inner {
     pub(crate) owner: String,
 }
 
-/// The San Mateo service. Clone it freely: clones share state.
+/// The San Mateo service. A clone is cheap and shares the state.
 #[derive(Clone)]
 pub struct SanMateo {
     pub(crate) inner: Arc<Inner>,
@@ -792,7 +795,7 @@ impl Default for BackgroundSettings {
     }
 }
 
-/// Running background loops.
+/// A handle to the background loops.
 #[derive(Debug)]
 pub struct Background {
     stop: tokio_util::sync::CancellationToken,

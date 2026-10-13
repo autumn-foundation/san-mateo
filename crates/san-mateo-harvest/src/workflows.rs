@@ -1,6 +1,6 @@
 //! Harvest workflows for San Mateo.
 //!
-//! A harvest schedule is unique for each workflow name. Thus a schedule for
+//! A harvest schedule is unique for each workflow name. So a schedule for
 //! each connection is not possible. [`san_mateo_sync_loop`] is an entity
 //! workflow for one (connection, sync). It runs the sync, waits with a
 //! durable timer, and loops. It calls `continue_as_new` from time to time, so
@@ -282,7 +282,7 @@ pub async fn san_mateo_sync_loop(
 
 /// Runs one refresh sweep: `san_mateo_refresh_due`.
 ///
-/// Give this workflow one harvest schedule, for example each 5 minutes. A
+/// Give this workflow one harvest schedule, for example every 5 minutes. A
 /// `null` input uses the defaults of [`RefreshDueInput`].
 ///
 /// # Errors

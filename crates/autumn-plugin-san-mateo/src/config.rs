@@ -63,11 +63,12 @@ pub struct SanMateoConfig {
     pub encryption_key_id: String,
     /// The env var with the active key: 32 bytes in base64.
     pub encryption_key_env: String,
-    /// Old keys that still open data, as key id to env var name. Use during
-    /// rotation.
+    /// Old keys that still open data, as key id to env var name. Use them
+    /// during rotation. They need `lookup_key_id`.
     pub old_encryption_keys: BTreeMap<String, String>,
-    /// The key id for lookup hashes. Default: `encryption_key_id`. Keep the
-    /// old id here during rotation, so that lookup hashes stay the same.
+    /// The key id for lookup hashes. Default: `encryption_key_id`. Required
+    /// with `old_encryption_keys`: keep the first key id here during
+    /// rotation, so that lookup hashes stay the same.
     pub lookup_key_id: Option<String>,
     /// A Nango-format YAML file. Its providers replace the built-in ones with
     /// the same name. A relative path starts at the manifest directory.
@@ -119,9 +120,11 @@ pub struct WebhookConfig {
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ProxyConfig {
-    /// Extra hosts for `Base-Url-Override`. `*.example.com` allows sub-domains.
+    /// Extra hosts for `Base-Url-Override` and for end-user host values.
+    /// `*.example.com` allows sub-domains.
     pub allowed_hosts: Vec<String>,
-    /// Allow private, loopback and link-local hosts. Only for local tests.
+    /// Allow internal hosts, for example private, loopback and link-local
+    /// addresses. Only for local tests.
     pub allow_private_hosts: bool,
     /// Allow plain `http` upstream. Only for local tests.
     pub allow_plain_http: bool,
@@ -391,7 +394,7 @@ impl SanMateoConfig {
             }
         }
         // With old keys, the lookup key must stay on the first key. A
-        // default would follow the new active key and break live sessions.
+        // default follows the new active key and breaks live sessions.
         if !self.old_encryption_keys.is_empty() && self.lookup_key_id.is_none() {
             return bad(
                 "lookup_key_id is required with old_encryption_keys: use the id of the first key"

@@ -45,7 +45,7 @@ pub enum Error {
     /// The upstream host is not allowed.
     #[error("host not allowed: {0}")]
     ForbiddenHost(String),
-    /// The item exists already.
+    /// The item already exists.
     #[error("conflict: {0}")]
     Conflict(String),
     /// The provider gave an error.

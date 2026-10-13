@@ -56,7 +56,7 @@
 //!
 //! # Workflows
 //!
-//! A harvest schedule is unique for each workflow name. Thus a sync for each
+//! A harvest schedule is unique for each workflow name. So a sync for each
 //! connection is an entity workflow: [`san_mateo_sync_loop`]. Start one loop
 //! for each (connection, sync) with the id from
 //! [`SyncLoopInput::workflow_id`]. [`san_mateo_refresh_sweep`] runs one

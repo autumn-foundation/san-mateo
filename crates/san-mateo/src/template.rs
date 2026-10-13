@@ -397,7 +397,7 @@ mod tests {
             p
         ));
         assert!(!value_sets_host("https://api.example.com/x", &v, p));
-        // A path with no value yet is made.
+        // The probe also works for a path that has no value.
         assert!(value_sets_host(
             "https://${connectionConfig.new}/x",
             &json!({}),

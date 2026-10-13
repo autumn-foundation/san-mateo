@@ -70,9 +70,11 @@ Selected scope: items 1 to 11.
 | Leak tokens in logs or panics. | `Secret` has a redacting `Debug`. Never log bodies or headers with auth. |
 | Forge the OAuth callback (CSRF). | 256-bit random `state`. It is single use. It expires in 15 min. The store keeps only its hash. |
 | Steal the authorization code. | PKCE S256, unless the provider sets `disable_pkce`. |
-| Send credentials to an attacker host with `Base-Url-Override`. | Accept only the provider host or a host in the allow list. HTTPS only (plain HTTP only for loopback, when enabled). |
-| Inject a host through `${connectionConfig.subdomain}`. | Check values against the provider `pattern`. Reject URL delimiters in values. Percent-encode values in URLs. |
-| SSRF to cloud metadata (`169.254.169.254`). | Reject private, loopback and link-local IP literals in upstream URLs, unless enabled for tests. |
+| Send credentials to an attacker host with `Base-Url-Override`. | Accept only the provider host or a host in the allow list. HTTPS only. Plain HTTP only when `allow_plain_http` is on (tests and local development). |
+| Inject a host through `${connectionConfig.subdomain}`. | Check values against the provider `pattern`. Reject URL delimiters in values. Percent-encode values in URLs. An end-user value that sets a host needs an `allowed` list, a `pattern` that fixes the domain, or an allowed host. |
+| SSRF to cloud metadata (`169.254.169.254`). | Reject internal IP literals (private, loopback, link-local and more) and `localhost` in upstream URLs, unless enabled for tests. |
+| Send signed webhooks to an internal host. | A webhook override must use HTTPS and a public host. |
+| Change `redirect_uri`, `state` or `scope` from the browser. | Reject reserved OAuth parameters from the end user. Only session defaults can set them. |
 | Leak the token on an HTTP redirect. | The transport never follows redirects. |
 | Two refreshes at the same time. One rotated refresh token is lost. | Single flight in the process. A store lease across processes. Version check (CAS) on write. |
 | Lose the refresh token when the provider omits it. | Keep the old refresh token. |
@@ -93,9 +95,9 @@ Selected scope: items 1 to 11.
 
 ## 5. Six thinking hats
 
-- **White (facts):** Nango has 1,048 providers in one YAML file. Five auth modes cover 82% of them. OAuth2 token replies are not uniform: `expires_in` can be seconds or milliseconds, the token can be under a nested path, and some providers need Basic client auth or a JSON body. autumn-web 0.8 uses diesel-async 0.9 and deadpool 0.13. autumn-harvest 0.7 uses the same pool type. A harvest schedule is unique for each workflow name. rust-camel 0.57 components implement `Component` and `Endpoint`, and a producer is a `BoxProcessor`.
+- **White (facts):** Nango has 1,048 providers in one YAML file. Five auth modes cover 82% of them. OAuth2 token replies are not uniform. `expires_in` can be seconds or milliseconds. The token can be under a nested path. Some providers need Basic client auth or a JSON body. autumn-web 0.8 uses diesel-async 0.9 and deadpool 0.13. autumn-harvest 0.7 uses the same pool type. A harvest schedule is unique for each workflow name. rust-camel 0.57 components implement `Component` and `Endpoint`. A producer is a `BoxProcessor`.
 - **Red (feelings):** Users want `san.proxy(conn).get("/v3/contacts")` and nothing more. Users fear token leaks most. Users of Nango want their SDK calls to keep working.
-- **Black (risks):** OAuth providers have many quirks. We cannot test all providers without accounts. Mitigation: a data-driven catalog, the `MemoryTransport`, and a parse test over the full Nango YAML. Licence risk: Nango is ELv2. Mitigation: ADR 0001. Compile time is high with autumn, harvest and camel in one workspace. Mitigation: the core has few dependencies. The adapters are separate crates. Cross-process refresh needs a lock. Mitigation: a store lease with an expiry.
+- **Black (risks):** OAuth providers have many quirks. We cannot test all providers without accounts. Mitigation: a catalog that holds the quirks as data, the `MemoryTransport`, and a parse test over the full Nango YAML. Licence risk: Nango is ELv2. Mitigation: ADR 0001. Compile time is high with autumn, harvest and camel in one workspace. Mitigation: the core has few dependencies. The adapters are separate crates. Cross-process refresh needs a lock. Mitigation: a store lease with an expiry.
 - **Yellow (benefits):** One Rust binary, low memory, no Redis. Durable syncs on harvest. Typed Rust syncs and actions. Row-bound encryption and key rotation. Provider data from the Nango format, so users can bring their own YAML.
 - **Green (ideas):** Wire compatibility with the Nango API. A Verus-proven refresh and retry policy. Harvest `ActivityFailure` mapping that follows harvest-camel. A camel component, so all 30 camel connectors can feed San Mateo calls. A minimal hosted connect page, so no React app is needed.
 - **Blue (process):** Write the Verus spec for the policy first. Write failing tests (RED). Implement (GREEN). Refactor with tests green. Do this for each crate. Then review with agents from several angles. Then check each AC with evidence.
@@ -157,9 +159,9 @@ flowchart LR
 - `paginate`: cursor, link and offset pagination.
 - `records`: stable id, keyed content hash, classify, cursor codec.
 - `store`: `Store` trait, stored types, `MemoryStore`, and a shared conformance test suite.
-- `functions`: `Sync` and `Action` traits, contexts, `Registry`, in-process scheduler.
+- `functions`: `SyncFunction` and `ActionFunction` traits, contexts, `Registry`.
 - `webhook`: outbound event types, signer, sender with bounded retry.
-- `service`: `SanMateo` facade and builder. Connect sessions, auth flows, connections, refresh, proxy, records, syncs, actions.
+- `service`: `SanMateo` facade and builder. Connect sessions, auth flows, integrations, connections, refresh, proxy, records, syncs, actions, in-process scheduler.
 - `api`: axum `Router` with the public REST API and the connect page.
 - `error`: `Error` with stable codes. JSON `{"error":{"code","message"}}`.
 
@@ -167,9 +169,11 @@ flowchart LR
 
 1. Backend: `POST /connect/sessions` gives `{token, connect_link, expires_at}`.
 2. Browser: `GET /oauth/connect/{integration}?connect_session_token=...`.
-3. San Mateo stores an OAuth session (state hash, PKCE verifier, connection config). It replies 302 to the provider.
+3. San Mateo stores an OAuth session (state hash, sealed PKCE verifier, connection config). It replies 302 to the provider.
 4. Provider: redirect to `GET /oauth/callback?code&state`.
-5. San Mateo takes the session (single use), posts the token request, parses the reply, seals the credentials, stores the connection, sends the `auth` webhook, and shows a result page.
+5. San Mateo takes the session (single use) and posts the token request.
+6. San Mateo parses the reply, seals the credentials and stores the connection.
+7. San Mateo sends the `auth` webhook and shows a result page.
 
 ### 6.4 Data flow: refresh
 
@@ -192,7 +196,7 @@ flowchart LR
 
 ## 7. Delivery semantics
 
-- Outbound webhooks are at least once, with bounded retries. A product must dedupe.
+- Outbound webhooks are at least once, with bounded retries. A product must remove duplicates.
 - Proxy calls are at most once for non-idempotent methods, unless the caller opts in with `Retry-On`.
 - Harvest activities are at least once. The activity forwards the harvest idempotency key as `Idempotency-Key` when the caller sets `forward_idempotency_key`.
 - In-process syncs are not durable. Use `san-mateo-harvest` for durable syncs.
@@ -200,38 +204,41 @@ flowchart LR
 ## 8. Wire compatibility with Nango
 
 San Mateo uses the same paths and JSON shapes as the Nango public API for:
-`/connect/sessions`, `/connect/session`, `/oauth/connect/:key`,
-`/oauth/callback`, `/oauth2/auth/:key`, `/api-auth/api-key/:key`,
-`/api-auth/basic/:key`, `/auth/unauthenticated/:key`, `/connections`,
-`/connections/:id`, `/connections/:id/metadata`, `/integrations`,
-`/integrations/:key`, `/providers`, `/providers/:name`, `/proxy/*`,
-`/records`, `/sync/trigger`, `/sync/status`, `/action/trigger`.
-Differences are in `README.md`.
+`/connect/sessions`, `/connect/sessions/reconnect`, `/connect/session`,
+`/oauth/connect/:key`, `/oauth/callback`, `/oauth2/auth/:key`,
+`/api-auth/api-key/:key`, `/api-auth/basic/:key`,
+`/auth/unauthenticated/:key`, `/connections`, `/connections/:id`,
+`/connections/metadata`, `/connection`, `/connection/:id`,
+`/integrations`, `/integrations/:key`, `/providers`, `/providers/:name`,
+`/proxy/*`, `/records`, `/sync/trigger`, `/sync/pause`, `/sync/start`,
+`/sync/status`, `/action/trigger`. San Mateo also has `/health` and the
+connect page `/connect`. `api::ROUTES` lists all routes. Differences are in
+`README.md`.
 
 ## 9. Acceptance criteria
 
 - **AC1 Catalog.** San Mateo reads the Nango `providers.yaml` format, with aliases. It ignores unknown fields. A built-in catalog of 25 or more providers, written from public provider docs, covers each supported auth mode. A test parses the full Nango file when one is available. `GET /providers` and `GET /providers/:name` work.
 - **AC2 Templates.** Interpolation supports `${a.b}`, `||` fallback, and `base64(...)`. A missing value gives an error. URL templates percent-encode values. Values with URL delimiters are rejected in host positions.
 - **AC3 Integrations.** Create, read, update, list and delete integrations for each environment. The client secret is sealed at rest and never returned. The provider must exist in the catalog.
-- **AC4 Connect sessions.** `POST /connect/sessions` takes end user, organization, allowed integrations, config defaults, tags and webhook override. The token is `smcs_` plus 64 hex chars. The store keeps only its keyed hash. The TTL is 30 min. `GET` and `DELETE /connect/session` work. An expired or unknown token gives 401.
-- **AC5 OAuth2 authorization code.** `/oauth/connect/:key` gives 302 with `state` (256 bits, single use, 15 min), PKCE S256 (unless disabled), scopes joined with the provider separator, and interpolated authorization params. `/oauth/callback` exchanges the code (form or JSON body, Basic or body client auth), parses the reply (alternate path, `expires_in` or `expires_at`, milliseconds unit, metadata), stores the connection, sends the `auth` webhook, and shows a result page.
-- **AC6 Other auth modes.** `OAUTH2_CC`, `API_KEY`, `BASIC` and `NONE` make connections. When the provider has `proxy.verification`, San Mateo checks the credentials first. A failed check gives an error and no connection.
+- **AC4 Connect sessions.** `POST /connect/sessions` takes end user, organization, allowed integrations, config defaults, tags and webhook override. The webhook override must use HTTPS and a public host. The token is `smcs_` plus 64 hex chars. The store keeps only its keyed hash. The TTL is 30 min. `GET` and `DELETE /connect/session` work. An expired or unknown token gives 401.
+- **AC5 OAuth2 authorization code.** `/oauth/connect/:key` gives 302 with `state` (256 bits, single use, 15 min) and PKCE S256 (unless disabled). It sends interpolated authorization params. It rejects reserved params (`client_id`, `client_secret`, `redirect_uri`, `state`, `scope`, `response_type`, PKCE) from the end user. `scope` holds the integration scopes, or the provider `default_scopes` when the integration has none, joined with the provider separator. Session `user_scopes` go in `connection_config.user_scope`, and for Slack also in `user_scope`. They never replace `scope`. `/oauth/callback` exchanges the code (form or JSON body, Basic or body client auth). It parses the reply (alternate path, `expires_in` or `expires_at`, milliseconds unit, metadata). It stores the connection, sends the `auth` webhook, and shows a result page.
+- **AC6 Other auth modes.** `OAUTH2_CC`, `API_KEY`, `BASIC` and `NONE` make connections. When the provider has `proxy.verification`, San Mateo checks the credentials first. A failed check gives 400 `connection_test_failed` and no connection.
 - **AC7 Encryption.** AES-256-GCM, random 96-bit nonce, AAD bound to the row identity. Key ring with key ids. Rotation keeps old data readable. No plaintext secret goes to the store, logs or `Debug` output.
-- **AC8 Connections API.** List (filter by integration, end user), get with credentials (refresh when needed, `force_refresh`), delete (sends a `deletion` webhook), set and update metadata, and patch tags, end user and webhook override. `POST /connections` imports a connection.
+- **AC8 Connections API.** List connections (filter by integration and end user). Get one with credentials: San Mateo refreshes when needed or with `force_refresh`. The reply hides refresh tokens unless `refresh_token=true`. Delete gives 200 `{"success":true}` and sends a `deletion` webhook. Set and update metadata. Patch tags, end user and webhook override. `POST /connections` imports a connection.
 - **AC9 Refresh.** Expired when `expires_at - now < buffer` (default 15 min, provider `token_expiration_buffer`). Single flight in the process. A store lease across processes. The old refresh token stays when the reply has none. 30 s cooldown after a failure. Exhausted after 4 days with failures. A refresh failure sends an `auth` webhook with `operation: refresh` and `success: false`. A background sweep refreshes tokens that expire soon.
 - **AC10 Proxy.** `ALL /proxy/*` with `Connection-Id`, `Provider-Config-Key`, `Retries`, `Retry-On`, `Base-Url-Override` and `San-Mateo-Proxy-*` / `Nango-Proxy-*` headers. Auth goes in by mode. Provider headers and query are interpolated. Hop-by-hop headers are removed in both directions. The reply body is capped. Redirects are not followed. A 401 on OAuth2 causes one refresh and one more send.
 - **AC11 Retry policy.** 429 retries for all methods. 5xx and network errors retry only for idempotent methods, or when `Retry-On` (or the provider `retry.error_code`) lists the status. The wait comes from `Retry-After` or provider `retry.at` / `retry.after` headers, else capped exponential backoff. A wait above the cap gives up. Attempts are bounded.
-- **AC12 SSRF.** `Base-Url-Override` must use HTTPS and the provider host or an allowed host. Private, loopback and link-local IP literals are rejected unless enabled. Interpolated host values are checked.
+- **AC12 SSRF.** `Base-Url-Override` must use HTTPS and the provider host or an allowed host. San Mateo rejects internal IP literals unless enabled. It checks interpolated host values. An end-user value that sets a host needs an `allowed` list, a `pattern` that fixes the domain, or an allowed host.
 - **AC13 Pagination.** Cursor, link and offset pagination from the provider `proxy.paginate` config, with caller overrides and a page limit.
 - **AC14 Records.** Batch save and delete with stable ids and a keyed content hash. Outcomes: added, updated, unchanged, deleted. `GET /records` with `model`, `cursor`, `modified_after`, `limit` (1 to 10,000), `filter` and `ids`. Each record has `_nango_metadata` with `first_seen_at`, `last_modified_at`, `last_action`, `deleted_at` and `cursor`. Records are sealed at rest.
-- **AC15 Syncs and actions.** Rust `Sync` and `Action` traits with a context (proxy, batch save, batch delete, metadata, last sync time). A registry. `POST /sync/trigger`, `GET /sync/status`, `POST /action/trigger`. An in-process scheduler runs syncs at their frequency (minimum 30 s), one run at a time for each (connection, sync). A sync result sends a `sync` webhook with counts.
-- **AC16 Outbound webhooks.** JSON with sorted keys. `X-San-Mateo-Hmac-Sha256` and `X-Nango-Hmac-Sha256` with the hex HMAC-SHA256 of the body. Primary and secondary URLs. A connection override replaces both. Bounded retries. No retry on 4xx.
+- **AC15 Syncs and actions.** Rust `SyncFunction` and `ActionFunction` traits with a context (proxy, batch save, batch delete, metadata, last sync time). A registry. `POST /sync/trigger`, `GET /sync/status`, `POST /action/trigger`. An in-process scheduler runs syncs at their frequency (minimum 30 s), one run at a time for each (connection, sync). A sync result sends a `sync` webhook with counts.
+- **AC16 Outbound webhooks.** JSON with sorted keys. `X-San-Mateo-Hmac-Sha256` and `X-Nango-Hmac-Sha256` with the hex HMAC-SHA256 of the body. Primary and secondary URLs. A connection override replaces both. Bounded retries. No retry on 3xx or 4xx, except 429.
 - **AC17 API auth and errors.** `Authorization: Bearer <secret>` selects the environment. Keyed hash lookup and constant-time compare. Errors are `{"error":{"code","message"}}` with fixed codes. Secrets come from env var names in config.
 - **AC18 Postgres store.** `PgStore` implements `Store` with diesel-async and embedded migrations. The shared conformance suite passes on `MemoryStore` and `PgStore`. The lease and the version check work across connections.
-- **AC19 Standalone server.** The `san-mateo` binary reads env config. It uses memory or Postgres. It runs the refresh sweep and the scheduler. It stops cleanly on a signal. `/health` works.
+- **AC19 Standalone server.** The `san-mateo` binary reads env config. It uses memory or Postgres. It runs the refresh sweep, the scheduler and the session purge. It stops cleanly on a signal. `/health` works.
 - **AC20 autumn plugin.** `SanMateoPlugin` implements `Plugin`. One call installs it. It declares a contract for autumn-web 0.8 and the `[san_mateo]` config section. It mounts the API at a builder prefix and declares the routes. It adds a health indicator. `SanMateoService::from_state` gives handlers the service.
 - **AC21 harvest integration.** Activities: proxy, refresh, run sync, run action. They read `SanMateo` from harvest state. `proxy_from_activity` maps 5xx, 408, 425 and 429 to retryable `ActivityFailure` and other 4xx to non-retryable. A sync workflow loops with `timer` and `continue_as_new`. Tests use the harvest testing tools.
-- **AC22 camel component.** `san-mateo:<integration>?connectionId=..&method=..&path=..` producer. Exchange body and `SanMateoProxy-*` headers go upstream. The reply sets the body and `CamelHttpResponseCode`. Errors map to camel errors. A test runs a real camel route.
+- **AC22 camel component.** `san-mateo:<integration>?connectionId=..&method=..&path=..` producer. Exchange body and `SanMateoProxy-*` headers go upstream. Headers replace `connectionId`, `method` and `path` only with `allowHeaderOverrides=true` (default `false`). The reply sets the body and `CamelHttpResponseCode`. Errors map to camel errors. A test runs a real camel route.
 - **AC23 Connect page.** `GET /connect?session_token=...` shows the allowed integrations. OAuth integrations link to the OAuth start. API key and basic integrations show a form. The page escapes all text.
 - **AC24 Quality.** `cargo fmt`, clippy pedantic and nursery with `-D warnings`, `unsafe_code = "forbid"`, no `unwrap` or `expect` in `src/`. Unit, property and integration tests pass. Line coverage is 85% or more. CI runs fmt, clippy, tests with Postgres, coverage and Verus.
 - **AC25 Verus.** `verus/policy.rs` states the policy invariants. Proofs pass. `policy::verus_bodies_match` fails when `src/policy.rs` drifts from the spec.
@@ -248,9 +255,9 @@ Differences are in `README.md`.
 
 ## 11. Review
 
-Several agents review the code from different angles: security, OAuth and
-provider protocol, concurrency and refresh, ecosystem integration, tests and
-spec, and docs and STE. `docs/ac-evidence.md` lists the findings and the fixes.
+Several agents review the code. Each agent has one topic: security, OAuth
+and provider protocol, concurrency and refresh, ecosystem integration, tests
+and spec, or docs and STE. `docs/ac-evidence.md` lists the findings and the fixes.
 
 ## 12. Out of scope
 

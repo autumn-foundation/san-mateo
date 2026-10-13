@@ -33,5 +33,5 @@ Option 3.
 
 - Good: no ELv2 code or data in the repository.
 - Good: `Catalog::from_yaml_file` reads a Nango-format file that a user has.
-- Bad: the built-in catalog is small (about 30 providers). Users add more in
+- Bad: the built-in catalog is small (about 35 providers). Users add more in
   their own YAML file.

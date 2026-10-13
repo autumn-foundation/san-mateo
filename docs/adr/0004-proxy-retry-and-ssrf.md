@@ -14,7 +14,8 @@ did the call. A `POST` can then occur two times. Nango also accepts any
 
 - 429: retry for all methods. A 429 means the provider did not do the call.
 - 5xx and network errors: retry only for `GET`, `HEAD`, `OPTIONS`, `PUT` and
-  `DELETE`. A caller can opt in for other methods with `Retry-On`.
+  `DELETE`. A caller can opt in for other methods with `Retry-On`. The
+  provider can opt in with `retry.error_code`.
 - 401 on an OAuth2 connection: refresh one time and send one more time.
 - The wait comes from `Retry-After`, or from the provider `retry.at` and
   `retry.after` headers. Else it is exponential backoff with a cap. A wait above
@@ -23,7 +24,7 @@ did the call. A `POST` can then occur two times. Nango also accepts any
 - `policy::decide` holds these rules. Verus proves them.
 - `Base-Url-Override` must use HTTPS. Its host must be the provider host or a
   host in `proxy.allowed_hosts`.
-- Upstream URLs with internal IP literals are rejected, unless
+- The proxy rejects upstream URLs with internal IP literals, unless
   `proxy.allow_private_hosts` is on (tests and local development). Internal
   means private, loopback, link-local, shared, benchmark, multicast or
   reserved. An IPv4 address inside an IPv6 address (mapped, compatible,
@@ -45,7 +46,7 @@ did the call. A `POST` can then occur two times. Nango also accepts any
 - Good: no double writes from retries.
 - Good: credentials go only to known hosts.
 - Bad: a caller that wants Nango's retry of `POST` on 5xx must send `Retry-On`.
-- Bad: DNS names that resolve to private IPs are not blocked. Operators must
-  use a network policy for that.
+- Bad: the check does not block DNS names that resolve to private IPs.
+  Operators must use a network policy for that.
 - Bad: the host check takes the last two labels as the site. A template such
   as `https://${x}.co.uk` passes. Write catalog URLs with a full domain.

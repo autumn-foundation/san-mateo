@@ -130,9 +130,9 @@ impl Credentials {
         }
     }
 
-    /// Returns the template variables: `apiKey`, `accessToken`, `clientId`
-    /// and `credentials.*`. For `OAuth2`, [`add_client_vars`] adds the
-    /// integration client.
+    /// Returns the template variables of the mode: `apiKey`, `accessToken`,
+    /// `clientId`, `clientSecret` and `credentials.*`. For `OAuth2`,
+    /// [`add_client_vars`] adds the integration client.
     #[must_use]
     pub fn template_vars(&self) -> Value {
         match self {
@@ -159,7 +159,8 @@ impl Credentials {
 }
 
 /// Adds the integration client to template `vars`: `clientId` and
-/// `clientSecret`. A key that `vars` has stays. An empty value is left out.
+/// `clientSecret`. It does not replace a key that `vars` has. It skips an
+/// empty value.
 pub fn add_client_vars(vars: &mut Value, client_id: Option<&str>, client_secret: Option<&str>) {
     let Value::Object(map) = vars else {
         return;

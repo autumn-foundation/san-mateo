@@ -1,11 +1,11 @@
 //! HTTP transport. Only this module does network I/O.
-
-// The fake holds its lock for each whole call, so each call is atomic.
-#![allow(clippy::significant_drop_tightening)]
 //!
 //! - [`ReqwestTransport`]: real HTTPS. It never follows redirects.
 //! - [`MemoryTransport`]: a fake for tests. It records requests and replies
 //!   with set responses.
+
+// The fake holds its lock for each whole call, so each call is atomic.
+#![allow(clippy::significant_drop_tightening)]
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -293,8 +293,8 @@ impl HttpTransport for ReqwestTransport {
     }
 }
 
-/// The replies of one route. `used` is `true` when the last reply has been
-/// given at least one time.
+/// The replies of one route. `used` is `true` after the fake gives the last
+/// reply one time or more.
 #[derive(Debug, Default)]
 struct Script {
     items: VecDeque<Result<HttpResponse, TransportError>>,
@@ -305,7 +305,7 @@ struct Script {
 ///
 /// Set replies with [`MemoryTransport::reply`]. A route is a method and a URL
 /// with no query. Replies for a route come in order. The last reply repeats
-/// until a new reply is added. A request with no route gets a 404 reply.
+/// until a test adds a new reply. A request with no route gets a 404 reply.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryTransport {
     routes: Arc<Mutex<HashMap<(String, String), Script>>>,
@@ -319,7 +319,8 @@ impl MemoryTransport {
         Self::default()
     }
 
-    /// Adds a reply for `method` and `url`. The query of `url` is ignored.
+    /// Adds a reply for `method` and `url`. The fake ignores the query of
+    /// `url`.
     pub fn reply(&self, method: &str, url: &str, response: HttpResponse) {
         self.push(method, url, Ok(response));
     }

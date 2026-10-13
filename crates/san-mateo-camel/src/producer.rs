@@ -47,7 +47,7 @@ impl Producer {
         {
             request = request.header("content-type", content_type);
         }
-        // `into_bytes` enforces the limit, also for a stream body.
+        // `into_bytes` applies the limit, also for a stream body.
         request.body = body.into_bytes(options.max_body_size).await?.to_vec();
         request.retries = options.retries;
         request.retry_on.clone_from(&options.retry_on);
@@ -185,7 +185,7 @@ pub(crate) fn forwarded_headers(
                 return Err(bad_header(key, "must be a string, a number or a boolean"));
             }
         };
-        // A control character could split the header. The message names
+        // A control character can split the header. The message names
         // the header but never shows the value.
         if text.chars().any(|c| c.is_control() && c != '\t') {
             return Err(bad_header(key, "must not have control characters"));

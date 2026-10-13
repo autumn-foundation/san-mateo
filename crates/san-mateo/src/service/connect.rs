@@ -129,7 +129,7 @@ impl Target {
 }
 
 impl SanMateo {
-    /// Checks a webhook URL from a caller.
+    /// Checks a webhook URL from a caller: HTTPS and a public host.
     pub(crate) fn check_webhook_url(&self, url: &str) -> Result<()> {
         let parsed = url::Url::parse(url).map_err(|_| invalid("the webhook URL is not valid"))?;
         match parsed.scheme() {
@@ -427,7 +427,9 @@ impl SanMateo {
     ///
     /// [`Error::InvalidConnectSession`], [`Error::IntegrationNotAllowed`],
     /// [`Error::UnknownIntegration`], [`Error::UnsupportedAuthMode`],
-    /// [`Error::MissingField`], [`Error::Template`].
+    /// [`Error::MissingField`], [`Error::Template`]. [`Error::Invalid`] for a
+    /// reserved authorization parameter, or for an end-user host value that
+    /// fails the host check.
     pub async fn oauth_start(
         &self,
         token: &str,
@@ -860,7 +862,8 @@ impl SanMateo {
         Ok(conn)
     }
 
-    /// Checks API key or Basic credentials with the provider `verification`.
+    /// Checks new credentials with the provider `proxy.verification`. One
+    /// endpoint with a 2xx reply is enough.
     async fn verify_credentials(
         &self,
         provider: &Provider,
@@ -958,7 +961,8 @@ impl SanMateo {
     ///
     /// # Errors
     ///
-    /// Session errors, and [`Error::Provider`] with `connection_test_failed`.
+    /// Session errors. [`Error::Provider`] with `connection_test_failed`
+    /// (HTTP 400) when the provider check rejects the key.
     pub async fn connect_api_key(
         &self,
         token: &str,
@@ -979,7 +983,8 @@ impl SanMateo {
     ///
     /// # Errors
     ///
-    /// Session errors, and [`Error::Provider`] with `connection_test_failed`.
+    /// Session errors. [`Error::Provider`] with `connection_test_failed`
+    /// (HTTP 400) when the provider check rejects the credentials.
     pub async fn connect_basic(
         &self,
         token: &str,
@@ -1001,7 +1006,8 @@ impl SanMateo {
     ///
     /// # Errors
     ///
-    /// Session errors.
+    /// Session errors. [`Error::Provider`] with `connection_test_failed`
+    /// when the provider has a check and the check fails.
     pub async fn connect_unauthenticated(
         &self,
         token: &str,
@@ -1103,8 +1109,10 @@ impl SanMateo {
     ///
     /// # Errors
     ///
-    /// [`Error::UnknownIntegration`], [`Error::Invalid`] when the credentials
-    /// do not match the auth mode.
+    /// [`Error::UnknownIntegration`]. [`Error::Invalid`] when the credentials
+    /// do not match the auth mode, the connection id is not valid, or the
+    /// webhook URL is not HTTPS. [`Error::ForbiddenHost`] for an internal
+    /// webhook host.
     pub async fn import_connection(
         &self,
         env: &str,

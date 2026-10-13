@@ -22,7 +22,7 @@ use crate::routes;
 use crate::runtime::{Cell, Runtime};
 use crate::service::SanMateoService;
 
-/// Plugin name for duplicate detection.
+/// The plugin name. autumn uses it to find a plugin that is added two times.
 pub const PLUGIN_NAME: &str = "autumn-plugin-san-mateo";
 /// Default route prefix.
 pub const DEFAULT_PREFIX: &str = "/san-mateo";
@@ -186,8 +186,8 @@ impl SanMateoPlugin {
         self
     }
 
-    /// The route prefix after normalization, for example `/san-mateo`. The
-    /// root is `""`.
+    /// The normalized route prefix, for example `/san-mateo`. The root is
+    /// `""`.
     #[must_use]
     pub fn route_prefix(&self) -> &str {
         &self.prefix
@@ -355,8 +355,8 @@ fn mutating_routes(cfg: &AutumnConfig, prefix: &str) -> Vec<(&'static str, Strin
         .collect()
 }
 
-/// The exempt list to add. At the root, name each top path: `"/"` would
-/// exempt the whole app.
+/// The exempt list to add. At the root, name each top path: `"/"`
+/// exempts the whole app.
 fn exemption_fix(prefix: &str) -> String {
     if !prefix.is_empty() {
         return format!("[\"{prefix}\"]");
@@ -369,7 +369,7 @@ fn exemption_fix(prefix: &str) -> String {
     format!("[{}]", tops.into_iter().collect::<Vec<_>>().join(", "))
 }
 
-/// Fails when CSRF or CAPTCHA would block a San Mateo route. A plugin cannot
+/// Fails when CSRF or CAPTCHA blocks a San Mateo route. A plugin cannot
 /// add an exemption, so the error gives the config fix.
 fn check_security(cfg: &AutumnConfig, prefix: &str) -> Result<(), PluginError> {
     let webhook_paths = cfg

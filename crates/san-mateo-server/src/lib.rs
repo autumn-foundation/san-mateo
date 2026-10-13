@@ -5,6 +5,7 @@
 //! | Variable | Meaning |
 //! |---|---|
 //! | `SAN_MATEO_SERVER_URL` | Public URL of the API. Default `http://localhost:3003`. |
+//! | `SAN_MATEO_CONNECT_URL` | Base of `connect_link`. Default `<server URL>/connect`. |
 //! | `SAN_MATEO_BIND` | Listen address. Default `0.0.0.0:3003`. |
 //! | `SAN_MATEO_DATABASE_URL` | Postgres URL. With no URL, data stays in memory. |
 //! | `SAN_MATEO_ENCRYPTION_KEY` | Base64 32-byte key. Required. |
@@ -17,10 +18,11 @@
 //! | `SAN_MATEO_<ENV>_WEBHOOK_URL`, `..._WEBHOOK_URL_SECONDARY` | Webhook URLs. |
 //! | `SAN_MATEO_<ENV>_WEBHOOK_SECRET` | Webhook signing secret. |
 //! | `SAN_MATEO_PROVIDERS_FILE` | A Nango-format YAML file. It adds to the built-in catalog. |
-//! | `SAN_MATEO_ALLOWED_HOSTS` | Extra hosts for `Base-Url-Override`, comma separated. |
-//! | `SAN_MATEO_ALLOW_PRIVATE_HOSTS`, `SAN_MATEO_ALLOW_PLAIN_HTTP` | Development only. |
-//! | `SAN_MATEO_BACKGROUND` | Run the refresh sweep and the scheduler. Default `true`. |
+//! | `SAN_MATEO_ALLOWED_HOSTS` | Extra hosts for `Base-Url-Override` and end-user host values, comma separated. |
+//! | `SAN_MATEO_ALLOW_PRIVATE_HOSTS`, `SAN_MATEO_ALLOW_PLAIN_HTTP` | Development only. Default `false`. |
+//! | `SAN_MATEO_BACKGROUND` | Run the refresh sweep, the sync scheduler and the session purge. Default `true`. |
 //! | `SAN_MATEO_TICK_SECS` | Seconds between background ticks. Default `30`. |
+//! | `RUST_LOG` | Log level. Default `info`. |
 //!
 //! `<ENV>` is the environment id in upper case, with `-` as `_`.
 
@@ -208,7 +210,7 @@ impl ServerConfig {
             ));
         }
         // With old keys, the lookup key must stay on the first key. A
-        // default would follow the new active key and break live sessions.
+        // default follows the new active key and breaks live sessions.
         match &self.lookup_key_id {
             None if !self.old_keys.is_empty() => Err(bad(
                 "SAN_MATEO_LOOKUP_KEY_ID",

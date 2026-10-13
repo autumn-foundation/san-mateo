@@ -14,8 +14,8 @@ Style for all docs and comments: ASD-STE100.
 | `crates/san-mateo/src/transport.rs` | `HttpTransport`, `ReqwestTransport`, `MemoryTransport` (fake). |
 | `crates/san-mateo/src/proxy.rs` | Upstream URL, auth headers, header rules, SSRF checks. |
 | `crates/san-mateo/src/store/` | `Store` trait, `MemoryStore`, `conformance` suite. |
-| `crates/san-mateo/src/service/` | `SanMateo` facade: connect, connections and refresh, proxy, records, functions. |
-| `crates/san-mateo/src/api/` | axum router, connect page. |
+| `crates/san-mateo/src/service/` | `SanMateo` facade: connect, integrations, connections and refresh, proxy, records, functions. |
+| `crates/san-mateo/src/api/` | axum router, connect page, OAuth result page. |
 | `crates/san-mateo-postgres` | `PgStore` (diesel-async) and SQL migrations. |
 | `crates/san-mateo-server` | The `san-mateo` binary. Env config. |
 | `crates/autumn-plugin-san-mateo` | autumn-web 0.8 plugin. |

@@ -81,6 +81,14 @@ sequenceDiagram
   S->>B: auth webhook (signed)
 ```
 
+Scopes work as in Nango:
+
+- The `scope` parameter holds the integration scopes. When the integration
+  has no scopes, it holds the provider `default_scopes`.
+- The session `user_scopes` go in `connection_config.user_scope`. For
+  Slack, they also go in the `user_scope` parameter. They never replace
+  `scope`.
+
 More design detail: [docs/plan.md](docs/plan.md) and the ADRs in
 [docs/adr](docs/adr).
 
@@ -132,16 +140,16 @@ The server reads these variables:
 | `SAN_MATEO_ENCRYPTION_KEY` | Base64 32-byte key. Required. |
 | `SAN_MATEO_ENCRYPTION_KEY_ID` | Id of that key. Default `k1`. |
 | `SAN_MATEO_OLD_ENCRYPTION_KEYS` | Old keys for rotation: `id:base64,id:base64`. |
-| `SAN_MATEO_LOOKUP_KEY_ID` | Key id for lookup hashes. Default: the active key. |
+| `SAN_MATEO_LOOKUP_KEY_ID` | Key id for lookup hashes. Default: the active key. Required with old keys. |
 | `SAN_MATEO_ENVIRONMENTS` | Environment ids, comma separated. Default `dev`. |
 | `SAN_MATEO_<ENV>_SECRET_KEY` | Secret key of each environment. Required. |
 | `SAN_MATEO_<ENV>_CALLBACK_URL` | OAuth callback URL of the environment. |
 | `SAN_MATEO_<ENV>_WEBHOOK_URL`, `..._WEBHOOK_URL_SECONDARY` | Webhook URLs. |
 | `SAN_MATEO_<ENV>_WEBHOOK_SECRET` | Webhook signing secret. |
 | `SAN_MATEO_PROVIDERS_FILE` | A Nango-format YAML file. It adds to the built-in catalog. |
-| `SAN_MATEO_ALLOWED_HOSTS` | Extra hosts for `Base-Url-Override`, comma separated. |
+| `SAN_MATEO_ALLOWED_HOSTS` | Extra hosts for `Base-Url-Override` and end-user host values, comma separated. |
 | `SAN_MATEO_ALLOW_PRIVATE_HOSTS`, `SAN_MATEO_ALLOW_PLAIN_HTTP` | Development only. Default `false`. |
-| `SAN_MATEO_BACKGROUND` | Run the refresh sweep and the sync scheduler. Default `true`. |
+| `SAN_MATEO_BACKGROUND` | Run the refresh sweep, the sync scheduler and the session purge. Default `true`. |
 | `SAN_MATEO_TICK_SECS` | Seconds between background ticks. Default `30`. |
 | `RUST_LOG` | Log level. Default `info`. |
 
@@ -199,12 +207,14 @@ san-mateo:hubspot?connectionId=acme&path=/crm/v3/objects/contacts&retries=2
 - The exchange body goes upstream. `SanMateoProxy-<Name>` headers go
   upstream as `<Name>`.
 - The reply sets the body, `CamelHttpResponseCode` and
-  `SanMateoResponse-<name>` headers. Secret reply headers are not copied.
+  `SanMateoResponse-<name>` headers. The component does not copy secret
+  reply headers.
 - Errors map to camel errors. harvest-camel retries the same errors that
   San Mateo marks as retryable.
 - The `SanMateoConnectionId`, `SanMateoMethod` and `SanMateoPath` headers
-  replace the URI options only with `allowHeaderOverrides=true`. Do not set
-  it on a route where an outside caller can set headers.
+  replace the URI options only with `allowHeaderOverrides=true`. The
+  default is `false`. Do not set it on a route where an outside caller can
+  set headers.
 
 ## Differences from Nango
 
@@ -225,34 +235,39 @@ items are different:
 - **Webhooks.** San Mateo sends `X-San-Mateo-Hmac-Sha256` and
   `X-Nango-Hmac-Sha256`. Both hold the hex HMAC-SHA256 of the body. San
   Mateo does not send the old `X-Nango-Signature` header.
-- **Records** have the Nango `_nango_metadata` key. Record data is sealed at
-  rest.
+- **Records** have the Nango `_nango_metadata` key. San Mateo seals record
+  data at rest.
 - **Not included:** OAuth 1.0a and the other auth modes above, provider
   webhook routing scripts, TypeScript deploy, billing and KMS-wrapped keys.
 
 ## Security
 
-- **At rest.** Credentials, client secrets, OAuth sessions and records are
-  sealed with AES-256-GCM. The AAD binds each value to its row, so a value
-  copied to a different row does not open. See
+- **At rest.** San Mateo seals credentials, client secrets, PKCE verifiers
+  and records with AES-256-GCM. The AAD binds each value to its row, so a
+  value copied to a different row does not open. See
   [ADR 0003](docs/adr/0003-row-bound-encryption.md).
 - **Keys.** Keep `SAN_MATEO_ENCRYPTION_KEY` in a secret store. To rotate,
   set a new key and move the old one to `SAN_MATEO_OLD_ENCRYPTION_KEYS`.
   Set `SAN_MATEO_LOOKUP_KEY_ID` to the first key id: the lookup hashes of
-  secret keys, tokens and records use it. The server does not start with
-  old keys and no lookup key id.
-- **Lookups.** Secret keys, connect session tokens and OAuth state are
-  stored only as HMAC-SHA256 hashes. San Mateo compares them in constant
-  time.
+  secret keys, tokens and records use it. The server and the autumn plugin
+  do not start with old keys and no lookup key id.
+- **Lookups.** San Mateo finds secret keys, connect session tokens and
+  OAuth state by their HMAC-SHA256 hash. The store keeps only the hashes of
+  tokens and state. San Mateo compares secret keys in constant time.
 - **Proxy.** The proxy does not follow redirects. `Base-Url-Override` must
   use HTTPS and the provider host or a host in `SAN_MATEO_ALLOWED_HOSTS`.
-  The proxy rejects private, loopback, link-local, multicast and reserved
-  IP literals, also inside IPv6 forms (mapped, NAT64, 6to4). See
+  The proxy rejects internal IP literals (private, loopback, link-local,
+  shared, multicast, reserved), also inside IPv6 forms (mapped, NAT64,
+  6to4). It also rejects `localhost` names. See
   [ADR 0004](docs/adr/0004-proxy-retry-and-ssrf.md).
-- **End-user hosts.** An end-user value that sets the host of a provider
-  URL needs an `allowed` list or a `pattern` that fixes the domain in the
-  catalog, or a host in `SAN_MATEO_ALLOWED_HOSTS`. Values in the session
-  defaults come from you and need no check.
+- **End-user hosts.** An end-user value can set the host of a provider
+  URL. Such a value needs one of these: an `allowed` list in the catalog, a
+  catalog `pattern` that fixes the domain, or a host in
+  `SAN_MATEO_ALLOWED_HOSTS`. Values in the session defaults come from you
+  and need no check.
+- **OAuth parameters.** An end user cannot set `client_id`,
+  `client_secret`, `redirect_uri`, `state`, `scope`, `response_type` or the
+  PKCE parameters. Session defaults can set them.
 - **Webhook overrides** must use HTTPS and a public host.
 - **DNS.** The SSRF check reads IP literals. It does not resolve host names.
   Put a network policy in front of San Mateo if a provider host can resolve
@@ -262,7 +277,7 @@ items are different:
 - **Postgres TLS.** `PgStore::connect` makes a pool with no TLS. For TLS,
   make a pool with a TLS setup and use `PgStore::new`.
 - **Crypto backends.** The core uses `ring` through rustls. The autumn
-  plugin and the camel crate also pull in `aws-lc-rs` through `jsonwebtoken`.
+  plugin and the camel crate also use `aws-lc-rs` through `jsonwebtoken`.
 
 ## Development
 

@@ -136,8 +136,8 @@ pub fn code_exchange_params(
 
 /// Returns the parameters of a refresh request.
 ///
-/// `refresh_params` are used when the provider has them. Else the
-/// `token_params` are used with no `grant_type`. The `grant_type` is
+/// The request uses the provider `refresh_params` when it has them. Else it
+/// uses the `token_params` with no `grant_type`. The `grant_type` is
 /// `refresh_token` unless `refresh_params` sets it.
 #[must_use]
 pub fn refresh_params(
@@ -382,8 +382,8 @@ pub fn parse_token_reply(
     })
 }
 
-/// Copies the values at `paths` from the token reply. Only strings, numbers
-/// and bools are copied. The key is the full dotted path.
+/// Copies the values at `paths` from the token reply. It copies only
+/// strings, numbers and bools. The key is the full dotted path.
 #[must_use]
 pub fn extract_metadata(raw: &Value, paths: &[String]) -> serde_json::Map<String, Value> {
     paths

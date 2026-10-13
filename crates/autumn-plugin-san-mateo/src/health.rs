@@ -16,7 +16,8 @@ pub const INDICATOR_NAME: &str = "san_mateo";
 /// Shows the state of the San Mateo service.
 ///
 /// - `Up`: the service started.
-/// - `Down`: the service did not start, start failed, or shutdown started.
+/// - `Down`: the start is not complete, the start failed, or the shutdown
+///   started.
 ///
 /// The details hold counts and a short reason only. They never hold secrets.
 pub struct SanMateoHealth {

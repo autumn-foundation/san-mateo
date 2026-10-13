@@ -2,8 +2,9 @@
 //!
 //! Paths and JSON shapes follow the Nango public API. See `docs/plan.md`
 //! section 8. `Authorization: Bearer <secret key>` selects the environment.
-//! Connect routes take a connect session token in `connect_session_token`
-//! (query) or in `Authorization: Bearer smcs_...`.
+//! Connect routes take a connect session token in the query
+//! (`connect_session_token` or `session_token`) or in
+//! `Authorization: Bearer smcs_...`.
 
 use std::collections::BTreeMap;
 
@@ -860,7 +861,7 @@ async fn get_connection(
     };
     let c = san.get_connection(&env, &key, options).await?;
     let mut body = connection_json(&c);
-    // As in Nango, refresh tokens show only with `refresh_token=true`.
+    // As in Nango, the reply hides refresh tokens unless `refresh_token=true`.
     if !query_flag(&pairs, "refresh_token") {
         for field in ["credentials", "connection_config"] {
             if let Some(v) = body.get_mut(field) {

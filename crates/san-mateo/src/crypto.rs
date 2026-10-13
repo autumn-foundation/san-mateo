@@ -55,7 +55,7 @@ impl KeyRing {
     ///
     /// # Errors
     ///
-    /// The id must be 1 to 32 chars of `[A-Za-z0-9_-]`.
+    /// [`Error::Invalid`] when the id is not 1 to 32 chars of `[A-Za-z0-9_-]`.
     pub fn new(id: &str, key: [u8; 32]) -> Result<Self> {
         check_id(id)?;
         let mut keys = BTreeMap::new();
@@ -71,7 +71,8 @@ impl KeyRing {
     ///
     /// # Errors
     ///
-    /// The value must decode to exactly 32 bytes. The id must be valid.
+    /// [`Error::Invalid`] when the value does not decode to exactly 32 bytes,
+    /// or when the id is not valid.
     pub fn from_base64(id: &str, key_b64: &str) -> Result<Self> {
         Self::new(id, decode_key(key_b64)?)
     }
@@ -80,7 +81,7 @@ impl KeyRing {
     ///
     /// # Errors
     ///
-    /// The id must be valid and new.
+    /// [`Error::Invalid`] when the id is not valid or is in the ring already.
     pub fn with_key(mut self, id: &str, key: [u8; 32]) -> Result<Self> {
         check_id(id)?;
         if self.keys.contains_key(id) {
@@ -94,7 +95,8 @@ impl KeyRing {
     ///
     /// # Errors
     ///
-    /// The value must decode to exactly 32 bytes. The id must be valid and new.
+    /// [`Error::Invalid`] when the value does not decode to exactly 32 bytes,
+    /// or when the id is not valid or is in the ring already.
     pub fn with_base64_key(self, id: &str, key_b64: &str) -> Result<Self> {
         let key = decode_key(key_b64)?;
         self.with_key(id, key)
@@ -104,7 +106,7 @@ impl KeyRing {
     ///
     /// # Errors
     ///
-    /// The ring must hold the key.
+    /// [`Error::Invalid`] when the ring does not hold the key.
     pub fn activate(mut self, id: &str) -> Result<Self> {
         if !self.keys.contains_key(id) {
             return Err(invalid("the key id is not in the ring"));
@@ -117,7 +119,7 @@ impl KeyRing {
     ///
     /// # Errors
     ///
-    /// The ring must hold the key.
+    /// [`Error::Invalid`] when the ring does not hold the key.
     pub fn lookup_with(mut self, id: &str) -> Result<Self> {
         if !self.keys.contains_key(id) {
             return Err(invalid("the key id is not in the ring"));

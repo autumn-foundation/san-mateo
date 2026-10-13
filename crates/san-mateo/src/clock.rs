@@ -33,8 +33,8 @@ pub fn from_ms(ms: u64) -> DateTime<Utc> {
         .unwrap_or(DateTime::<Utc>::MAX_UTC)
 }
 
-/// Ms values at or above this are epoch ms. Smaller values are epoch seconds.
-/// It is 1972-01-01 in ms.
+/// Values at or above this are epoch ms. Smaller values are epoch seconds.
+/// The value is 1972-01-01 in ms.
 pub const EPOCH_MS_THRESHOLD: f64 = 63_072_000_000.0;
 
 /// Parses an instant from JSON: a number (epoch seconds or epoch ms), or a

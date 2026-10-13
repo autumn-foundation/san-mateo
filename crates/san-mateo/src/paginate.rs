@@ -103,8 +103,8 @@ impl PaginationConfig {
 pub struct PageQuery {
     /// Query parameters to set.
     pub params: Vec<(String, String)>,
-    /// A link to fetch in place of the original endpoint (link pagination).
-    /// It can be absolute or a path.
+    /// A link to get in place of the call endpoint (link pagination). It
+    /// can be absolute or a path.
     pub link: Option<String>,
 }
 

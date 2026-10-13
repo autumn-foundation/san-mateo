@@ -27,7 +27,8 @@ Option 2.
   `alternate_access_token_response_path`, `expires_in_unit`) maps directly to
   request and parse options.
 - `MemoryTransport` tests every flow with no network.
-- PKCE S256 and `state` are short and easy to test against RFC 7636 vectors.
+- PKCE S256 and `state` need little code. Tests check PKCE against the
+  RFC 7636 vector.
 
 ## Results
 

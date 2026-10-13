@@ -60,10 +60,13 @@ impl ConnectionKey {
 /// Defaults that a connect session sets for one integration.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntegrationDefaults {
-    /// Scopes to ask for, comma separated. They replace the integration scopes.
+    /// User scopes, comma separated. They go in `connection_config.user_scope`.
+    /// For Slack, they also go in the `user_scope` parameter. They never
+    /// replace the `scope` parameter.
     #[serde(default)]
     pub user_scopes: Option<String>,
-    /// Authorization parameters. They replace the provider parameters.
+    /// Authorization parameters. They replace the provider and end-user
+    /// parameters with the same name.
     #[serde(default)]
     pub authorization_params: BTreeMap<String, String>,
     /// Connection config values. They replace the end-user values.

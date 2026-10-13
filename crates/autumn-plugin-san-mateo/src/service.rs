@@ -57,7 +57,7 @@ impl SanMateoService {
         &self.san
     }
 
-    /// Returns the core service.
+    /// Returns the core service and drops the wrapper.
     #[must_use]
     pub fn into_inner(self) -> SanMateo {
         self.san

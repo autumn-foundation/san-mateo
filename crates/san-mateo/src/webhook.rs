@@ -2,7 +2,7 @@
 //!
 //! The body is JSON with sorted keys. The headers `X-San-Mateo-Hmac-Sha256`
 //! and `X-Nango-Hmac-Sha256` hold the hex HMAC-SHA256 of the body bytes.
-//! Delivery is at least once. A 3xx or 4xx reply is not retried.
+//! Delivery is at least once. A 3xx or 4xx reply gets no retry, except 429.
 
 use std::sync::Arc;
 

@@ -4,8 +4,8 @@
 //! Mateo refreshes `OAuth2` tokens before each call when they expire soon. It
 //! also refreshes one time after a 401 reply.
 //!
-//! The component is producer-only. Register it with a [`SanMateo`] service
-//! and send exchanges to a `san-mateo:<integration>` endpoint:
+//! The component is producer-only. Register it with a [`SanMateo`] service.
+//! Then send exchanges to a `san-mateo:<integration>` endpoint:
 //!
 //! ```no_run
 //! # async fn demo(san: san_mateo::SanMateo) -> Result<(), camel_api::CamelError> {
@@ -86,7 +86,7 @@
 //! [`CamelError::HttpOperationFailed`]: camel_api::CamelError::HttpOperationFailed
 
 // The camel traits take and return `CamelError` by value. It is large, but a
-// box would not match the trait signatures.
+// box does not match the trait signatures.
 #![allow(clippy::result_large_err)]
 
 mod component;
@@ -104,13 +104,16 @@ pub const SCHEME: &str = "san-mateo";
 /// The default largest request body: 2 MiB, the harvest input limit.
 pub const DEFAULT_MAX_BODY_SIZE: usize = 2 * 1024 * 1024;
 
-/// In header: the connection id. It replaces the `connectionId` option.
+/// In header: the connection id. It replaces the `connectionId` option only
+/// with `allowHeaderOverrides=true`.
 pub const HEADER_CONNECTION_ID: &str = "SanMateoConnectionId";
 
-/// In header: the upstream path and query. It replaces the `path` option.
+/// In header: the upstream path and query. It replaces the `path` option
+/// only with `allowHeaderOverrides=true`.
 pub const HEADER_PATH: &str = "SanMateoPath";
 
-/// In header: the HTTP method. It replaces the `method` option.
+/// In header: the HTTP method. It replaces the `method` option only with
+/// `allowHeaderOverrides=true`.
 pub const HEADER_METHOD: &str = "SanMateoMethod";
 
 /// In header prefix: `SanMateoProxy-<Name>` goes upstream as `<Name>`.

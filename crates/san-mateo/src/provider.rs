@@ -323,7 +323,7 @@ pub struct Provider {
     /// The scope separator. Default one space.
     #[serde(default)]
     pub scope_separator: Option<String>,
-    /// Scopes to always ask for.
+    /// Scopes to ask for when the integration has no scopes.
     #[serde(default, deserialize_with = "de_string_vec")]
     pub default_scopes: Vec<String>,
     /// `true` to turn off PKCE.
@@ -363,7 +363,7 @@ pub struct Provider {
     /// Credential fields.
     #[serde(default, deserialize_with = "de_schema_map")]
     pub credentials: BTreeMap<String, FieldSchema>,
-    /// Legacy list of connection config field names.
+    /// The old Nango list of connection config field names.
     #[serde(default, deserialize_with = "de_string_vec")]
     pub connection_configuration: Vec<String>,
 }

@@ -1,7 +1,7 @@
 //! HTML pages: the hosted connect page and the OAuth result page.
 //!
 //! Each page escapes all text. A Content-Security-Policy with a nonce allows
-//! only the inline script of the page.
+//! only the inline script and style of the page.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
