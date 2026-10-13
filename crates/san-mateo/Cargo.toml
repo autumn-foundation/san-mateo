@@ -44,6 +44,7 @@ test-support = []
 proptest.workspace = true
 tower.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 
 [lints]
 workspace = true
