@@ -510,9 +510,124 @@ mod tests {
     #[test]
     fn syntax_errors() {
         let v = vars();
-        for t in ["${apiKey", "${", "${}", "${a b}", "${base64(x}"] {
-            assert!(matches!(render(t, &v), Err(Error::Template(_))), "{t}");
+        for (t, msg) in [
+            ("${apiKey", "a `${` has no `}`"),
+            ("${", "a `${` has no `}`"),
+            ("x ${a} ${b", "a `${` has no `}`"),
+            ("${}", "an empty `${}`"),
+            ("${  }", "an empty `${}`"),
+            ("${a b}", "a placeholder is not a dotted path"),
+            ("${base64(x}", "a function call is not closed"),
+        ] {
+            assert_eq!(
+                render(t, &v),
+                Err(Error::Template(format!("bad template syntax: {msg}"))),
+                "{t}"
+            );
+            assert_eq!(paths(t).map_err(|e| e.code()), Err("invalid_template"));
         }
+    }
+
+    fn not_a_path() -> Result<String> {
+        Err(syntax("a placeholder is not a dotted path"))
+    }
+
+    #[test]
+    fn placeholder_names() {
+        let v = json!({
+            "a-b": "dash", "_a": "under", "A": {"b9": "upper"}, "a": {"1": "digit"},
+            "a_1": {"b-2": "mixed"}
+        });
+        for bad in [
+            "${1a}",
+            "${a..b}",
+            "${.a}",
+            "${a.}",
+            "${.}",
+            "${-a}",
+            "${a/b}",
+            "${a@b}",
+            "${a||b}",
+            "${a || b}",
+        ] {
+            assert_eq!(render(bad, &v), not_a_path(), "{bad}");
+        }
+        // A dash is valid in each part. The first char must be a letter or `_`.
+        for (good, out) in [
+            ("${a-b}", "dash"),
+            ("${_a}", "under"),
+            ("${A.b9}", "upper"),
+            ("${a.1}", "digit"),
+            ("${a_1.b-2}", "mixed"),
+        ] {
+            assert_eq!(render(good, &v).unwrap(), out, "{good}");
+        }
+        assert_eq!(
+            render("${a-b}", &vars()),
+            Err(Error::Template("missing value: a-b".to_owned()))
+        );
+        // A function name is a letter or `_`, then letters, digits or `_`.
+        for bad in ["${1f(x)}", "${a-b(x)}", "${a.b(x)}", "${(x)}", "${f(x)y}"] {
+            assert_eq!(
+                render(bad, &v),
+                Err(syntax("a function call is not closed")),
+                "{bad}"
+            );
+        }
+        for name in ["_f", "f_1", "F9"] {
+            assert_eq!(
+                render(&format!("${{{name}(x)}}"), &v),
+                Err(Error::Template(format!(
+                    "unknown template function: {name}"
+                )))
+            );
+        }
+    }
+
+    #[test]
+    fn alternatives_split_only_at_the_top_level() {
+        let v = vars();
+        // `||` in a function argument is text.
+        assert_eq!(render("${base64(a||b)}", &v).unwrap(), "YXx8Yg==");
+        // One `|` is text.
+        assert_eq!(render("a|b ${apiKey}|c", &v).unwrap(), "a|b k-1|c");
+        // After a `||`, the next `|` is text.
+        assert_eq!(render("${nope} ||| ok", &v).unwrap(), "| ok");
+        assert_eq!(paths("${a}|||${b}").unwrap(), vec!["a", "b"]);
+        // A `}` outside a placeholder is text. The depth does not go below 0.
+        assert_eq!(render("a}b", &v).unwrap(), "a}b");
+        assert_eq!(render("}${apiKey}}", &v).unwrap(), "}k-1}");
+        assert_eq!(render("}} ${nope}} || ${apiKey}", &v).unwrap(), "k-1");
+        // Only a template with alternatives is trimmed.
+        assert_eq!(
+            render("  Bearer ${apiKey}  ", &v).unwrap(),
+            "  Bearer k-1  "
+        );
+        assert_eq!(render("  ${nope}  ||  x y  ", &v).unwrap(), "x y");
+        assert_eq!(render(" a || b ", &v).unwrap(), "a");
+    }
+
+    #[test]
+    fn set_path_keeps_siblings_and_replaces_scalars() {
+        let mut v = json!({"a": {"x": 1}});
+        set_path(&mut v, "a.b.c", json!("v"));
+        assert_eq!(v, json!({"a": {"x": 1, "b": {"c": "v"}}}));
+        let mut v = json!({"a": 5, "k": true});
+        set_path(&mut v, "a.b", json!("v"));
+        assert_eq!(v, json!({"a": {"b": "v"}, "k": true}));
+        let mut v = Value::Null;
+        set_path(&mut v, "a", json!("v"));
+        assert_eq!(v, json!({"a": "v"}));
+        // The probe goes in at a nested path. A scalar on the way becomes an
+        // object, and the other values stay.
+        let v = json!({"connectionConfig": {"d": "scalar", "domain": "example.com"}});
+        let p = "connectionConfig.d.e";
+        assert!(!value_sets_host(
+            "https://${connectionConfig.d.e}.${connectionConfig.domain}/x",
+            &v,
+            p
+        ));
+        assert!(value_sets_host("https://${connectionConfig.d.e}/x", &v, p));
     }
 
     #[test]

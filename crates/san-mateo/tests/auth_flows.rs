@@ -881,6 +881,72 @@ async fn import_checks_the_auth_mode() {
 }
 
 #[tokio::test]
+async fn import_checks_the_webhook_url() {
+    let h = ready().await;
+    let input = |id: &str, hook: &str| ImportConnection {
+        connection_id: Some(id.to_owned()),
+        provider_config_key: "keyed".into(),
+        credentials: Credentials::ApiKey {
+            api_key: "k".into(),
+        },
+        connection_config: Map::new(),
+        metadata: Map::new(),
+        tags: BTreeMap::new(),
+        end_user: None,
+        webhook_url_override: Some(hook.to_owned()),
+    };
+    for (i, hook) in [
+        "http://hooks.example.com/x",
+        "ftp://hooks.example.com/x",
+        "not a url",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let err = h
+            .san
+            .import_connection("dev", input(&format!("plain-{i}"), hook))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "{hook}: {err:?}");
+    }
+    for (i, hook) in [
+        "https://127.0.0.1/x",
+        "https://10.0.0.5/x",
+        "https://169.254.169.254/latest",
+        "https://localhost/x",
+        "https://[::1]/x",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let err = h
+            .san
+            .import_connection("dev", input(&format!("internal-{i}"), hook))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::ForbiddenHost(_)), "{hook}: {err:?}");
+    }
+    // No row is stored for a refused import.
+    assert!(
+        h.store
+            .list_connections("dev", &san_mateo::store::ConnectionFilter::default())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let ok = h
+        .san
+        .import_connection("dev", input("ok", "https://hooks.example.com/x"))
+        .await
+        .unwrap();
+    assert_eq!(
+        ok.webhook_url_override.as_deref(),
+        Some("https://hooks.example.com/x")
+    );
+}
+
+#[tokio::test]
 async fn key_rotation_keeps_connections_readable() {
     let h = ready().await;
     let conn = connect_crm(&h, "at-1", None, None).await;
