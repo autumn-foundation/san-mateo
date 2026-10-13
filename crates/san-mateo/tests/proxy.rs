@@ -432,11 +432,16 @@ async fn pagination_has_a_page_limit_and_checks_replies() {
     let h = ready().await;
     let key = crm(&h).await;
     let url = format!("{API}/v3/loop");
-    h.http.reply(
-        "GET",
-        &url,
-        HttpResponse::json(200, &json!({"results": [{"id": 1}], "next": "again"})),
-    );
+    for i in 0..5 {
+        h.http.reply(
+            "GET",
+            &url,
+            HttpResponse::json(
+                200,
+                &json!({"results": [{"id": i}], "next": format!("c{i}")}),
+            ),
+        );
+    }
     let all = h
         .san
         .paginate(
@@ -463,6 +468,89 @@ async fn pagination_has_a_page_limit_and_checks_replies() {
             )
             .await
             .is_err()
+    );
+}
+
+#[tokio::test]
+async fn a_repeated_cursor_stops_pagination() {
+    let h = ready().await;
+    let key = crm(&h).await;
+    let url = format!("{API}/v3/stuck");
+    h.http.reply(
+        "GET",
+        &url,
+        HttpResponse::json(200, &json!({"results": [{"id": 1}], "next": "again"})),
+    );
+    let all = h
+        .san
+        .paginate(
+            "dev",
+            &key,
+            ProxyRequest::get("/v3/stuck"),
+            PaginateOptions {
+                max_pages: Some(10),
+                ..PaginateOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 2);
+    let sent = h.http.requests_to(&url);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1].url, format!("{url}?cursor=again"));
+}
+
+#[tokio::test]
+async fn optional_template_values_are_left_out() {
+    let h = shop_harness().await;
+    let url = "https://api.shop.example.com/v1/orders";
+    h.http
+        .reply("GET", url, HttpResponse::json(200, &json!([])));
+    let bare = shop_connection(&h, "s1", json!({}), None).await;
+    let res = h
+        .san
+        .proxy("dev", &bare, ProxyRequest::get("/v1/orders"))
+        .await
+        .unwrap();
+    assert_eq!(res.status, 200);
+    let sent = &h.http.requests_to(url)[0];
+    assert_eq!(sent.url, url);
+    assert_eq!(sent.header_value("x-login-customer-id"), None);
+    assert_eq!(sent.header_value("authorization"), Some("Bearer at-1"));
+    let full = shop_connection(
+        &h,
+        "s2",
+        json!({"login_customer_id": "123", "account": "acc-9"}),
+        None,
+    )
+    .await;
+    h.san
+        .proxy("dev", &full, ProxyRequest::get("/v1/orders"))
+        .await
+        .unwrap();
+    let sent = &h.http.requests_to(url)[1];
+    assert_eq!(sent.url, format!("{url}?account=acc-9"));
+    assert_eq!(sent.header_value("x-login-customer-id"), Some("123"));
+}
+
+/// Waits for `service/proxying.rs`: `prepare` must call
+/// `credentials::add_client_vars` with the integration client.
+#[tokio::test]
+#[ignore = "needs the integration client in the vars of SanMateo::prepare"]
+async fn oauth_templates_see_the_integration_client() {
+    let h = shop_harness().await;
+    let url = "https://api.shop.example.com/v1/orders";
+    h.http
+        .reply("GET", url, HttpResponse::json(200, &json!([])));
+    let key = shop_connection(&h, "s1", json!({}), None).await;
+    h.san
+        .proxy("dev", &key, ProxyRequest::get("/v1/orders"))
+        .await
+        .unwrap();
+    let sent = &h.http.requests_to(url)[0];
+    assert_eq!(
+        sent.header_value("x-api-key"),
+        Some("shop-client:shop-secret")
     );
 }
 

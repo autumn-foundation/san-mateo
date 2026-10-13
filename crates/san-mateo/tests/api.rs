@@ -491,18 +491,16 @@ async fn connections_over_http() {
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
     assert_eq!(r.json()["connection_id"], "imp");
 
-    assert_eq!(
-        call(
-            &h,
-            "DELETE",
-            &format!("/connections/{id}?provider_config_key=crm"),
-            &[AUTH],
-            None
-        )
-        .await
-        .status,
-        StatusCode::NO_CONTENT
-    );
+    let r = call(
+        &h,
+        "DELETE",
+        &format!("/connections/{id}?provider_config_key=crm"),
+        &[AUTH],
+        None,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    assert_eq!(r.json(), json!({"success": true}));
     assert_eq!(
         call(
             &h,
@@ -515,6 +513,85 @@ async fn connections_over_http() {
         .status,
         StatusCode::NOT_FOUND
     );
+}
+
+#[tokio::test]
+async fn get_connection_hides_refresh_tokens() {
+    let h = ready().await;
+    let conn = connect_crm(&h, "at-1", Some("rt-1"), Some(3_600)).await;
+    let id = conn.connection_id.clone();
+    for path in ["connections", "connection"] {
+        let r = call(
+            &h,
+            "GET",
+            &format!("/{path}/{id}?provider_config_key=crm"),
+            &[AUTH],
+            None,
+        )
+        .await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+        let v = r.json();
+        assert_eq!(v["credentials"]["access_token"], "at-1");
+        assert_eq!(v["credentials"]["raw"]["access_token"], "at-1");
+        assert!(v["credentials"].get("refresh_token").is_none(), "{v}");
+        assert!(
+            v["credentials"]["raw"].get("refresh_token").is_none(),
+            "{v}"
+        );
+        assert!(!r.text().contains("rt-1"), "{path}");
+    }
+    let r = call(
+        &h,
+        "GET",
+        &format!("/connections/{id}?provider_config_key=crm&refresh_token=true"),
+        &[AUTH],
+        None,
+    )
+    .await;
+    let v = r.json();
+    assert_eq!(v["credentials"]["refresh_token"], "rt-1");
+    assert_eq!(v["credentials"]["raw"]["refresh_token"], "rt-1");
+
+    // Keys like `refreshToken` go too, at any depth, also in the config.
+    let body = json!({
+        "connection_id": "imp",
+        "provider_config_key": "crm",
+        "credentials": {
+            "type": "OAUTH2",
+            "access_token": "at-9",
+            "refresh_token": "rt-9",
+            "raw": {"data": [{"refreshToken": "rt-deep", "keep": 1}]}
+        },
+        "connection_config": {"Refresh-Token": "rt-cfg", "nested": {"refresh_token": "rt-n", "keep": 2}}
+    });
+    let r = call(&h, "POST", "/connections", &[AUTH], Some(body)).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let r = call(
+        &h,
+        "GET",
+        "/connections/imp?provider_config_key=crm",
+        &[AUTH],
+        None,
+    )
+    .await;
+    let v = r.json();
+    assert!(!r.text().contains("rt-"), "{v}");
+    assert_eq!(v["credentials"]["raw"]["data"][0]["keep"], 1);
+    assert_eq!(v["connection_config"]["nested"]["keep"], 2);
+    let r = call(
+        &h,
+        "GET",
+        "/connections/imp?provider_config_key=crm&refresh_token=true",
+        &[AUTH],
+        None,
+    )
+    .await;
+    let v = r.json();
+    assert_eq!(
+        v["credentials"]["raw"]["data"][0]["refreshToken"],
+        "rt-deep"
+    );
+    assert_eq!(v["connection_config"]["Refresh-Token"], "rt-cfg");
 }
 
 #[tokio::test]
@@ -634,12 +711,24 @@ async fn records_over_http() {
     let r = call(
         &h,
         "GET",
-        "/records?model=Contact&filter=added&ids=0,1",
+        "/records?model=Contact&filter=added&ids=0&ids=1",
         &headers,
         None,
     )
     .await;
     assert_eq!(r.json()["records"].as_array().unwrap().len(), 2);
+    // Each `ids` value is one external id, commas and all.
+    let r = call(
+        &h,
+        "GET",
+        "/records?model=Contact&ids=0,1&ids[]=2",
+        &headers,
+        None,
+    )
+    .await;
+    let records = r.json()["records"].as_array().unwrap().clone();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["id"], "2");
     assert_eq!(
         call(&h, "GET", "/records?model=Contact&limit=0", &headers, None)
             .await

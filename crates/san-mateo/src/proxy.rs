@@ -369,37 +369,68 @@ pub fn auth_headers(credentials: &Credentials, provider: &Provider) -> Vec<(Stri
         .collect()
 }
 
-fn render_map(
-    map: &std::collections::BTreeMap<String, String>,
-    vars: &Value,
-) -> Result<Vec<(String, String)>> {
-    map.iter()
-        .map(|(k, v)| Ok((k.to_ascii_lowercase(), crate::template::render(v, vars)?)))
-        .collect()
-}
-
-/// Renders the provider `proxy.headers` with `vars`.
+/// Returns `true` when `template` reads a value that is not in `vars`, is
+/// `null` or is empty.
 ///
 /// # Errors
 ///
-/// [`Error::Template`] when a value is missing.
+/// [`Error::Template`] when the syntax is wrong.
+fn lacks_value(template: &str, vars: &Value) -> Result<bool> {
+    Ok(crate::template::paths(template)?
+        .iter()
+        .any(|p| match crate::template::lookup(vars, p) {
+            None | Some(Value::Null) => true,
+            Some(Value::String(s)) => s.is_empty(),
+            Some(_) => false,
+        }))
+}
+
+/// Renders each template of `map`. An entry with a missing value is left
+/// out, as in Nango. `lower` makes the names lower case.
+fn render_map(
+    map: &std::collections::BTreeMap<String, String>,
+    vars: &Value,
+    lower: bool,
+) -> Result<Vec<(String, String)>> {
+    let mut out = Vec::with_capacity(map.len());
+    for (k, v) in map {
+        match crate::template::render(v, vars) {
+            Ok(value) if lower => out.push((k.to_ascii_lowercase(), value)),
+            Ok(value) => out.push((k.clone(), value)),
+            Err(e) => {
+                if !lacks_value(v, vars)? {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Renders the provider `proxy.headers` with `vars`. A header with a missing
+/// value is left out.
+///
+/// # Errors
+///
+/// [`Error::Template`] when the syntax is wrong or a value is not text.
 pub fn provider_headers(provider: &Provider, vars: &Value) -> Result<Vec<(String, String)>> {
     provider
         .proxy
         .as_ref()
-        .map_or_else(|| Ok(Vec::new()), |p| render_map(&p.headers, vars))
+        .map_or_else(|| Ok(Vec::new()), |p| render_map(&p.headers, vars, true))
 }
 
-/// Renders the provider `proxy.query` with `vars`.
+/// Renders the provider `proxy.query` with `vars`. A parameter with a
+/// missing value is left out. Names keep their case.
 ///
 /// # Errors
 ///
-/// [`Error::Template`] when a value is missing.
+/// [`Error::Template`] when the syntax is wrong or a value is not text.
 pub fn provider_query(provider: &Provider, vars: &Value) -> Result<Vec<(String, String)>> {
     provider
         .proxy
         .as_ref()
-        .map_or_else(|| Ok(Vec::new()), |p| render_map(&p.query, vars))
+        .map_or_else(|| Ok(Vec::new()), |p| render_map(&p.query, vars, false))
 }
 
 fn is_hop_by_hop(name: &str) -> bool {
@@ -769,12 +800,62 @@ mod tests {
             h(&[("authorization", "Bearer k1"), ("x-version", "2024")])
         );
         assert_eq!(provider_query(&p, &vars).unwrap(), h(&[("key", "k1")]));
-        assert!(provider_headers(&p, &json!({})).is_err());
         assert!(
             provider_headers(&Provider::default(), &vars)
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn provider_query_names_keep_their_case() {
+        let mut p = provider(&[("X-Version", "2024")]);
+        if let Some(proxy) = p.proxy.as_mut() {
+            proxy.query.insert("apiKey".into(), "${apiKey}".into());
+        }
+        let vars = json!({"apiKey": "k1"});
+        assert_eq!(
+            provider_query(&p, &vars).unwrap(),
+            h(&[("apiKey", "k1"), ("key", "k1")])
+        );
+        assert_eq!(
+            provider_headers(&p, &vars).unwrap(),
+            h(&[("x-version", "2024")])
+        );
+    }
+
+    #[test]
+    fn provider_templates_skip_entries_with_missing_values() {
+        let mut p = provider(&[
+            (
+                "x-login-customer-id",
+                "${connectionConfig.login_customer_id}",
+            ),
+            ("x-either", "${connectionConfig.a} || ${connectionConfig.b}"),
+            ("x-empty", "${connectionConfig.empty}"),
+            ("x-version", "2024"),
+        ]);
+        if let Some(proxy) = p.proxy.as_mut() {
+            proxy
+                .query
+                .insert("account".into(), "${connectionConfig.account}".into());
+            proxy.query.insert("fixed".into(), "1".into());
+        }
+        let vars = json!({"connectionConfig": {"b": "B", "empty": ""}});
+        assert_eq!(
+            provider_headers(&p, &vars).unwrap(),
+            h(&[("x-either", "B"), ("x-version", "2024")])
+        );
+        assert_eq!(provider_query(&p, &vars).unwrap(), h(&[("fixed", "1")]));
+        // A syntax error or a value that is not text still fails.
+        for bad in [
+            "${connectionConfig.b",
+            "${nope(${connectionConfig.b})}",
+            "${connectionConfig}",
+        ] {
+            let p = provider(&[("x-bad", bad)]);
+            assert!(provider_headers(&p, &vars).is_err(), "{bad}");
+        }
     }
 
     #[test]

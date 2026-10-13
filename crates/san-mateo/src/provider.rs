@@ -129,6 +129,40 @@ impl Serialize for TokenAuthMethod {
     }
 }
 
+/// The Nango `authorization_method` field: where the client puts its id and
+/// secret at the token endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AuthorizationMethod {
+    /// In the body.
+    #[default]
+    Body,
+    /// In an `Authorization: Basic` header.
+    Header,
+    /// A method that San Mateo does not support.
+    Other(String),
+}
+
+impl<'de> Deserialize<'de> for AuthorizationMethod {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(match s.as_str() {
+            "header" => Self::Header,
+            "body" => Self::Body,
+            _ => Self::Other(s),
+        })
+    }
+}
+
+impl Serialize for AuthorizationMethod {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(match self {
+            Self::Body => "body",
+            Self::Header => "header",
+            Self::Other(o) => o,
+        })
+    }
+}
+
 /// A token URL: one URL, or one URL for each auth mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -301,6 +335,10 @@ pub struct Provider {
     /// The client auth at the token endpoint.
     #[serde(default, deserialize_with = "de_lenient")]
     pub token_request_auth_method: Option<TokenAuthMethod>,
+    /// The Nango client auth field. `header` is the same as
+    /// `token_request_auth_method: basic`.
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub authorization_method: Option<AuthorizationMethod>,
     /// A dotted path to the token object in the token reply.
     #[serde(default)]
     pub alternate_access_token_response_path: Option<String>,
@@ -365,6 +403,14 @@ impl Provider {
     #[must_use]
     pub fn uses_pkce(&self) -> bool {
         !self.disable_pkce.unwrap_or(false)
+    }
+
+    /// Returns `true` when the client uses Basic auth at the token endpoint:
+    /// `token_request_auth_method: basic` or `authorization_method: header`.
+    #[must_use]
+    pub const fn uses_basic_client_auth(&self) -> bool {
+        matches!(self.token_request_auth_method, Some(TokenAuthMethod::Basic))
+            || matches!(self.authorization_method, Some(AuthorizationMethod::Header))
     }
 
     /// Returns `true` when `expires_in` is in ms.
@@ -681,6 +727,7 @@ two-step:
         assert_eq!(p.refresh_buffer_ms(), 120_000);
         assert_eq!(p.body_format, Some(BodyFormat::Json));
         assert_eq!(p.token_request_auth_method, Some(TokenAuthMethod::Basic));
+        assert!(p.uses_basic_client_auth());
         assert_eq!(
             p.token_url_for(&AuthMode::OAuth2),
             Some("https://auth.example.com/token")
@@ -739,6 +786,28 @@ two-step:
             Some("https://cc.example.com/token")
         );
         assert_eq!(cc.token_url_for(&AuthMode::OAuth2), None);
+    }
+
+    #[test]
+    fn authorization_method_header_is_basic_client_auth() {
+        let c = Catalog::from_yaml_str(
+            "h:\n  authorization_method: header\nb:\n  authorization_method: body\nx:\n  authorization_method: other\nn:\n  display_name: N\n",
+        )
+        .unwrap();
+        let h = c.get("h").unwrap();
+        assert_eq!(h.authorization_method, Some(AuthorizationMethod::Header));
+        assert!(h.uses_basic_client_auth());
+        assert_eq!(
+            serde_json::to_value(&*h).unwrap()["authorization_method"],
+            "header"
+        );
+        for name in ["b", "x", "n"] {
+            assert!(!c.get(name).unwrap().uses_basic_client_auth(), "{name}");
+        }
+        assert_eq!(
+            c.get("x").unwrap().authorization_method,
+            Some(AuthorizationMethod::Other("other".into()))
+        );
     }
 
     #[test]
