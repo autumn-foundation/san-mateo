@@ -22,5 +22,12 @@ tracing.workspace = true
 autumn-harvest = { version = "0.7.0", features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
 
+# With `test = true`, `cargo test` runs the tests in the example. The
+# example needs Postgres: `DATABASE_URL` for `cargo run`,
+# `SAN_MATEO_TEST_DATABASE_URL` for `cargo test`.
+[[example]]
+name = "harvest_workflow"
+test = true
+
 [lints]
 workspace = true

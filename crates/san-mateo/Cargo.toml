@@ -9,6 +9,8 @@ repository.workspace = true
 readme = "../../README.md"
 keywords = ["oauth", "integration", "proxy", "nango", "autumn"]
 categories = ["authentication", "web-programming", "api-bindings"]
+# This test reads files of the repository, not of the crate.
+exclude = ["tests/examples_wired.rs"]
 
 [dependencies]
 async-trait.workspace = true
@@ -39,6 +41,11 @@ uuid.workspace = true
 [features]
 # Exposes the store conformance suite for other `Store` crates.
 test-support = []
+
+# With `test = true`, `cargo test` runs the tests in the example.
+[[example]]
+name = "embedded"
+test = true
 
 [dev-dependencies]
 proptest.workspace = true

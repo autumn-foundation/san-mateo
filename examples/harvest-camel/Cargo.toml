@@ -1,0 +1,54 @@
+# The harvest-camel example. It is a separate workspace: harvest-camel needs
+# autumn-harvest-plugin, which turns on the autumn-web default features (C
+# builds of libpq and SQLite). In the main workspace, these features would go
+# into all builds. See docs/adr/0006-runnable-examples.md.
+#
+# After a change to a dependency of `san-mateo` or `san-mateo-camel`, update
+# the lock file of this workspace:
+#   cargo update --manifest-path examples/harvest-camel/Cargo.toml -p san-mateo -p san-mateo-camel
+[package]
+name = "san-mateo-example-harvest-camel"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "harvest_camel"
+path = "src/main.rs"
+
+[dependencies]
+san-mateo = { path = "../../crates/san-mateo" }
+san-mateo-camel = { path = "../../crates/san-mateo-camel" }
+# Not on crates.io. This rev moves harvest-camel to camel 0.57
+# (autumn-foundation/harvest-camel PR 6). Pin a full commit hash.
+harvest-camel = { git = "https://github.com/autumn-foundation/harvest-camel", rev = "1141b3cf0748beedf432e4935ee49be9f5ec29ea" }
+autumn-harvest = "0.7.0"
+camel-api = "0.57"
+camel-builder = "0.57"
+camel-component-direct = "0.57"
+camel-core = "0.57"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+
+# Keep equal to `[workspace.lints]` in the root Cargo.toml. The guard test
+# `examples_wired` checks it.
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+# `pub(crate)` marks crate-internal items on purpose.
+redundant_pub_crate = "allow"
+# Names such as `san_mateo::store::Store` are clear in this crate.
+module_name_repetitions = "allow"
+# The same allows as the autumn workspace. A trait impl can need no `.await`.
+unused_async_trait_impl = "allow"
+assert_is_empty = "allow"
