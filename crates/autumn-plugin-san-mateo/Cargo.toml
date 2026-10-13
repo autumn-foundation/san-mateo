@@ -1,0 +1,28 @@
+[package]
+name = "autumn-plugin-san-mateo"
+description = "San Mateo plugin for autumn-web: OAuth and API key connections, token refresh, an auth proxy, syncs and actions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["autumn", "oauth", "integration", "plugin", "nango"]
+categories = ["web-programming", "authentication"]
+
+[dependencies]
+san-mateo.workspace = true
+autumn-web = { version = "0.8.0", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml = "0.9"
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tower.workspace = true
+
+[lints]
+workspace = true

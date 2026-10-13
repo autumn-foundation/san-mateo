@@ -1,5 +1,12 @@
 [workspace]
-members = ["crates/san-mateo"]
+members = [
+    "crates/san-mateo",
+    "crates/san-mateo-postgres",
+    "crates/san-mateo-server",
+    "crates/autumn-plugin-san-mateo",
+    "crates/san-mateo-harvest",
+    "crates/san-mateo-camel",
+]
 resolver = "3"
 
 [workspace.package]
