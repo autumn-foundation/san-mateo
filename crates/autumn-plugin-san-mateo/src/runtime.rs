@@ -47,6 +47,9 @@ impl Runtime {
         }
     }
 
+    /// Starts the background loops, if the config asks for them.
+    pub(crate) fn start_loops(&self) {}
+
     /// `true` after shutdown starts.
     pub(crate) fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)

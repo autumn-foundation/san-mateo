@@ -355,6 +355,12 @@ fn mutating_routes(cfg: &AutumnConfig, prefix: &str) -> Vec<(&'static str, Strin
         .collect()
 }
 
+/// A warning when the `server_url` of a given service does not end with the
+/// mount prefix: the OAuth callback URL then gives 404.
+fn server_url_warning(_server_url: &str, _prefix: &str) -> Option<String> {
+    None
+}
+
 /// The exempt list to add. At the root, name each top path: `"/"`
 /// exempts the whole app.
 fn exemption_fix(prefix: &str) -> String {
@@ -614,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn csrf_at_the_root_names_each_top_path() {
+    fn csrf_at_the_root_names_each_route_prefix() {
         let mut cfg = AutumnConfig::default();
         cfg.security.csrf.enabled = true;
         let e = check_security(&cfg, "").unwrap_err().to_string();
@@ -623,19 +629,15 @@ mod tests {
             "{e}"
         );
         assert!(!e.contains("[\"/\"]"), "{e}");
-        cfg.security.csrf.exempt_paths = ex(&[
-            "/integrations",
-            "/connect",
-            "/oauth2",
-            "/api-auth",
-            "/auth",
-            "/connections",
-            "/connection",
-            "/proxy",
-            "/sync",
-            "/action",
-        ]);
+        // A top segment such as `/auth` would also exempt the app's own
+        // `/auth/login`. The fix names the San Mateo prefixes only.
+        assert!(e.contains("\"/auth/unauthenticated\""), "{e}");
+        assert!(!e.contains("\"/auth\""), "{e}");
+        let list = &e[e.find('[').unwrap() + 1..e.find(']').unwrap()];
+        let fix: Vec<&str> = list.split(", ").map(|p| p.trim_matches('"')).collect();
+        cfg.security.csrf.exempt_paths = ex(&fix);
         check_security(&cfg, "").unwrap();
+        assert!(!is_exempt("/auth/login", &cfg.security.csrf.exempt_paths));
     }
 
     #[test]
@@ -732,6 +734,30 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("catalog") && e.contains("registry"), "{e}");
+    }
+
+    #[test]
+    fn loops_start_at_startup_not_in_the_state_initializer() {
+        // autumn runs state initializers also in modes that serve nothing,
+        // for example `autumn build`. Loops must not run there.
+        let state = AppState::for_test();
+        let rt = SanMateoPlugin::with_config(SanMateoConfig::default())
+            .service(service())
+            .start_inner(&state, ProcessRole::Worker)
+            .unwrap();
+        assert!(!rt.background_running());
+        rt.start_loops();
+        assert!(rt.background_running());
+        rt.start_loops();
+        assert!(rt.background_running(), "a second start does nothing");
+    }
+
+    #[test]
+    fn a_given_service_must_use_the_prefix_in_its_server_url() {
+        assert!(server_url_warning("https://sm.example.com", "/san-mateo").is_some());
+        assert!(server_url_warning("https://app.example.com/san-mateo", "/san-mateo").is_none());
+        assert!(server_url_warning("https://app.example.com/san-mateo/", "/san-mateo").is_none());
+        assert!(server_url_warning("https://app.example.com", "").is_none());
     }
 
     #[test]

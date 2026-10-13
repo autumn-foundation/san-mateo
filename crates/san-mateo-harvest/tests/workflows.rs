@@ -270,6 +270,8 @@ async fn an_input_with_an_empty_id_fails_with_no_run() {
         "provider_config_key",
         "connection_id",
         "sync_name",
+        // An empty concurrency key would join all such loops in one limit.
+        "sync_key",
     ] {
         let mut input = serde_json::to_value(loop_input(60, 1)).unwrap();
         input[field] = json!("");

@@ -57,6 +57,10 @@ pub struct ProxyInput {
     /// Send the harvest idempotency key as `Idempotency-Key`.
     #[serde(default)]
     pub forward_idempotency_key: bool,
+    /// Status values that are safe to retry also for a non-idempotent
+    /// method.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retry_on: Vec<u16>,
 }
 
 impl ProxyInput {
@@ -78,6 +82,7 @@ impl ProxyInput {
             body: None,
             query: BTreeMap::new(),
             forward_idempotency_key: false,
+            retry_on: Vec::new(),
         }
     }
 
@@ -99,6 +104,13 @@ impl ProxyInput {
     #[must_use]
     pub fn query(mut self, name: &str, value: impl Into<String>) -> Self {
         self.query.insert(name.to_owned(), value.into());
+        self
+    }
+
+    /// Sets [`Self::retry_on`].
+    #[must_use]
+    pub fn retry_on(mut self, statuses: &[u16]) -> Self {
+        self.retry_on = statuses.to_vec();
         self
     }
 
@@ -353,6 +365,9 @@ pub struct SyncRunOutput {
     /// The error, when the run failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// `true` when the sync is paused, so it did not run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
 }
 
 impl From<SyncRunReport> for SyncRunOutput {
@@ -364,6 +379,7 @@ impl From<SyncRunReport> for SyncRunOutput {
             success: report.success,
             counts: report.counts,
             error: report.error,
+            skipped: false,
         }
     }
 }

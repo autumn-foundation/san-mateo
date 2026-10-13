@@ -124,6 +124,39 @@ async fn connect_and_proxy_through_the_autumn_stack() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_api_uses_the_autumn_body_limit() {
+    let http = network();
+    let client = app(plugin(&http));
+    integrations(&client, "/san-mateo").await;
+    let token = session(&client, "/san-mateo").await;
+    let r = client
+        .post(&format!(
+            "/san-mateo/api-auth/api-key/keyed?connect_session_token={token}"
+        ))
+        .json(&json!({"apiKey": "user-api-key"}))
+        .send()
+        .await;
+    let connection_id = json(&r)["connectionId"].as_str().unwrap().to_owned();
+    http.reply(
+        "POST",
+        "https://api.keyed.example.com/v1/files",
+        HttpResponse::new(201, "{}").header("content-type", "application/json"),
+    );
+    // 3 MiB: more than the axum default of 2 MiB, less than the autumn
+    // default of 32 MiB.
+    let r = client
+        .post("/san-mateo/proxy/v1/files")
+        .header("authorization", &bearer(DEV_SECRET))
+        .header("connection-id", &connection_id)
+        .header("provider-config-key", "keyed")
+        .header("content-type", "application/octet-stream")
+        .body(vec![b'x'; 3 * 1024 * 1024])
+        .send()
+        .await;
+    r.assert_status(201);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn connect_session_links_use_the_prefix() {
     let http = network();
     let client = app(plugin(&http).prefix("/integrations-api/"));

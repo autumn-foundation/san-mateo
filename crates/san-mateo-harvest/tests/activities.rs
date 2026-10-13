@@ -34,7 +34,9 @@ async fn proxy_get_returns_status_headers_and_json_body() {
         &format!("{CRM}/v3/contacts"),
         HttpResponse::json(200, &json!([{"id": "1"}]))
             .header("x-request-id", "r-1")
-            .header("set-cookie", "session=s-1"),
+            .header("set-cookie", "session=s-1")
+            .header("x-access-token", "leak-1")
+            .header("x-client-secret", "leak-2"),
     );
     let ctx = ActivityContext::new_test();
     let out = ProxyInput::new(ENV, &crm(), "GET", "/v3/contacts")
@@ -50,7 +52,13 @@ async fn proxy_get_returns_status_headers_and_json_body() {
             .contains(&("x-request-id".to_owned(), "r-1".to_owned()))
     );
     assert!(out.headers.iter().all(|(n, _)| n != "set-cookie"));
-    assert_no_secrets(&serde_json::to_string(&out).unwrap());
+    // Names that look secret stay out of the history, as in the camel crate.
+    let text = serde_json::to_string(&out).unwrap();
+    assert!(
+        !text.contains("leak-1") && !text.contains("leak-2"),
+        "{text}"
+    );
+    assert_no_secrets(&text);
 
     let sent = h.http.requests_to(&format!("{CRM}/v3/contacts"));
     assert_eq!(sent.len(), 1);
@@ -148,6 +156,78 @@ async fn proxy_retryable_statuses_are_retryable_failures() {
         assert_eq!(f.details.as_ref().unwrap()["status"], status);
         assert_failure_has_no_secrets(&f);
     }
+}
+
+#[tokio::test]
+async fn proxy_writes_are_not_retried_after_a_possible_success() {
+    use san_mateo::transport::TransportError;
+    let h = ready().await;
+    let url = format!("{CRM}/v3/contacts");
+    // A 5xx or a network error after a POST: the provider possibly made the
+    // contact. Harvest must not send it again.
+    h.http
+        .reply("POST", &url, HttpResponse::new(502, "bad gateway"));
+    let post = || ProxyInput::new(ENV, &crm(), "POST", "/v3/contacts").json(json!({"n": 1}));
+    let f = post()
+        .send(&h.san, &ActivityContext::new_test())
+        .await
+        .unwrap_err();
+    assert!(f.non_retryable, "a POST after a 502");
+    h.http
+        .fail("POST", &url, TransportError::Connect("reset".to_owned()));
+    let f = post()
+        .send(&h.san, &ActivityContext::new_test())
+        .await
+        .unwrap_err();
+    assert!(f.non_retryable, "a POST after a network error");
+    // A 429 means the provider did not do the call.
+    h.http
+        .reply("POST", &url, HttpResponse::new(429, "slow down"));
+    let f = post()
+        .send(&h.san, &ActivityContext::new_test())
+        .await
+        .unwrap_err();
+    assert!(!f.non_retryable, "a POST after a 429");
+    // An idempotency key or an opt-in makes a retry safe.
+    h.http
+        .reply("POST", &url, HttpResponse::new(502, "bad gateway"));
+    let f = post()
+        .forward_idempotency_key(true)
+        .send(&h.san, &ActivityContext::new_test())
+        .await
+        .unwrap_err();
+    assert!(!f.non_retryable, "with an idempotency key");
+    let f = post()
+        .retry_on(&[502])
+        .send(&h.san, &ActivityContext::new_test())
+        .await
+        .unwrap_err();
+    assert!(!f.non_retryable, "with retry_on");
+    // A GET is safe to send again.
+    h.http
+        .fail("GET", &url, TransportError::Connect("reset".to_owned()));
+    let f = ProxyInput::new(ENV, &crm(), "GET", "/v3/contacts")
+        .send(&h.san, &ActivityContext::new_test())
+        .await
+        .unwrap_err();
+    assert!(!f.non_retryable, "a GET after a network error");
+}
+
+#[tokio::test]
+async fn actions_are_not_retried() {
+    use san_mateo::transport::TransportError;
+    let h = ready().await;
+    h.http.fail(
+        "POST",
+        &format!("{CRM}/v3/contacts"),
+        TransportError::Connect("reset".to_owned()),
+    );
+    let f = RunActionInput::new(ENV, &crm(), "create_contact", json!({"n": 1}))
+        .run(&h.san)
+        .await
+        .unwrap_err();
+    assert_eq!(f.error_type, "san_mateo.upstream_error");
+    assert!(f.non_retryable, "an action can write; it runs at most once");
 }
 
 #[tokio::test]
@@ -370,6 +450,27 @@ async fn refresh_failures_follow_the_provider_status() {
 // ------------------------------------------------------------- run sync
 
 #[tokio::test]
+async fn a_paused_sync_is_skipped() {
+    let h = ready().await;
+    h.san
+        .set_sync_paused(
+            ENV,
+            "crm",
+            Some(&crm().connection_id),
+            &["contacts".to_owned()],
+            true,
+        )
+        .await
+        .unwrap();
+    let out = RunSyncInput::new(ENV, &crm(), "contacts")
+        .run(&h.san)
+        .await
+        .unwrap();
+    assert!(out.skipped, "a paused sync does not run");
+    assert!(h.http.requests_to(&format!("{CRM}/v3/contacts")).is_empty());
+}
+
+#[tokio::test]
 async fn run_sync_saves_records_and_returns_the_report() {
     let h = ready().await;
     h.http.reply(
@@ -397,6 +498,7 @@ async fn run_sync_saves_records_and_returns_the_report() {
                 deleted: 0,
             },
             error: None,
+            skipped: false,
         }
     );
     assert_eq!(h.contacts_runs.load(Ordering::SeqCst), 1);
