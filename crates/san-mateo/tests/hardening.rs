@@ -272,15 +272,27 @@ async fn an_end_user_cannot_pick_the_host_of_a_provider_url() {
 async fn an_allowed_host_can_come_from_the_end_user() {
     let h = ready_h(vec!["git.corp.example.com".to_owned()]).await;
     let t = token(&h, ConnectSessionInput::default()).await;
-    h.san
+    let url = h
+        .san
         .oauth_start(&t, "selfhost", opts(&[("domain", "git.corp.example.com")]))
         .await
         .unwrap();
     assert!(
-        h.san
-            .oauth_start(&t, "selfhost", opts(&[("domain", "attacker.example")]))
-            .await
-            .is_err()
+        url.starts_with("https://git.corp.example.com/oauth/authorize?"),
+        "{url}"
+    );
+    let err = h
+        .san
+        .oauth_start(&t, "selfhost", opts(&[("domain", "attacker.example")]))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+    assert!(
+        h.http
+            .requests()
+            .iter()
+            .all(|r| !r.url.contains("attacker.example")),
+        "no request goes to the attacker host"
     );
 }
 
@@ -354,7 +366,19 @@ async fn the_oauth_state_ends_with_the_connect_session() {
         .await
         .unwrap();
     h.clock.advance(chrono::Duration::minutes(6));
-    assert!(h.san.oauth_callback(&callback(&url, &[])).await.is_err());
+    // The OAuth state ends with the session (minute 30), not 15 minutes
+    // after the start (minute 40).
+    let err = h
+        .san
+        .oauth_callback(&callback(&url, &[]))
+        .await
+        .unwrap_err();
+    assert_eq!(err, Error::InvalidOAuthState);
+    assert!(
+        h.http
+            .requests_to("https://auth.crm.example.com/token")
+            .is_empty()
+    );
 
     // A deleted session also ends its OAuth flows.
     let t = token(&h, ConnectSessionInput::default()).await;
@@ -403,13 +427,18 @@ async fn end_users_cannot_set_reserved_oauth_parameters() {
 #[tokio::test]
 async fn webhook_overrides_cannot_point_to_internal_hosts() {
     let h = ready_h(vec![]).await;
-    for bad in [
-        "https://10.0.0.5/admin",
-        "https://169.254.169.254/latest",
-        "https://localhost/x",
-        "https://[::1]/x",
+    for (bad, forbidden) in [
+        ("https://10.0.0.5/admin", true),
+        ("https://169.254.169.254/latest", true),
+        ("https://localhost/x", true),
+        ("https://app.localhost/x", true),
+        ("https://[::1]/x", true),
+        ("https://127.0.0.1/x", true),
+        // The scheme check comes first.
+        ("http://10.0.0.5/admin", false),
+        ("http://hooks.example.com/x", false),
     ] {
-        let r = h
+        let err = h
             .san
             .create_connect_session(
                 "dev",
@@ -418,8 +447,13 @@ async fn webhook_overrides_cannot_point_to_internal_hosts() {
                     ..ConnectSessionInput::default()
                 },
             )
-            .await;
-        assert!(r.is_err(), "{bad}");
+            .await
+            .unwrap_err();
+        if forbidden {
+            assert!(matches!(err, Error::ForbiddenHost(_)), "{bad}: {err:?}");
+        } else {
+            assert!(matches!(err, Error::Invalid(_)), "{bad}: {err:?}");
+        }
     }
 }
 
