@@ -23,7 +23,8 @@ fn to_json<T: Serialize>(v: &T) -> Result<Value> {
 }
 
 fn from_json<T: serde::de::DeserializeOwned>(v: Value) -> Result<T> {
-    serde_json::from_value(v).map_err(|e| Error::Store(format!("a stored JSON column is not valid: {e}")))
+    serde_json::from_value(v)
+        .map_err(|e| Error::Store(format!("a stored JSON column is not valid: {e}")))
 }
 
 #[derive(Queryable, Selectable, Insertable, AsChangeset)]

@@ -99,11 +99,17 @@ async fn only_one_concurrent_writer_wins_a_version() {
 async fn only_one_concurrent_owner_gets_a_lease() {
     let Some(s) = store().await else { return };
     let name = format!("lease-{}", Uuid::new_v4());
-    let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    // A far-future time: the purge in the parallel conformance test does not
+    // remove this lease.
+    let now = Utc.timestamp_opt(4_100_000_000, 0).unwrap();
     let tries = (0..8).map(|i| {
         let s = s.clone();
         let name = name.clone();
-        async move { s.try_lease(&name, &format!("owner-{i}"), now, 10_000).await.unwrap() }
+        async move {
+            s.try_lease(&name, &format!("owner-{i}"), now, 10_000)
+                .await
+                .unwrap()
+        }
     });
     let got = futures::future::join_all(tries).await;
     assert_eq!(got.iter().filter(|g| **g).count(), 1);
@@ -144,10 +150,18 @@ async fn concurrent_record_batches_count_each_record_once() {
     let results = futures::future::join_all(batches).await;
     let added: usize = results
         .iter()
-        .map(|r| r.iter().filter(|(_, c)| *c == san_mateo::records::Change::Added).count())
+        .map(|r| {
+            r.iter()
+                .filter(|(_, c)| *c == san_mateo::records::Change::Added)
+                .count()
+        })
         .sum();
     assert_eq!(added, 20);
-    let q = RecordQuery { model: "m".into(), limit: 100, ..RecordQuery::default() };
+    let q = RecordQuery {
+        model: "m".into(),
+        limit: 100,
+        ..RecordQuery::default()
+    };
     assert_eq!(s.list_records(conn, &q).await.unwrap().len(), 20);
 }
 
@@ -167,25 +181,85 @@ async fn the_service_runs_on_postgres() {
         .store(Arc::new(s.clone()))
         .key_ring(KeyRing::new("k1", [3; 32]).unwrap())
         .transport(Arc::new(http.clone()))
-        .clock(Arc::new(ManualClock::new(Utc.timestamp_opt(1_700_000_000, 0).unwrap())))
+        .clock(Arc::new(ManualClock::new(
+            Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+        )))
         .build()
         .unwrap();
-    san.create_integration(&env, NewIntegration { unique_key: "crm".into(), provider: "crm".into(), client_id: Some("id".into()), client_secret: Some(Secret::new("secret")), ..NewIntegration::default() })
+    san.create_integration(
+        &env,
+        NewIntegration {
+            unique_key: "crm".into(),
+            provider: "crm".into(),
+            client_id: Some("id".into()),
+            client_secret: Some(Secret::new("secret")),
+            ..NewIntegration::default()
+        },
+    )
+    .await
+    .unwrap();
+    let token = san
+        .create_connect_session(&env, ConnectSessionInput::default())
+        .await
+        .unwrap()
+        .token;
+    let url = san
+        .oauth_start(token.expose(), "crm", ConnectOptions::default())
         .await
         .unwrap();
-    let token = san.create_connect_session(&env, ConnectSessionInput::default()).await.unwrap().token;
-    let url = san.oauth_start(token.expose(), "crm", ConnectOptions::default()).await.unwrap();
-    let state = url::Url::parse(&url).unwrap().query_pairs().find(|(k, _)| k == "state").unwrap().1.into_owned();
-    http.reply("POST", "https://auth.crm.example.com/t", HttpResponse::json(200, &json!({"access_token": "at", "refresh_token": "rt", "expires_in": 60})));
-    let cb = BTreeMap::from([("code".to_owned(), "c".to_owned()), ("state".to_owned(), state)]);
+    let state = url::Url::parse(&url)
+        .unwrap()
+        .query_pairs()
+        .find(|(k, _)| k == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    http.reply(
+        "POST",
+        "https://auth.crm.example.com/t",
+        HttpResponse::json(
+            200,
+            &json!({"access_token": "at", "refresh_token": "rt", "expires_in": 60}),
+        ),
+    );
+    let cb = BTreeMap::from([
+        ("code".to_owned(), "c".to_owned()),
+        ("state".to_owned(), state),
+    ]);
     let conn = san.oauth_callback(&cb).await.unwrap();
-    http.reply("POST", "https://auth.crm.example.com/t", HttpResponse::json(200, &json!({"access_token": "at2", "expires_in": 3600})));
-    let fresh = san.get_connection(&env, &conn.key(), GetOptions::default()).await.unwrap();
+    http.reply(
+        "POST",
+        "https://auth.crm.example.com/t",
+        HttpResponse::json(200, &json!({"access_token": "at2", "expires_in": 3600})),
+    );
+    let fresh = san
+        .get_connection(&env, &conn.key(), GetOptions::default())
+        .await
+        .unwrap();
     assert_eq!(fresh.credentials.bearer_token(), Some("at2"));
     assert_eq!(fresh.credentials.refresh_token(), Some("rt"));
-    let out = san.save_records(&env, &conn.key(), "M", vec![json!({"id": 1}), json!({"id": 2})]).await.unwrap();
+    let out = san
+        .save_records(
+            &env,
+            &conn.key(),
+            "M",
+            vec![json!({"id": 1}), json!({"id": 2})],
+        )
+        .await
+        .unwrap();
     assert_eq!(out.added.len(), 2);
-    let page = san.list_records(&env, &conn.key(), san_mateo::RecordsRequest { model: "M".into(), limit: Some(1), ..Default::default() }).await.unwrap();
+    let page = san
+        .list_records(
+            &env,
+            &conn.key(),
+            san_mateo::RecordsRequest {
+                model: "M".into(),
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     assert!(page.next_cursor.is_some());
     san.delete_connection(&env, &conn.key()).await.unwrap();
 }
