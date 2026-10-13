@@ -8,7 +8,10 @@
 //! A failure never holds request headers. A failure for an HTTP reply holds
 //! the status and a short preview of the reply body.
 
+use std::time::Duration;
+
 use autumn_harvest::failure::ActivityFailure;
+use serde_json::json;
 
 /// The prefix of each error type that this crate makes.
 pub const ERROR_PREFIX: &str = "san_mateo.";
@@ -26,12 +29,14 @@ pub const SYNC_FAILED_ERROR: &str = "san_mateo.sync_failed";
 /// The largest number of body bytes in a failure.
 pub const BODY_PREVIEW_BYTES: usize = 512;
 
+/// The wait of San Mateo after a failed refresh, as a retry hint.
+const REFRESH_COOLDOWN: Duration = Duration::from_millis(san_mateo::policy::REFRESH_COOLDOWN_MS);
+
 /// Returns `true` when a later attempt can get a different reply for this
 /// HTTP status.
 #[must_use]
 pub const fn is_retryable_status(status: u16) -> bool {
-    let _ = status;
-    todo!()
+    status >= 500 || matches!(status, 408 | 425 | 429)
 }
 
 /// Returns the failure for an HTTP reply, or `None` for a status below 400.
@@ -40,8 +45,20 @@ pub const fn is_retryable_status(status: u16) -> bool {
 /// and a body preview of [`BODY_PREVIEW_BYTES`] or fewer bytes.
 #[must_use]
 pub fn failure_for_status(status: u16, body: &[u8]) -> Option<ActivityFailure> {
-    let _ = (status, body);
-    todo!()
+    if status < 400 {
+        return None;
+    }
+    let error_type = format!("{ERROR_PREFIX}http_{status}");
+    let message = format!("the upstream reply has HTTP status {status}");
+    let failure = if is_retryable_status(status) {
+        ActivityFailure::retryable(error_type, message)
+    } else {
+        ActivityFailure::non_retryable(error_type, message)
+    };
+    Some(failure.with_details(json!({
+        "status": status,
+        "body_preview": body_preview(body),
+    })))
 }
 
 /// Returns the failure for a San Mateo error.
@@ -50,8 +67,27 @@ pub fn failure_for_status(status: u16, body: &[u8]) -> Option<ActivityFailure> {
 /// error is retryable. The message is the error text, which has no secrets.
 #[must_use]
 pub fn failure_for_error(error: &san_mateo::Error) -> ActivityFailure {
-    let _ = error;
-    todo!()
+    let error_type = format!("{ERROR_PREFIX}{}", error.code());
+    let message = error.to_string();
+    let failure = if error.is_retryable() {
+        ActivityFailure::retryable(error_type, message)
+    } else {
+        ActivityFailure::non_retryable(error_type, message)
+    };
+    let mut details = json!({ "code": error.code(), "status": error.status() });
+    if let san_mateo::Error::Provider {
+        status: Some(upstream),
+        ..
+    } = error
+    {
+        details["upstream_status"] = json!(upstream);
+    }
+    let failure = failure.with_details(details);
+    if matches!(error, san_mateo::Error::RefreshCooldown) {
+        failure.with_retry_after(REFRESH_COOLDOWN)
+    } else {
+        failure
+    }
 }
 
 /// Returns the first [`BODY_PREVIEW_BYTES`] bytes of a body as text.
@@ -60,8 +96,15 @@ pub fn failure_for_error(error: &san_mateo::Error) -> ActivityFailure {
 /// replacement character.
 #[must_use]
 pub fn body_preview(body: &[u8]) -> String {
-    let _ = body;
-    todo!()
+    let text = String::from_utf8_lossy(body);
+    if text.len() <= BODY_PREVIEW_BYTES {
+        return text.into_owned();
+    }
+    let mut end = BODY_PREVIEW_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
 }
 
 /// Returns a configuration failure. It is not retryable, because a later

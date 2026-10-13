@@ -11,6 +11,8 @@ use autumn_harvest::context::ActivityContext;
 use autumn_harvest::failure::ActivityFailure;
 use san_mateo::{ConnectionKey, ProxyRequest, ProxyResponse, SanMateo};
 
+use crate::failure::{config_failure, failure_for_error, failure_for_status};
+
 /// The header that carries the harvest idempotency key upstream.
 pub const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 
@@ -22,8 +24,12 @@ pub const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 /// [`SanMateo`]. Add it with `HarvestPlugin::state(san)` or
 /// `HarvestBuilder::state(san)`.
 pub fn san_mateo_from(ctx: &ActivityContext) -> Result<&SanMateo, ActivityFailure> {
-    let _ = ctx;
-    todo!()
+    ctx.state::<SanMateo>().ok_or_else(|| {
+        config_failure(
+            "the harvest state has no SanMateo; add it with HarvestPlugin::state(san) \
+             or HarvestBuilder::state(san)",
+        )
+    })
 }
 
 /// Sends a proxy call from inside a harvest activity.
@@ -42,8 +48,8 @@ pub async fn proxy_from_activity(
     request: ProxyRequest,
     forward_idempotency_key: bool,
 ) -> Result<ProxyResponse, ActivityFailure> {
-    let _ = (ctx, environment, key, request, forward_idempotency_key);
-    todo!()
+    let san = san_mateo_from(ctx)?;
+    proxy_with(san, ctx, environment, key, request, forward_idempotency_key).await
 }
 
 /// Sends a proxy call with a given [`SanMateo`].
@@ -67,15 +73,37 @@ pub async fn proxy_with(
     request: ProxyRequest,
     forward_idempotency_key: bool,
 ) -> Result<ProxyResponse, ActivityFailure> {
-    let _ = (san, ctx, environment, key, request, forward_idempotency_key);
-    todo!()
+    let mut request = request;
+    if forward_idempotency_key {
+        let idempotency_key = ctx
+            .idempotency_key()
+            .map_err(|_| config_failure("the activity context has no idempotency key"))?;
+        // The harvest key replaces a caller key, so each attempt sends one key.
+        request
+            .headers
+            .retain(|(name, _)| !name.eq_ignore_ascii_case(IDEMPOTENCY_KEY_HEADER));
+        request = request.header(IDEMPOTENCY_KEY_HEADER, idempotency_key.as_str());
+    }
+    let response = san
+        .proxy(environment, key, request)
+        .await
+        .map_err(|e| failure_for_error(&e))?;
+    match failure_for_status(response.status, &response.body) {
+        None => Ok(response),
+        Some(failure) => Err(match retry_after(&response) {
+            Some(wait) if !failure.non_retryable => failure.with_retry_after(wait),
+            _ => failure,
+        }),
+    }
 }
 
 /// Returns the `Retry-After` wait of a reply, when it is a number of seconds.
 #[must_use]
 pub fn retry_after(response: &ProxyResponse) -> Option<Duration> {
-    let _ = response;
-    todo!()
+    response
+        .header_value("retry-after")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ use std::time::Duration;
 use autumn_harvest::WorkflowEvent;
 use autumn_harvest::failure::{ActivityFailure, IntoActivityErrorString};
 use autumn_harvest::testing::{ReplayStatus, TestRunOutcome, WorkflowTestEnv};
+use autumn_harvest::{SimulatorResult, WorkflowSimulator};
 use common::*;
 use san_mateo::transport::HttpResponse;
 use san_mateo::{RecordsRequest, SanMateo};
@@ -158,26 +159,42 @@ async fn the_default_iteration_count_is_used() {
     assert_eq!(next.iterations_before_continue, None);
 }
 
+// `mock_activity` records each mock failure with the error type `Error`.
+// `mock_activity_retries` decodes typed failures, as the worker does. Each
+// sequence is one activity call, and each item is one attempt.
+
 #[tokio::test]
 async fn failed_runs_do_not_stop_the_loop() {
     let handler = san_mateo_sync_loop_info().handler;
     let mut input = loop_input(60, 3);
     input.total_runs = 10;
     input.total_failures = 4;
+    let sync_failed = || Err(failed(san_mateo_harvest::SYNC_FAILED_ERROR, true));
     let outcome = WorkflowTestEnv::new()
-        .mock_activity(RUN_SYNC, |_| Ok(ok_run(1)))
-        .mock_activity_attempt(
-            RUN_SYNC,
-            1,
-            Err(failed(san_mateo_harvest::SYNC_FAILED_ERROR, true)),
-        )
-        .mock_activity_attempt(RUN_SYNC, 2, Err(failed("san_mateo.conflict", false)))
+        // Three attempts fail, so the call fails.
+        .mock_activity_retries(RUN_SYNC, vec![sync_failed(), sync_failed(), sync_failed()])
+        // A non-retryable failure ends the call at once.
+        .mock_activity_retries(RUN_SYNC, vec![Err(failed("san_mateo.conflict", false))])
+        // A retry passes, so the call succeeds.
+        .mock_activity_retries(RUN_SYNC, vec![sync_failed(), Ok(ok_run(1))])
         .run(handler, serde_json::to_value(input).unwrap())
         .await;
     let next = continued(&outcome).unwrap();
     assert_eq!(next.total_runs, 11);
     assert_eq!(next.total_failures, 6);
     assert_eq!(timers(&outcome).len(), 3);
+    let failed_types: Vec<&str> = outcome
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            WorkflowEvent::ActivityFailed { error_type, .. } => Some(error_type.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        failed_types,
+        [san_mateo_harvest::SYNC_FAILED_ERROR, "san_mateo.conflict"]
+    );
     assert_replays(&outcome, handler).await;
 }
 
@@ -185,8 +202,11 @@ async fn failed_runs_do_not_stop_the_loop() {
 async fn a_gone_connection_stops_the_loop() {
     let handler = san_mateo_sync_loop_info().handler;
     let outcome = WorkflowTestEnv::new()
-        .mock_activity(RUN_SYNC, |_| Ok(ok_run(1)))
-        .mock_activity_attempt(RUN_SYNC, 2, Err(failed("san_mateo.unknown_connection", false)))
+        .mock_activity_retries(RUN_SYNC, vec![Ok(ok_run(1))])
+        .mock_activity_retries(
+            RUN_SYNC,
+            vec![Err(failed("san_mateo.unknown_connection", false))],
+        )
         .run(handler, serde_json::to_value(loop_input(60, 5)).unwrap())
         .await;
     let out: SyncLoopOutput = serde_json::from_value(outcome.result.clone().unwrap()).unwrap();
@@ -312,7 +332,7 @@ async fn refresh_sweep_runs_one_sweep_with_defaults() {
 #[tokio::test]
 async fn a_failed_sweep_fails_the_workflow_with_the_activity_error_type() {
     let outcome = WorkflowTestEnv::new()
-        .mock_activity(REFRESH_DUE, |_| Err(failed("san_mateo.store_error", true)))
+        .mock_activity_retries(REFRESH_DUE, vec![Err(failed("san_mateo.store_error", true))])
         .run(san_mateo_refresh_sweep_info().handler, json!({}))
         .await;
     assert!(outcome.result.is_err());
@@ -330,6 +350,7 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future))
 }
 
+/// A mock that runs the real `san_mateo_run_sync` work on a San Mateo service.
 fn real_run_sync(san: SanMateo) -> impl Fn(Value) -> Result<Value, String> + Send + Sync {
     move |input| {
         let input: RunSyncInput = serde_json::from_value(input).map_err(|e| e.to_string())?;
@@ -337,6 +358,10 @@ fn real_run_sync(san: SanMateo) -> impl Fn(Value) -> Result<Value, String> + Sen
             .map(|out: SyncRunOutput| serde_json::to_value(out).unwrap())
             .map_err(IntoActivityErrorString::into_error_payload)
     }
+}
+
+fn simulator_continued(result: &SimulatorResult) -> SyncLoopInput {
+    serde_json::from_value(result.final_output.clone().unwrap()).unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -347,14 +372,14 @@ async fn the_sync_loop_runs_a_real_sync_end_to_end() {
         &format!("{CRM}/v3/contacts"),
         HttpResponse::json(200, &json!([{"id": "1"}, {"id": "2"}, {"id": "3"}])),
     );
-    let handler = san_mateo_sync_loop_info().handler;
-    let outcome = WorkflowTestEnv::new()
-        .with_state(h.san.clone())
+    let result = WorkflowSimulator::new(san_mateo_sync_loop_info().handler)
+        .with_activity_info(&san_mateo_harvest::san_mateo_run_sync_info())
         .mock_activity(RUN_SYNC, real_run_sync(h.san.clone()))
-        .run(handler, serde_json::to_value(loop_input(600, 2)).unwrap())
+        .run(serde_json::to_value(loop_input(600, 2)).unwrap())
         .await;
-    let next = continued(&outcome).unwrap();
+    let next = simulator_continued(&result);
     assert_eq!(next.total_runs, 2);
+    assert_eq!(next.total_failures, 0);
     assert_eq!(h.contacts_runs.load(Ordering::SeqCst), 2);
     let page = h
         .san
@@ -370,23 +395,72 @@ async fn the_sync_loop_runs_a_real_sync_end_to_end() {
         .unwrap();
     assert_eq!(page.records.len(), 3);
     // The history holds ids and counts only.
-    let history = serde_json::to_string(outcome.events()).unwrap();
+    let history = serde_json::to_string(&result.history).unwrap();
     assert_no_secrets(&history);
-    assert_replays(&outcome, handler).await;
+    assert!(history.contains(r#""added":3"#), "{history}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_real_sync_is_retried_by_the_activity_policy() {
+    let h = ready().await;
+    // Each attempt runs the real `broken` sync, which always fails.
+    let result = WorkflowSimulator::new(san_mateo_sync_loop_info().handler)
+        .with_activity_info(&san_mateo_harvest::san_mateo_run_sync_info())
+        .mock_activity(RUN_SYNC, {
+            let run = real_run_sync(h.san.clone());
+            move |mut input| {
+                input["sync_name"] = json!("broken");
+                run(input)
+            }
+        })
+        .run(serde_json::to_value(loop_input(600, 1)).unwrap())
+        .await;
+    let next = simulator_continued(&result);
+    assert_eq!(next.total_runs, 0);
+    assert_eq!(next.total_failures, 1);
+    let attempts: Vec<(u32, &str)> = result
+        .history
+        .iter()
+        .filter_map(|e| match e {
+            WorkflowEvent::ActivityFailed {
+                attempt,
+                error_type,
+                ..
+            } => Some((*attempt, error_type.as_str())),
+            _ => None,
+        })
+        .collect();
+    let max = san_mateo_harvest::san_mateo_run_sync_info()
+        .default_retry_policy
+        .unwrap()
+        .max_attempts;
+    assert_eq!(attempts.len(), usize::try_from(max).unwrap());
+    assert!(
+        attempts
+            .iter()
+            .all(|(_, t)| *t == san_mateo_harvest::SYNC_FAILED_ERROR)
+    );
+    assert_no_secrets(&serde_json::to_string(&result.history).unwrap());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_sync_loop_stops_end_to_end_when_the_connection_is_gone() {
     let h = ready().await;
     h.san.delete_connection(ENV, &crm()).await.unwrap();
-    let outcome = WorkflowTestEnv::new()
+    let result = WorkflowSimulator::new(san_mateo_sync_loop_info().handler)
+        .with_activity_info(&san_mateo_harvest::san_mateo_run_sync_info())
         .mock_activity(RUN_SYNC, real_run_sync(h.san.clone()))
-        .run(
-            san_mateo_sync_loop_info().handler,
-            serde_json::to_value(loop_input(600, 2)).unwrap(),
-        )
+        .run(serde_json::to_value(loop_input(600, 2)).unwrap())
         .await;
-    let out: SyncLoopOutput = serde_json::from_value(outcome.result.clone().unwrap()).unwrap();
+    let out: SyncLoopOutput = serde_json::from_value(result.final_output.unwrap()).unwrap();
     assert_eq!(out.stopped_by.as_deref(), Some("san_mateo.unknown_connection"));
     assert_eq!(out.total_runs, 0);
+    assert_eq!(out.total_failures, 1);
+    // A non-retryable failure gets one attempt only.
+    let failures = result
+        .history
+        .iter()
+        .filter(|e| matches!(e, WorkflowEvent::ActivityFailed { .. }))
+        .count();
+    assert_eq!(failures, 1);
 }

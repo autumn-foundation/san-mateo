@@ -15,10 +15,16 @@ use std::time::Duration;
 use autumn_harvest::context::WorkflowContext;
 use autumn_harvest::failure::WorkflowFailure;
 use autumn_harvest::prelude::workflow;
+use autumn_harvest::{HarvestError, HarvestResult};
 use san_mateo::ConnectionKey;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
-use crate::activities::{RefreshDueInput, RefreshDueOutput};
+use crate::activities::{
+    RefreshDueInput, RefreshDueOutput, RunSyncInput, SyncRunOutput, san_mateo_refresh_due_info,
+    san_mateo_run_sync_info,
+};
+use crate::failure::INVALID_INPUT_ERROR;
 
 /// The shortest time between two sync runs. A shorter frequency becomes this
 /// value. The San Mateo scheduler uses the same minimum.
@@ -29,6 +35,10 @@ pub const DEFAULT_ITERATIONS_BEFORE_CONTINUE: u32 = 100;
 
 /// The prefix of the workflow id of a sync loop.
 pub const SYNC_WORKFLOW_ID_PREFIX: &str = "san-mateo-sync:";
+
+/// The error type of a harvest error that is not an activity failure, for
+/// example a cancel.
+pub const WORKFLOW_ERROR: &str = "san_mateo.workflow";
 
 /// The input of [`san_mateo_sync_loop`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,21 +78,32 @@ impl SyncLoopInput {
         sync_name: impl Into<String>,
         frequency: Duration,
     ) -> Self {
-        let _ = (environment, key, sync_name, frequency);
-        todo!()
+        let mut input = Self {
+            environment: environment.into(),
+            provider_config_key: key.provider_config_key.clone(),
+            connection_id: key.connection_id.clone(),
+            sync_name: sync_name.into(),
+            frequency_secs: frequency.as_secs(),
+            iterations_before_continue: None,
+            sync_key: String::new(),
+            total_runs: 0,
+            total_failures: 0,
+        };
+        input.sync_key = input.sync_key_of();
+        input
     }
 
     /// Sets [`Self::iterations_before_continue`].
     #[must_use]
-    pub fn iterations_before_continue(self, iterations: u32) -> Self {
-        let _ = (self, iterations);
-        todo!()
+    pub const fn iterations_before_continue(mut self, iterations: u32) -> Self {
+        self.iterations_before_continue = Some(iterations);
+        self
     }
 
     /// Returns the connection key.
     #[must_use]
     pub fn key(&self) -> ConnectionKey {
-        todo!()
+        ConnectionKey::new(&self.provider_config_key, &self.connection_id)
     }
 
     /// Returns the sync key of this (environment, connection, sync).
@@ -91,7 +112,13 @@ impl SyncLoopInput {
     /// have the same key.
     #[must_use]
     pub fn sync_key_of(&self) -> String {
-        todo!()
+        json!([
+            self.environment,
+            self.provider_config_key,
+            self.connection_id,
+            self.sync_name
+        ])
+        .to_string()
     }
 
     /// Returns a stable workflow id for this loop.
@@ -100,7 +127,37 @@ impl SyncLoopInput {
     /// rejects a second live run. Then each (connection, sync) has one loop.
     #[must_use]
     pub fn workflow_id(&self) -> String {
-        todo!()
+        format!("{SYNC_WORKFLOW_ID_PREFIX}{}", self.sync_key_of())
+    }
+
+    fn run_input(&self) -> RunSyncInput {
+        RunSyncInput::new(&self.environment, &self.key(), &self.sync_name)
+    }
+
+    fn output(&self, stopped_by: Option<String>) -> SyncLoopOutput {
+        SyncLoopOutput {
+            total_runs: self.total_runs,
+            total_failures: self.total_failures,
+            stopped_by,
+        }
+    }
+
+    fn check(&self) -> Result<(), WorkflowFailure> {
+        for (name, value) in [
+            ("environment", &self.environment),
+            ("provider_config_key", &self.provider_config_key),
+            ("connection_id", &self.connection_id),
+            ("sync_name", &self.sync_name),
+        ] {
+            if value.is_empty() {
+                return Err(WorkflowFailure::new(
+                    INVALID_INPUT_ERROR,
+                    format!("the sync loop input has an empty {name}"),
+                )
+                .non_retryable());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -115,13 +172,34 @@ pub struct SyncLoopOutput {
     pub stopped_by: Option<String>,
 }
 
+/// Run failures that are the same on each later run.
+const STOPPING_ERRORS: &[&str] = &[
+    "san_mateo.unknown_connection",
+    "san_mateo.unknown_function",
+    "san_mateo.unknown_provider_config",
+    "san_mateo.invalid_body",
+    INVALID_INPUT_ERROR,
+];
+
 /// Returns `true` when a run failure with this error type stops the sync
 /// loop. These failures stay the same on each later run: the connection, the
 /// integration, the environment or the sync is gone.
 #[must_use]
 pub fn stops_sync_loop(error_type: &str) -> bool {
-    let _ = error_type;
-    todo!()
+    STOPPING_ERRORS.contains(&error_type)
+}
+
+/// Returns the workflow failure for a harvest error. An activity failure
+/// keeps its error type.
+fn harvest_failure(error: &HarvestError) -> WorkflowFailure {
+    let failure = WorkflowFailure::new(
+        error.activity_error_type().unwrap_or(WORKFLOW_ERROR),
+        error.to_string(),
+    );
+    match error.activity_details() {
+        Some(details) => failure.with_details(details.clone()),
+        None => failure,
+    }
 }
 
 /// Runs one sync for one connection in a durable loop.
@@ -144,8 +222,50 @@ pub async fn san_mateo_sync_loop(
     ctx: &WorkflowContext,
     input: SyncLoopInput,
 ) -> Result<SyncLoopOutput, WorkflowFailure> {
-    let _ = (ctx, input);
-    todo!()
+    input.check()?;
+    let mut state = input;
+    if state.sync_key.is_empty() {
+        state.sync_key = state.sync_key_of();
+    }
+    let every = state.frequency_secs.max(MIN_FREQUENCY_SECS);
+    let iterations = state
+        .iterations_before_continue
+        .unwrap_or(DEFAULT_ITERATIONS_BEFORE_CONTINUE)
+        .max(1);
+    let run = state.run_input();
+    for i in 0..iterations {
+        ctx.check_cancellation()
+            .map_err(|e| harvest_failure(&e))?;
+        let result: HarvestResult<SyncRunOutput> =
+            ctx.execute_activity(&san_mateo_run_sync_info(), &run).await;
+        match result {
+            Ok(_) => state.total_runs = state.total_runs.saturating_add(1),
+            Err(e) => {
+                let Some(error_type) = e.activity_error_type() else {
+                    return Err(harvest_failure(&e));
+                };
+                state.total_failures = state.total_failures.saturating_add(1);
+                if stops_sync_loop(error_type) {
+                    ctx.log_warn(&format!("the sync loop stops: {error_type}"));
+                    return Ok(state.output(Some(error_type.to_owned())));
+                }
+                ctx.log_warn(&format!("a sync run failed: {error_type}"));
+            }
+        }
+        ctx.timer(&format!("san-mateo-sync-wait-{i}"), every)
+            .await
+            .map_err(|e| harvest_failure(&e))?;
+        // Harvest asks for a new run when the history or the run time is large.
+        if ctx.should_continue_as_new() {
+            break;
+        }
+    }
+    let next = serde_json::to_value(&state)
+        .map_err(|e| WorkflowFailure::new(WORKFLOW_ERROR, e.to_string()))?;
+    ctx.continue_as_new(next)
+        .await
+        .map_err(|e| harvest_failure(&e))?;
+    Ok(state.output(None))
 }
 
 /// Runs one refresh sweep: `san_mateo_refresh_due`.
@@ -161,8 +281,9 @@ pub async fn san_mateo_refresh_sweep(
     ctx: &WorkflowContext,
     input: Option<RefreshDueInput>,
 ) -> Result<RefreshDueOutput, WorkflowFailure> {
-    let _ = (ctx, input);
-    todo!()
+    ctx.execute_activity(&san_mateo_refresh_due_info(), input.unwrap_or_default())
+        .await
+        .map_err(|e| harvest_failure(&e))
 }
 
 #[cfg(test)]

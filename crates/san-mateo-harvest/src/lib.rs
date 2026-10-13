@@ -90,14 +90,20 @@ pub use workflows::{
 /// builder or plugin.
 #[must_use]
 pub fn workflows() -> Vec<WorkflowInfo> {
-    todo!()
+    vec![san_mateo_sync_loop_info(), san_mateo_refresh_sweep_info()]
 }
 
 /// Returns all activities of this crate, for `activities(..)` on a harvest
 /// builder or plugin.
 #[must_use]
 pub fn activities() -> Vec<ActivityInfo> {
-    todo!()
+    vec![
+        san_mateo_proxy_info(),
+        san_mateo_refresh_info(),
+        san_mateo_run_sync_info(),
+        san_mateo_run_action_info(),
+        san_mateo_refresh_due_info(),
+    ]
 }
 
 #[cfg(test)]

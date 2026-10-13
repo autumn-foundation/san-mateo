@@ -15,11 +15,16 @@ use autumn_harvest::failure::ActivityFailure;
 use autumn_harvest::policy::RetryPolicy;
 use autumn_harvest::prelude::activity;
 use san_mateo::store::SyncCounts;
-use san_mateo::{ConnectionKey, ProxyRequest, ProxyResponse, RefreshReport, SanMateo, SyncRunReport};
+use san_mateo::transport::is_secret_header;
+use san_mateo::{
+    ConnectionKey, GetOptions, ProxyRequest, ProxyResponse, RefreshReport, SanMateo,
+    SyncRunReport,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use crate::proxy::san_mateo_from;
+use crate::failure::{SYNC_FAILED_ERROR, failure_for_error, invalid_input};
+use crate::proxy::{proxy_with, san_mateo_from};
 
 /// The default of [`RefreshDueInput::within_secs`]: 30 minutes.
 pub const DEFAULT_REFRESH_WITHIN_SECS: u64 = 30 * 60;
@@ -64,42 +69,51 @@ impl ProxyInput {
         method: &str,
         endpoint: impl Into<String>,
     ) -> Self {
-        let _ = (environment, key, method, endpoint);
-        todo!()
+        Self {
+            environment: environment.into(),
+            provider_config_key: key.provider_config_key.clone(),
+            connection_id: key.connection_id.clone(),
+            method: method.to_ascii_uppercase(),
+            endpoint: endpoint.into(),
+            headers: BTreeMap::new(),
+            body: None,
+            query: BTreeMap::new(),
+            forward_idempotency_key: false,
+        }
     }
 
     /// Adds a header.
     #[must_use]
-    pub fn header(self, name: &str, value: impl Into<String>) -> Self {
-        let _ = (name, value);
-        todo!()
+    pub fn header(mut self, name: &str, value: impl Into<String>) -> Self {
+        self.headers.insert(name.to_owned(), value.into());
+        self
     }
 
     /// Sets a JSON body.
     #[must_use]
-    pub fn json(self, body: Value) -> Self {
-        let _ = body;
-        todo!()
+    pub fn json(mut self, body: Value) -> Self {
+        self.body = Some(body);
+        self
     }
 
     /// Adds a query parameter.
     #[must_use]
-    pub fn query(self, name: &str, value: impl Into<String>) -> Self {
-        let _ = (name, value);
-        todo!()
+    pub fn query(mut self, name: &str, value: impl Into<String>) -> Self {
+        self.query.insert(name.to_owned(), value.into());
+        self
     }
 
     /// Sets [`Self::forward_idempotency_key`].
     #[must_use]
-    pub fn forward_idempotency_key(self, forward: bool) -> Self {
-        let _ = (self, forward);
-        todo!()
+    pub const fn forward_idempotency_key(mut self, forward: bool) -> Self {
+        self.forward_idempotency_key = forward;
+        self
     }
 
     /// Returns the connection key.
     #[must_use]
     pub fn key(&self) -> ConnectionKey {
-        todo!()
+        ConnectionKey::new(&self.provider_config_key, &self.connection_id)
     }
 
     /// Returns the proxy request.
@@ -108,7 +122,23 @@ impl ProxyInput {
     ///
     /// A non-retryable `san_mateo.invalid_input` failure for a secret header.
     pub fn to_request(&self) -> Result<ProxyRequest, ActivityFailure> {
-        todo!()
+        let mut request = ProxyRequest::new(&self.method, &self.endpoint);
+        for (name, value) in &self.headers {
+            if is_secret_header(name) {
+                return Err(invalid_input(format!(
+                    "the header {name} is not allowed in an activity input; \
+                     San Mateo adds the credentials"
+                )));
+            }
+            request = request.header(name, value);
+        }
+        if let Some(body) = &self.body {
+            request = request.json(body);
+        }
+        for (name, value) in &self.query {
+            request = request.query(name, value);
+        }
+        Ok(request)
     }
 
     /// Sends the call with a given [`SanMateo`].
@@ -121,8 +151,17 @@ impl ProxyInput {
         san: &SanMateo,
         ctx: &ActivityContext,
     ) -> Result<ProxyOutput, ActivityFailure> {
-        let _ = (san, ctx);
-        todo!()
+        let request = self.to_request()?;
+        let response = proxy_with(
+            san,
+            ctx,
+            &self.environment,
+            &self.key(),
+            request,
+            self.forward_idempotency_key,
+        )
+        .await?;
+        Ok(ProxyOutput::from_response(&response))
     }
 }
 
@@ -142,15 +181,41 @@ impl ProxyOutput {
     /// Makes the output of a proxy reply.
     #[must_use]
     pub fn from_response(response: &ProxyResponse) -> Self {
-        let _ = response;
-        todo!()
+        // The output goes into the harvest history, so secret headers stay out.
+        let headers = response
+            .headers
+            .iter()
+            .filter(|(name, _)| !is_secret_header(name))
+            .map(|(name, value)| (name.to_ascii_lowercase(), value.clone()))
+            .collect();
+        Self {
+            status: response.status,
+            headers,
+            body: body_value(response),
+        }
     }
 
     /// Returns `true` for a 2xx status.
     #[must_use]
     pub const fn is_success(&self) -> bool {
-        todo!()
+        self.status >= 200 && self.status < 300
     }
+}
+
+/// Returns the body as JSON when the reply is JSON, else as a string.
+///
+/// A reply with no content type is JSON when it parses as JSON.
+fn body_value(response: &ProxyResponse) -> Value {
+    if response.body.is_empty() {
+        return Value::Null;
+    }
+    let json_type = response
+        .header_value("content-type")
+        .is_none_or(|t| t.to_ascii_lowercase().contains("json"));
+    if json_type && let Ok(value) = serde_json::from_slice(&response.body) {
+        return value;
+    }
+    Value::String(String::from_utf8_lossy(&response.body).into_owned())
 }
 
 /// The input of [`san_mateo_refresh`]: one connection.
@@ -168,14 +233,17 @@ impl ConnectionInput {
     /// Makes an input.
     #[must_use]
     pub fn new(environment: impl Into<String>, key: &ConnectionKey) -> Self {
-        let _ = (environment, key);
-        todo!()
+        Self {
+            environment: environment.into(),
+            provider_config_key: key.provider_config_key.clone(),
+            connection_id: key.connection_id.clone(),
+        }
     }
 
     /// Returns the connection key.
     #[must_use]
     pub fn key(&self) -> ConnectionKey {
-        todo!()
+        ConnectionKey::new(&self.provider_config_key, &self.connection_id)
     }
 
     /// Refreshes the token now with a given [`SanMateo`].
@@ -184,8 +252,20 @@ impl ConnectionInput {
     ///
     /// The failure of [`crate::failure_for_error`] for a San Mateo error.
     pub async fn refresh(&self, san: &SanMateo) -> Result<RefreshOutput, ActivityFailure> {
-        let _ = san;
-        todo!()
+        let options = GetOptions {
+            refresh_if_needed: true,
+            force_refresh: true,
+        };
+        let connection = san
+            .get_connection(&self.environment, &self.key(), options)
+            .await
+            .map_err(|e| failure_for_error(&e))?;
+        Ok(RefreshOutput {
+            expires_at: connection
+                .credentials
+                .expires_at()
+                .map(|t| t.to_rfc3339()),
+        })
     }
 }
 
@@ -217,14 +297,18 @@ impl RunSyncInput {
         key: &ConnectionKey,
         sync_name: impl Into<String>,
     ) -> Self {
-        let _ = (environment, key, sync_name);
-        todo!()
+        Self {
+            environment: environment.into(),
+            provider_config_key: key.provider_config_key.clone(),
+            connection_id: key.connection_id.clone(),
+            sync_name: sync_name.into(),
+        }
     }
 
     /// Returns the connection key.
     #[must_use]
     pub fn key(&self) -> ConnectionKey {
-        todo!()
+        ConnectionKey::new(&self.provider_config_key, &self.connection_id)
     }
 
     /// Runs the sync with a given [`SanMateo`].
@@ -234,8 +318,26 @@ impl RunSyncInput {
     /// A retryable `san_mateo.sync_failed` failure when the run fails. The
     /// failure of [`crate::failure_for_error`] when the run cannot start.
     pub async fn run(&self, san: &SanMateo) -> Result<SyncRunOutput, ActivityFailure> {
-        let _ = san;
-        todo!()
+        let report = san
+            .run_sync(&self.environment, &self.key(), &self.sync_name)
+            .await
+            .map_err(|e| failure_for_error(&e))?;
+        let output = SyncRunOutput::from(report);
+        if output.success {
+            return Ok(output);
+        }
+        // A sync often fails for an upstream reason, so a later attempt can pass.
+        Err(ActivityFailure::retryable(
+            SYNC_FAILED_ERROR,
+            format!("the sync {} failed", output.sync_name),
+        )
+        .with_details(json!({
+            "sync_name": output.sync_name,
+            "provider_config_key": output.provider_config_key,
+            "connection_id": output.connection_id,
+            "counts": output.counts,
+            "error": output.error,
+        })))
     }
 }
 
@@ -259,8 +361,14 @@ pub struct SyncRunOutput {
 
 impl From<SyncRunReport> for SyncRunOutput {
     fn from(report: SyncRunReport) -> Self {
-        let _ = report;
-        todo!()
+        Self {
+            sync_name: report.sync_name,
+            provider_config_key: report.connection.provider_config_key,
+            connection_id: report.connection.connection_id,
+            success: report.success,
+            counts: report.counts,
+            error: report.error,
+        }
     }
 }
 
@@ -289,14 +397,19 @@ impl RunActionInput {
         action_name: impl Into<String>,
         input: Value,
     ) -> Self {
-        let _ = (environment, key, action_name, input);
-        todo!()
+        Self {
+            environment: environment.into(),
+            provider_config_key: key.provider_config_key.clone(),
+            connection_id: key.connection_id.clone(),
+            action_name: action_name.into(),
+            input,
+        }
     }
 
     /// Returns the connection key.
     #[must_use]
     pub fn key(&self) -> ConnectionKey {
-        todo!()
+        ConnectionKey::new(&self.provider_config_key, &self.connection_id)
     }
 
     /// Runs the action with a given [`SanMateo`] and returns its output.
@@ -305,8 +418,14 @@ impl RunActionInput {
     ///
     /// The failure of [`crate::failure_for_error`] for a San Mateo error.
     pub async fn run(&self, san: &SanMateo) -> Result<Value, ActivityFailure> {
-        let _ = san;
-        todo!()
+        san.run_action(
+            &self.environment,
+            &self.key(),
+            &self.action_name,
+            self.input.clone(),
+        )
+        .await
+        .map_err(|e| failure_for_error(&e))
     }
 }
 
@@ -346,8 +465,10 @@ impl RefreshDueInput {
     ///
     /// The failure of [`crate::failure_for_error`] for a San Mateo error.
     pub async fn run(&self, san: &SanMateo) -> Result<RefreshDueOutput, ActivityFailure> {
-        let _ = san;
-        todo!()
+        san.refresh_due(Duration::from_secs(self.within_secs), self.limit)
+            .await
+            .map(RefreshDueOutput::from)
+            .map_err(|e| failure_for_error(&e))
     }
 }
 
@@ -364,8 +485,11 @@ pub struct RefreshDueOutput {
 
 impl From<RefreshReport> for RefreshDueOutput {
     fn from(report: RefreshReport) -> Self {
-        let _ = report;
-        todo!()
+        Self {
+            refreshed: report.refreshed,
+            failed: report.failed,
+            skipped: report.skipped,
+        }
     }
 }
 
@@ -385,8 +509,7 @@ pub async fn san_mateo_proxy(
     ctx: &ActivityContext,
     input: ProxyInput,
 ) -> Result<ProxyOutput, ActivityFailure> {
-    let _ = (ctx, input, san_mateo_from);
-    todo!()
+    input.send(san_mateo_from(ctx)?, ctx).await
 }
 
 /// Refreshes the token of one connection now.
@@ -403,8 +526,7 @@ pub async fn san_mateo_refresh(
     ctx: &ActivityContext,
     input: ConnectionInput,
 ) -> Result<RefreshOutput, ActivityFailure> {
-    let _ = (ctx, input);
-    todo!()
+    input.refresh(san_mateo_from(ctx)?).await
 }
 
 /// Runs one registered sync for one connection.
@@ -421,8 +543,7 @@ pub async fn san_mateo_run_sync(
     ctx: &ActivityContext,
     input: RunSyncInput,
 ) -> Result<SyncRunOutput, ActivityFailure> {
-    let _ = (ctx, input);
-    todo!()
+    input.run(san_mateo_from(ctx)?).await
 }
 
 /// Runs one registered action for one connection.
@@ -439,8 +560,7 @@ pub async fn san_mateo_run_action(
     ctx: &ActivityContext,
     input: RunActionInput,
 ) -> Result<Value, ActivityFailure> {
-    let _ = (ctx, input);
-    todo!()
+    input.run(san_mateo_from(ctx)?).await
 }
 
 /// Refreshes the tokens that expire soon, in all environments.
@@ -457,8 +577,7 @@ pub async fn san_mateo_refresh_due(
     ctx: &ActivityContext,
     input: RefreshDueInput,
 ) -> Result<RefreshDueOutput, ActivityFailure> {
-    let _ = (ctx, input);
-    todo!()
+    input.run(san_mateo_from(ctx)?).await
 }
 
 #[cfg(test)]
