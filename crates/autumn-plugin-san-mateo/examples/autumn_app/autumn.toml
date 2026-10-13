@@ -18,3 +18,7 @@ secret_key_env = "SAN_MATEO_DEV_SECRET_KEY"
 # CSRF on, so the API paths must be exempt.
 [security.csrf]
 exempt_paths = ["/san-mateo"]
+
+# The hosted connect page uses the autumn CSP nonce.
+[security.headers.csp_nonce]
+enabled = true

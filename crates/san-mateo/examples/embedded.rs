@@ -209,10 +209,10 @@ async fn backend(base: &str, secrets: &Secrets) -> Result<Seen, BoxError> {
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let api = |method: reqwest::Method, path: &str| {
-        client
-            .request(method, format!("{base}/san-mateo{path}"))
-            .header("authorization", format!("Bearer {}", secrets.secret_key))
+    let api = Api {
+        client: &client,
+        base,
+        secret_key: &secrets.secret_key,
     };
 
     // 1. The integration. The client secret is sealed and never comes back.
@@ -221,63 +221,35 @@ async fn backend(base: &str, secrets: &Secrets) -> Result<Seen, BoxError> {
         "provider": INTEGRATION,
         "credentials": {"type": "OAUTH2", "client_id": "acme-client", "client_secret": secrets.client_secret},
     });
-    send(
-        api(reqwest::Method::POST, "/integrations"),
-        Some(&integration),
-        200,
-    )
-    .await?;
+    api.post("/integrations", &integration, 200).await?;
 
     // 2. A connect session for one end user.
-    let session = json!({"end_user": {"id": "user-1"}});
-    let session = send(
-        api(reqwest::Method::POST, "/connect/sessions"),
-        Some(&session),
-        201,
-    )
-    .await?;
-    let token = session["data"]["token"]
-        .as_str()
-        .ok_or("no session token")?;
+    let user = json!({"end_user": {"id": "user-1"}});
+    let session = api.post("/connect/sessions", &user, 201).await?;
+    let token = session["data"]["token"].as_str().ok_or("no token")?;
 
     // 3. The OAuth start. A browser follows the 302 to the provider.
-    let start = client
-        .get(format!(
-            "{base}/san-mateo/oauth/connect/{INTEGRATION}?connect_session_token={token}"
-        ))
-        .send()
-        .await?;
+    let start =
+        format!("{base}/san-mateo/oauth/connect/{INTEGRATION}?connect_session_token={token}");
+    let start = client.get(start).send().await?;
     if start.status() != reqwest::StatusCode::FOUND {
         return Err(format!("the OAuth start gave {}", start.status()).into());
     }
-    let location = start
-        .headers()
-        .get("location")
-        .ok_or("no Location header")?;
+    let location = start.headers().get("location").ok_or("no Location")?;
     let authorize = Url::parse(location.to_str()?)?;
 
     // 4. The user agrees. The provider sends the browser to the callback.
     let state = query(&authorize, "state").unwrap_or_default();
-    let callback = client
-        .get(format!(
-            "{base}/san-mateo/oauth/callback?code=code-1&state={state}"
-        ))
-        .send()
-        .await?;
+    let callback = format!("{base}/san-mateo/oauth/callback?code=code-1&state={state}");
+    let callback = client.get(callback).send().await?;
     if !callback.status().is_success() {
         return Err(format!("the OAuth callback gave {}", callback.status()).into());
     }
 
     // 5. The new connection.
-    let list = send(
-        api(
-            reqwest::Method::GET,
-            &format!("/connections?integrationId={INTEGRATION}"),
-        ),
-        None,
-        200,
-    )
-    .await?;
+    let list = api
+        .get(&format!("/connections?integrationId={INTEGRATION}"))
+        .await?;
     let connection_id = list["connections"][0]["connection_id"]
         .as_str()
         .ok_or("no connection")?;
@@ -296,29 +268,43 @@ async fn backend(base: &str, secrets: &Secrets) -> Result<Seen, BoxError> {
     })
 }
 
-/// Sends a request with an optional JSON body and wants `status`.
-async fn send(
-    request: reqwest::RequestBuilder,
-    body: Option<&Value>,
-    status: u16,
-) -> Result<Value, BoxError> {
-    let request = match body {
-        Some(body) => request
-            .header("content-type", "application/json")
-            .body(body.to_string()),
-        None => request,
-    };
-    let reply = request.send().await?;
-    let got = reply.status().as_u16();
-    let bytes = reply.bytes().await?;
-    if got != status {
-        return Err(format!(
-            "want {status}, got {got}: {}",
-            String::from_utf8_lossy(&bytes)
-        )
-        .into());
+/// The San Mateo REST API, with the secret key of the environment.
+struct Api<'a> {
+    client: &'a reqwest::Client,
+    base: &'a str,
+    secret_key: &'a str,
+}
+
+impl Api<'_> {
+    async fn get(&self, path: &str) -> Result<Value, BoxError> {
+        self.send(self.client.get(self.url(path)), 200).await
     }
-    Ok(serde_json::from_slice(&bytes)?)
+
+    async fn post(&self, path: &str, body: &Value, status: u16) -> Result<Value, BoxError> {
+        let request = self
+            .client
+            .post(self.url(path))
+            .header("content-type", "application/json")
+            .body(body.to_string());
+        self.send(request, status).await
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}/san-mateo{path}", self.base)
+    }
+
+    /// Sends the request with the secret key and wants `status`.
+    async fn send(&self, request: reqwest::RequestBuilder, status: u16) -> Result<Value, BoxError> {
+        let auth = format!("Bearer {}", self.secret_key);
+        let reply = request.header("authorization", auth).send().await?;
+        let got = reply.status().as_u16();
+        let bytes = reply.bytes().await?;
+        if got != status {
+            let text = String::from_utf8_lossy(&bytes);
+            return Err(format!("want {status}, got {got}: {text}").into());
+        }
+        Ok(serde_json::from_slice(&bytes)?)
+    }
 }
 
 fn query(url: &Url, name: &str) -> Option<String> {

@@ -121,7 +121,8 @@ pub(crate) mod tests {
     use super::*;
 
     /// A copy of `harvest_camel::is_retryable` (harvest-camel `route.rs`).
-    /// harvest-camel uses camel 0.55, so this crate cannot depend on it.
+    /// harvest-camel is not on crates.io, so this crate does not depend on
+    /// it. The `harvest_camel` example checks the real function.
     pub(crate) fn harvest_retryable(err: &CamelError) -> bool {
         match err {
             CamelError::ValidationError(_)

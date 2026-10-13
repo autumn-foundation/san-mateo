@@ -113,10 +113,15 @@ for profile in dev prod; do
   grep -q "autumn_app" "$work/body" || fail "GET / does not name the app"
   expect 401 -H 'accept: application/json' "$base/san-mateo/providers/acme-crm"
   expect 200 -H "$auth" "$base/san-mateo/providers/acme-crm"
+  expect 200 -H "$auth" -H 'content-type: application/json' \
+    -d '{"unique_key":"acme-crm","provider":"acme-crm"}' "$base/san-mateo/integrations"
   expect 201 -H "$auth" -H 'content-type: application/json' \
     -d '{"end_user":{"id":"u1"}}' "$base/san-mateo/connect/sessions"
   grep -qF "\"connect_link\":\"$base/san-mateo/connect?" "$work/body" \
     || fail "the connect link does not use the public URL"
+  link=$(python3 -c 'import json, sys; print(json.load(sys.stdin)["data"]["connect_link"])' < "$work/body")
+  expect 200 "$link"
+  grep -q "Acme CRM" "$work/body" || fail "the connect page does not list the integration"
   expect 404 -H 'accept: application/json' "$base/contacts/no-such-connection"
   if [ "$profile" = dev ]; then
     expect 200 "$base/actuator/health"
