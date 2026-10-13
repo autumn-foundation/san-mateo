@@ -3,6 +3,7 @@
 use std::ops::Deref;
 
 use autumn_web::reexports::axum::extract::FromRequestParts;
+use autumn_web::reexports::http::StatusCode;
 use autumn_web::reexports::http::request::Parts;
 use autumn_web::{AppState, AutumnError, AutumnResult};
 use san_mateo::SanMateo;
@@ -39,8 +40,7 @@ impl SanMateoService {
     /// The service, if the plugin started.
     #[must_use]
     pub fn from_state(state: &AppState) -> Option<Self> {
-        let _ = state;
-        todo!()
+        state.extension::<Self>().map(|s| (*s).clone())
     }
 
     /// The service.
@@ -48,8 +48,7 @@ impl SanMateoService {
     /// # Errors
     /// Returns a 503 [`AutumnError`] when the plugin did not start.
     pub fn require(state: &AppState) -> AutumnResult<Self> {
-        let _ = state;
-        todo!()
+        Self::from_state(state).ok_or_else(|| AutumnError::service_unavailable_msg(NOT_STARTED))
     }
 
     /// The core service.
@@ -80,8 +79,8 @@ impl FromRequestParts<AppState> for SanMateoService {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let _ = (parts, state);
-        todo!()
+        let _ = parts;
+        Self::require(state)
     }
 }
 
@@ -89,15 +88,21 @@ impl FromRequestParts<AppState> for SanMateoService {
 /// status. Use it with `?` in autumn handlers.
 #[must_use]
 pub fn autumn_error(err: san_mateo::Error) -> AutumnError {
-    let _ = err;
-    todo!()
+    let status = StatusCode::from_u16(err.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    match err {
+        // Internal details stay in the log, as in the core API.
+        san_mateo::Error::Store(_) | san_mateo::Error::Internal(_) => {
+            tracing::error!(code = err.code(), "san mateo call failed");
+            AutumnError::internal_server_error_msg("an internal error occurred")
+        }
+        other => AutumnError::from(other).with_status(status),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::service;
-    use autumn_web::reexports::http::StatusCode;
 
     #[test]
     fn from_state_and_require() {

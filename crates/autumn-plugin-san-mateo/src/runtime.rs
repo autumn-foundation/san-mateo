@@ -1,6 +1,6 @@
 //! The started state that routes, health and shutdown share.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -26,8 +26,11 @@ pub(crate) struct Runtime {
 
 impl std::fmt::Debug for Runtime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        todo!()
+        f.debug_struct("Runtime")
+            .field("san", &self.san)
+            .field("background", &self.background_running())
+            .field("closed", &self.is_closed())
+            .finish_non_exhaustive()
     }
 }
 
@@ -46,18 +49,31 @@ impl Runtime {
 
     /// `true` after shutdown starts.
     pub(crate) fn is_closed(&self) -> bool {
-        todo!()
+        self.closed.load(Ordering::SeqCst)
     }
 
     /// `true` while the background loops run.
     pub(crate) fn background_running(&self) -> bool {
-        todo!()
+        self.loops().is_some()
+    }
+
+    fn loops(&self) -> std::sync::MutexGuard<'_, Option<Background>> {
+        self.background
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Stops the routes and the background loops. Then waits for webhooks and
     /// syncs, up to the drain time.
     pub(crate) async fn shutdown(&self) {
-        todo!()
+        self.closed.store(true, Ordering::SeqCst);
+        let loops = self.loops().take();
+        if let Some(loops) = loops {
+            loops.stop().await;
+        }
+        if tokio::time::timeout(self.drain, self.san.flush()).await.is_err() {
+            tracing::warn!("san mateo: webhooks or syncs still run after the drain time");
+        }
     }
 }
 

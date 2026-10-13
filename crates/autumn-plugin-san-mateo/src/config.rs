@@ -11,9 +11,14 @@
 //! them. The plugin reads those env vars at startup.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::Duration;
 
-use san_mateo::{BackgroundSettings, Catalog, EnvironmentConfig, KeyRing, ProxySettings};
+use san_mateo::{
+    BackgroundSettings, Catalog, EnvironmentConfig, KeyRing, ProxySettings, Secret,
+    WebhookSettings,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::PluginError;
@@ -26,6 +31,10 @@ pub const ENV_PREFIX: &str = "AUTUMN_SAN_MATEO__";
 pub const MAX_WEBHOOK_URLS: usize = 2;
 /// The most webhook retries.
 pub const MAX_WEBHOOK_RETRIES: u32 = 10;
+/// The id of the environment in the default config.
+pub const DEFAULT_ENVIRONMENT: &str = "default";
+/// A map key in the env overlay schema that stands for any key.
+const ANY_KEY: &str = "*";
 
 /// Plugin configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,31 +137,72 @@ pub struct BackgroundConfig {
 
 impl Default for SanMateoConfig {
     fn default() -> Self {
-        todo!()
+        Self {
+            server_url: "http://localhost:3000".to_owned(),
+            connect_url: None,
+            encryption_key_id: "k1".to_owned(),
+            encryption_key_env: "SAN_MATEO_ENCRYPTION_KEY".to_owned(),
+            old_encryption_keys: BTreeMap::new(),
+            lookup_key_id: None,
+            providers_file: None,
+            environments: BTreeMap::from([(
+                DEFAULT_ENVIRONMENT.to_owned(),
+                EnvironmentSettings::default(),
+            )]),
+            proxy: ProxyConfig::default(),
+            background: BackgroundConfig::default(),
+            drain_timeout_secs: 10,
+        }
     }
 }
 
 impl Default for EnvironmentSettings {
     fn default() -> Self {
-        todo!()
+        Self {
+            secret_key_env: "SAN_MATEO_SECRET_KEY".to_owned(),
+            callback_url: None,
+            webhooks: WebhookConfig::default(),
+        }
     }
 }
 
 impl Default for WebhookConfig {
     fn default() -> Self {
-        todo!()
+        let core = WebhookSettings::default();
+        Self {
+            urls: Vec::new(),
+            signing_secret_env: None,
+            retries: core.retries,
+            initial_backoff_ms: core.initial_backoff_ms,
+            send_auth: core.send_auth,
+            send_sync: core.send_sync,
+        }
     }
 }
 
 impl Default for ProxyConfig {
     fn default() -> Self {
-        todo!()
+        let core = ProxySettings::default();
+        Self {
+            allowed_hosts: core.allowed_hosts,
+            allow_private_hosts: core.allow_private_hosts,
+            allow_plain_http: core.allow_plain_http,
+            initial_backoff_ms: core.initial_backoff_ms,
+            max_wait_ms: core.max_wait_ms,
+        }
     }
 }
 
 impl Default for BackgroundConfig {
     fn default() -> Self {
-        todo!()
+        let core = BackgroundSettings::default();
+        Self {
+            enabled: true,
+            tick_secs: core.tick.as_secs(),
+            refresh_within_secs: core.refresh_within.as_secs(),
+            refresh_batch: core.refresh_batch,
+            run_syncs: core.run_syncs,
+        }
     }
 }
 
@@ -160,15 +210,26 @@ impl ProxyConfig {
     /// The core proxy settings.
     #[must_use]
     pub fn settings(&self) -> ProxySettings {
-        todo!()
+        ProxySettings {
+            allowed_hosts: self.allowed_hosts.clone(),
+            allow_private_hosts: self.allow_private_hosts,
+            allow_plain_http: self.allow_plain_http,
+            initial_backoff_ms: self.initial_backoff_ms,
+            max_wait_ms: self.max_wait_ms,
+        }
     }
 }
 
 impl BackgroundConfig {
     /// The core background settings.
     #[must_use]
-    pub fn settings(&self) -> BackgroundSettings {
-        todo!()
+    pub const fn settings(&self) -> BackgroundSettings {
+        BackgroundSettings {
+            tick: Duration::from_secs(self.tick_secs),
+            refresh_within: Duration::from_secs(self.refresh_within_secs),
+            refresh_batch: self.refresh_batch,
+            run_syncs: self.run_syncs,
+        }
     }
 }
 
@@ -179,8 +240,48 @@ impl SanMateoConfig {
     /// Returns [`PluginError::Config`] for bad TOML, unknown keys, or failed
     /// validation.
     pub fn from_toml_str(autumn_toml: &str) -> Result<Self, PluginError> {
-        let _ = autumn_toml;
-        todo!()
+        Self::from_layers(Some(autumn_toml), None, std::iter::empty(), None)
+    }
+
+    /// Merges, in order: `[san_mateo]` in `base`, `[san_mateo]` in
+    /// `profile_file`, and env vars. A relative `providers_file` starts at
+    /// `dir` when the file is there. Then validates.
+    fn from_layers(
+        base: Option<&str>,
+        profile_file: Option<&str>,
+        env: impl IntoIterator<Item = (String, String)>,
+        dir: Option<&Path>,
+    ) -> Result<Self, PluginError> {
+        let mut table = toml::Table::new();
+        for text in [base, profile_file].into_iter().flatten() {
+            let parsed: toml::Table = toml::from_str(text)
+                .map_err(|e| PluginError::config(format!("toml: {e}")))?;
+            if let Some(toml::Value::Table(section)) = parsed.get(SECTION) {
+                merge(&mut table, section.clone());
+            }
+        }
+        let schema = schema()?;
+        for (key, value) in env {
+            let Some(path) = key.strip_prefix(ENV_PREFIX) else {
+                continue;
+            };
+            let path: Vec<String> = path.split("__").map(str::to_ascii_lowercase).collect();
+            // The error names the variable, never the value.
+            let typed = typed_env_value(&schema, &path, &value)
+                .ok_or_else(|| PluginError::config(format!("{key}: the value is not valid")))?;
+            insert_path(&mut table, &path, typed);
+        }
+        let mut cfg: Self = toml::Value::Table(table)
+            .try_into()
+            .map_err(|e| PluginError::config(e.to_string()))?;
+        if let (Some(dir), Some(file)) = (dir, cfg.providers_file.as_mut()) {
+            let candidate = dir.join(&*file);
+            if Path::new(file).is_relative() && candidate.exists() {
+                *file = candidate.to_string_lossy().into_owned();
+            }
+        }
+        cfg.validate()?;
+        Ok(cfg)
     }
 
     /// Loads config from files in `manifest_dir` (else the current
@@ -194,8 +295,23 @@ impl SanMateoConfig {
         profile_names: &[String],
         env: impl IntoIterator<Item = (String, String)>,
     ) -> Result<Self, PluginError> {
-        let _ = (manifest_dir, profile_names, env.into_iter());
-        todo!()
+        let find = |file: &str| {
+            let candidate = manifest_dir.join(file);
+            if candidate.exists() {
+                candidate
+            } else {
+                PathBuf::from(file)
+            }
+        };
+        let base = read_optional(&find("autumn.toml"))?;
+        let mut profile = None;
+        for name in profile_names {
+            if let Some(text) = read_optional(&find(&format!("autumn-{name}.toml")))? {
+                profile = Some(text);
+                break;
+            }
+        }
+        Self::from_layers(base.as_deref(), profile.as_deref(), env, Some(manifest_dir))
     }
 
     /// Loads config like autumn-web does: `$AUTUMN_MANIFEST_DIR` (else `.`),
@@ -204,8 +320,23 @@ impl SanMateoConfig {
     /// # Errors
     /// Returns [`PluginError::Config`] when loading or validation fails.
     pub fn load(profile: Option<&str>) -> Result<Self, PluginError> {
-        let _ = profile;
-        todo!()
+        use autumn_web::config::Env as _;
+        let os = autumn_web::config::OsEnv;
+        let names = profile
+            .map(|p| {
+                // Same selector order as autumn-web: env vars, then `--profile`.
+                let selector = ["AUTUMN_ENV", "AUTUMN_PROFILE"]
+                    .iter()
+                    .find_map(|k| os.var(k).ok().filter(|v| !v.trim().is_empty()))
+                    .or_else(profile_flag)
+                    .map_or_else(|| p.to_owned(), |v| v.trim().to_owned());
+                autumn_web::config::profile_override_file_lookup_names(p, &selector)
+            })
+            .unwrap_or_default();
+        let dir = os
+            .var("AUTUMN_MANIFEST_DIR")
+            .map_or_else(|_| PathBuf::from("."), PathBuf::from);
+        Self::load_from_dir(&dir, &names, process_env()?)
     }
 
     /// Checks the values.
@@ -213,13 +344,137 @@ impl SanMateoConfig {
     /// # Errors
     /// Returns [`PluginError::Config`] with the first problem found.
     pub fn validate(&self) -> Result<(), PluginError> {
-        todo!()
+        let bad = |m: String| Err(PluginError::config(m));
+        if !valid_url(&self.server_url) {
+            return bad(format!(
+                "server_url must be an https URL with no query (http only on loopback): {}",
+                self.server_url
+            ));
+        }
+        if let Some(url) = &self.connect_url
+            && !valid_url(url)
+        {
+            return bad(format!(
+                "connect_url must be an https URL with no query (http only on loopback): {url}"
+            ));
+        }
+        if !valid_id(&self.encryption_key_id, 32) {
+            return bad(format!("encryption_key_id {ID_RULE}, at most 32"));
+        }
+        if self.encryption_key_env.trim().is_empty() {
+            return bad("encryption_key_env must not be empty".to_owned());
+        }
+        for (id, env) in &self.old_encryption_keys {
+            if !valid_id(id, 32) || *id == self.encryption_key_id || env.trim().is_empty() {
+                return bad(format!(
+                    "old_encryption_keys: each key id {ID_RULE}, differs from encryption_key_id, \
+                     and names an env var ({id})"
+                ));
+            }
+        }
+        if let Some(id) = &self.lookup_key_id
+            && *id != self.encryption_key_id
+            && !self.old_encryption_keys.contains_key(id)
+        {
+            return bad(format!(
+                "lookup_key_id {id} must be encryption_key_id or a key in old_encryption_keys"
+            ));
+        }
+        if self.providers_file.as_ref().is_some_and(|f| f.trim().is_empty()) {
+            return bad("providers_file must not be empty".to_owned());
+        }
+        self.validate_environments()?;
+        if self
+            .proxy
+            .allowed_hosts
+            .iter()
+            .any(|h| h.trim().is_empty() || h.contains(['/', ':', ' ']))
+        {
+            return bad("proxy.allowed_hosts must list host names only".to_owned());
+        }
+        if self.background.tick_secs == 0 {
+            return bad("background.tick_secs must be 1 or more".to_owned());
+        }
+        if self.background.refresh_batch == 0 {
+            return bad("background.refresh_batch must be 1 or more".to_owned());
+        }
+        Ok(())
+    }
+
+    fn validate_environments(&self) -> Result<(), PluginError> {
+        let bad = |m: String| Err(PluginError::config(m));
+        if self.environments.is_empty() {
+            return bad("environments must hold one or more environments".to_owned());
+        }
+        let mut key_envs = std::collections::BTreeSet::new();
+        for (id, env) in &self.environments {
+            if !valid_id(id, 64) {
+                return bad(format!("environments: the id {id:?} {ID_RULE}, at most 64"));
+            }
+            if env.secret_key_env.trim().is_empty() {
+                return bad(format!("environments.{id}.secret_key_env must not be empty"));
+            }
+            if !key_envs.insert(env.secret_key_env.as_str()) {
+                return bad(format!(
+                    "environments.{id}.secret_key_env: each environment needs its own env var, \
+                     not {}",
+                    env.secret_key_env
+                ));
+            }
+            if let Some(url) = &env.callback_url
+                && !valid_url(url)
+            {
+                return bad(format!(
+                    "environments.{id}.callback_url must be an https URL (http only on loopback)"
+                ));
+            }
+            let hooks = &env.webhooks;
+            if hooks.urls.len() > MAX_WEBHOOK_URLS
+                || !hooks.urls.iter().all(|u| valid_url_with(u, true))
+            {
+                return bad(format!(
+                    "environments.{id}.webhooks.urls must hold at most {MAX_WEBHOOK_URLS} https \
+                     URLs (http only on loopback)"
+                ));
+            }
+            match &hooks.signing_secret_env {
+                Some(name) if name.trim().is_empty() => {
+                    return bad(format!(
+                        "environments.{id}.webhooks.signing_secret_env must not be empty"
+                    ));
+                }
+                None if !hooks.urls.is_empty() => {
+                    return bad(format!(
+                        "environments.{id}.webhooks.signing_secret_env is required with urls, \
+                         so that the product can check each webhook"
+                    ));
+                }
+                _ => {}
+            }
+            if hooks.retries > MAX_WEBHOOK_RETRIES {
+                return bad(format!(
+                    "environments.{id}.webhooks.retries must be 0 to {MAX_WEBHOOK_RETRIES}"
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Builds the key ring from the env vars that the config names.
     pub(crate) fn key_ring(&self, secrets: &Secrets) -> Result<KeyRing, PluginError> {
-        let _ = secrets;
-        todo!()
+        let active = secrets.require(&self.encryption_key_env, "encryption key")?;
+        let mut ring = KeyRing::from_base64(&self.encryption_key_id, &active)
+            .map_err(|_| bad_key(&self.encryption_key_env))?;
+        for (id, env) in &self.old_encryption_keys {
+            let old = secrets.require(env, &format!("old encryption key {id}"))?;
+            ring = ring.with_base64_key(id, &old).map_err(|_| bad_key(env))?;
+        }
+        if let Some(id) = &self.lookup_key_id {
+            ring = ring
+                .lookup_with(id)
+                .map_err(|e| PluginError::config(format!("lookup_key_id: {e}")))?;
+        }
+        Ok(ring)
     }
 
     /// Builds the core environments from the env vars that the config names.
@@ -227,16 +482,103 @@ impl SanMateoConfig {
         &self,
         secrets: &Secrets,
     ) -> Result<Vec<EnvironmentConfig>, PluginError> {
-        let _ = secrets;
-        todo!()
+        self.environments
+            .iter()
+            .map(|(id, settings)| {
+                let key = secrets.require(
+                    &settings.secret_key_env,
+                    &format!("secret key for environment {id}"),
+                )?;
+                let hooks = &settings.webhooks;
+                let signing_secret = hooks
+                    .signing_secret_env
+                    .as_deref()
+                    .map(|name| {
+                        secrets.require(name, &format!("webhook signing secret for environment {id}"))
+                    })
+                    .transpose()?
+                    .map(Secret::new);
+                let mut env = EnvironmentConfig::new(id.clone(), key);
+                env.callback_url.clone_from(&settings.callback_url);
+                env.webhooks = WebhookSettings {
+                    primary_url: hooks.urls.first().cloned(),
+                    secondary_url: hooks.urls.get(1).cloned(),
+                    signing_secret,
+                    retries: hooks.retries,
+                    initial_backoff_ms: hooks.initial_backoff_ms,
+                    send_auth: hooks.send_auth,
+                    send_sync: hooks.send_sync,
+                };
+                Ok(env)
+            })
+            .collect()
     }
 
     /// Returns `base` (else the built-in catalog) with `providers_file`
     /// merged over it.
     pub(crate) fn catalog(&self, base: Option<Catalog>) -> Result<Catalog, PluginError> {
-        let _ = base;
-        todo!()
+        let base = match base {
+            Some(c) => c,
+            None => Catalog::builtin()?,
+        };
+        match &self.providers_file {
+            Some(file) => {
+                let extra = Catalog::from_yaml_file(file)
+                    .map_err(|e| PluginError::config(format!("providers_file: {e}")))?;
+                Ok(base.merge(extra))
+            }
+            None => Ok(base),
+        }
     }
+}
+
+/// The rule for key and environment ids, for error messages.
+const ID_RULE: &str = "must be 1 or more characters of A-Z, a-z, 0-9, _ or -";
+
+fn valid_id(id: &str, max: usize) -> bool {
+    (1..=max).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn bad_key(env: &str) -> PluginError {
+    PluginError::config(format!(
+        "the env var {env} must hold a 32-byte key in base64"
+    ))
+}
+
+/// An `https` URL with a host and no query or fragment. Plain `http` only on
+/// a loopback host, for local tests.
+fn valid_url(text: &str) -> bool {
+    valid_url_with(text, false)
+}
+
+/// Same as [`valid_url`]. With `query`, the URL can have a query.
+fn valid_url_with(text: &str, query: bool) -> bool {
+    let Ok(u) = url::Url::parse(text) else {
+        return false;
+    };
+    let loopback = match u.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => return false,
+    };
+    let scheme_ok = u.scheme() == "https" || (u.scheme() == "http" && loopback);
+    scheme_ok && (query || u.query().is_none()) && u.fragment().is_none()
+}
+
+/// The schema for env values: the defaults, with an entry for any map key.
+fn schema() -> Result<toml::Table, PluginError> {
+    let mut sample = SanMateoConfig::default();
+    sample
+        .environments
+        .insert(ANY_KEY.to_owned(), EnvironmentSettings::default());
+    sample
+        .old_encryption_keys
+        .insert(ANY_KEY.to_owned(), String::new());
+    toml::Table::try_from(sample).map_err(|e| PluginError::config(e.to_string()))
 }
 
 /// Finds secret values by env var name.
@@ -246,30 +588,138 @@ impl SanMateoConfig {
 #[derive(Clone, Default)]
 pub(crate) struct Secrets {
     overrides: BTreeMap<String, String>,
+    dotenv: OnceLock<Vec<(String, String)>>,
 }
 
 impl std::fmt::Debug for Secrets {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        todo!()
+        // Names only. Values are secrets.
+        f.debug_struct("Secrets")
+            .field("overrides", &self.overrides.keys().collect::<Vec<_>>())
+            .finish_non_exhaustive()
     }
 }
 
 impl Secrets {
     pub(crate) const fn new(overrides: BTreeMap<String, String>) -> Self {
-        Self { overrides }
+        Self {
+            overrides,
+            dotenv: OnceLock::new(),
+        }
     }
 
     /// The value of the env var `name`, if it is set and not empty.
     pub(crate) fn get(&self, name: &str) -> Option<String> {
-        let _ = name;
-        todo!()
+        let value = match self.overrides.get(name) {
+            Some(v) => Some(v.clone()),
+            None => std::env::var(name).ok().or_else(|| {
+                self.dotenv
+                    .get_or_init(|| autumn_web::dotenv::resolve_process_dotenv().unwrap_or_default())
+                    .iter()
+                    .find_map(|(k, v)| (k == name).then(|| v.clone()))
+            }),
+        };
+        value.filter(|v| !v.trim().is_empty())
     }
 
     /// The value of the env var `name`. The error names the var and `what`.
     pub(crate) fn require(&self, name: &str, what: &str) -> Result<String, PluginError> {
-        let _ = (name, what);
-        todo!()
+        self.get(name)
+            .ok_or_else(|| PluginError::config(format!("no {what}; set the env var {name}")))
+    }
+}
+
+/// Returns `.env` values, then the process environment (later wins).
+///
+/// It skips a variable whose name or value is not UTF-8.
+fn process_env() -> Result<Vec<(String, String)>, PluginError> {
+    let mut vars = autumn_web::dotenv::resolve_process_dotenv()
+        .map_err(|e| PluginError::config(format!(".env: {e}")))?;
+    vars.extend(
+        std::env::vars_os()
+            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))),
+    );
+    Ok(vars)
+}
+
+/// The value of `--profile <name>` or `--profile=<name>` in the process args.
+fn profile_flag() -> Option<String> {
+    let args: Vec<String> = std::env::args_os()
+        .filter_map(|a| a.into_string().ok())
+        .collect();
+    args.iter()
+        .enumerate()
+        .find_map(|(i, a)| {
+            a.strip_prefix("--profile=").map(str::to_owned).or_else(|| {
+                (a == "--profile")
+                    .then(|| args.get(i + 1).cloned())
+                    .flatten()
+            })
+        })
+        // Like autumn-web: an empty value selects nothing.
+        .filter(|p| !p.trim().is_empty())
+}
+
+fn read_optional(path: &Path) -> Result<Option<String>, PluginError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(PluginError::config(format!("{}: {e}", path.display()))),
+    }
+}
+
+/// Deep merge: tables merge by key; other values replace.
+fn merge(into: &mut toml::Table, from: toml::Table) {
+    for (key, value) in from {
+        match (into.get_mut(&key), value) {
+            (Some(toml::Value::Table(dst)), toml::Value::Table(src)) => merge(dst, src),
+            (_, value) => {
+                into.insert(key, value);
+            }
+        }
+    }
+}
+
+fn insert_path(table: &mut toml::Table, path: &[String], value: toml::Value) {
+    let Some((last, parents)) = path.split_last() else {
+        return;
+    };
+    let mut cur = table;
+    for key in parents {
+        let entry = cur
+            .entry(key.clone())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if !entry.is_table() {
+            *entry = toml::Value::Table(toml::Table::new());
+        }
+        let toml::Value::Table(next) = entry else {
+            return;
+        };
+        cur = next;
+    }
+    cur.insert(last.clone(), value);
+}
+
+/// Converts an env value to the type of the schema value at the same path.
+/// A list is a comma-separated string.
+fn typed_env_value(schema: &toml::Table, path: &[String], raw: &str) -> Option<toml::Value> {
+    let mut node: Option<&toml::Value> = None;
+    let mut table = Some(schema);
+    for key in path {
+        node = table.and_then(|t| t.get(key).or_else(|| t.get(ANY_KEY)));
+        table = node.and_then(toml::Value::as_table);
+    }
+    match node {
+        Some(toml::Value::Integer(_)) => raw.trim().parse().ok().map(toml::Value::Integer),
+        Some(toml::Value::Boolean(_)) => raw.trim().parse().ok().map(toml::Value::Boolean),
+        Some(toml::Value::Array(_)) => Some(toml::Value::Array(
+            raw.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| toml::Value::String(s.to_owned()))
+                .collect(),
+        )),
+        _ => Some(toml::Value::String(raw.to_owned())),
     }
 }
 

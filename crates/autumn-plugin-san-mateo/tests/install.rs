@@ -111,7 +111,7 @@ async fn connect_and_proxy_through_the_autumn_stack() {
         None,
     )
     .await;
-    r.assert_status(200);
+    r.assert_status(204);
     // The `auth` webhooks are signed with the secret from the named env var.
     let san = SanMateoService::require(client.state()).unwrap();
     san.flush().await;
@@ -147,9 +147,14 @@ async fn root_prefix_mounts_at_the_root() {
     let client = app(plugin(&http).prefix("/"));
     let r = api(&client, "GET", "/providers", None).await;
     r.assert_status(200);
-    // autumn owns `/health` at the root.
-    let r = client.get("/health").send().await;
-    assert_ne!(String::from_utf8_lossy(&r.body).trim(), r#"{"status":"ok"}"#);
+    // autumn owns `/health` at the root, so the plugin does not declare it.
+    client.get("/health").send().await.assert_status(200);
+    let declared = autumn_web::app()
+        .plugin(SanMateoPlugin::new().prefix("/"))
+        .plugin_route_infos()
+        .unwrap();
+    assert!(declared.iter().any(|r| r.path == "/providers"));
+    assert!(!declared.iter().any(|r| r.path == "/health"));
 }
 
 #[test]

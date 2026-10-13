@@ -1,23 +1,24 @@
 //! `SanMateoPlugin` and the started runtime.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
+use autumn_web::actuator::HealthIndicator;
 use autumn_web::app::AppBuilder;
 use autumn_web::config::AutumnConfig;
 use autumn_web::plugin::Plugin;
 use autumn_web::plugin_contract::PluginContract;
 use autumn_web::reexports::axum::Router;
-use autumn_web::{AppState, ProcessRole};
-use san_mateo::{
-    ActionFunction, Catalog, HttpTransport, Registry, SanMateo, Store, SyncFunction,
-};
+use autumn_web::{AppState, AutumnError, ProcessRole};
+use san_mateo::{ActionFunction, Catalog, HttpTransport, Registry, SanMateo, Store, SyncFunction};
 
-use crate::config::SanMateoConfig;
+use crate::config::{SECTION, SanMateoConfig, Secrets};
 use crate::error::PluginError;
-use crate::health::SanMateoHealth;
+use crate::health::{INDICATOR_NAME, SanMateoHealth};
+use crate::routes;
 use crate::runtime::{Cell, Runtime};
 use crate::service::SanMateoService;
 
@@ -34,7 +35,9 @@ pub const AUTUMN_WEB_REQUIREMENT: &str = "0.8";
 /// The contract that [`SanMateoPlugin`] declares to autumn.
 #[must_use]
 pub fn plugin_contract() -> PluginContract {
-    todo!()
+    PluginContract::new(env!("CARGO_PKG_NAME"))
+        .plugin_version(env!("CARGO_PKG_VERSION"))
+        .autumn_web(AUTUMN_WEB_REQUIREMENT)
 }
 
 /// San Mateo plugin for autumn-web.
@@ -60,8 +63,14 @@ pub struct SanMateoPlugin {
 
 impl std::fmt::Debug for SanMateoPlugin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        todo!()
+        // Env var names only. The values are secrets.
+        f.debug_struct("SanMateoPlugin")
+            .field("prefix", &self.prefix)
+            .field("service", &self.service.is_some())
+            .field("registry", &self.registry)
+            .field("background", &self.background)
+            .field("secret_envs", &self.secrets.keys().collect::<Vec<_>>())
+            .finish_non_exhaustive()
     }
 }
 
@@ -75,14 +84,26 @@ impl SanMateoPlugin {
     /// Makes the plugin. It reads `[san_mateo]` at startup.
     #[must_use]
     pub fn new() -> Self {
-        todo!()
+        Self {
+            config: None,
+            prefix: DEFAULT_PREFIX.to_owned(),
+            service: None,
+            registry: None,
+            catalog: None,
+            store: None,
+            transport: None,
+            background: None,
+            secrets: BTreeMap::new(),
+        }
     }
 
     /// Makes the plugin with this config. It reads no config files.
     #[must_use]
     pub fn with_config(config: SanMateoConfig) -> Self {
-        let _ = config;
-        todo!()
+        Self {
+            config: Some(config),
+            ..Self::new()
+        }
     }
 
     /// Sets the route prefix. Default: `/san-mateo`. `"/"` mounts at the root.
@@ -90,86 +111,86 @@ impl SanMateoPlugin {
     /// autumn mounts routes before it loads config. So this is a builder
     /// setting, not a config key.
     #[must_use]
-    pub fn prefix(self, path: &str) -> Self {
-        let _ = path;
-        todo!()
+    pub fn prefix(mut self, path: &str) -> Self {
+        self.prefix = normalize_prefix(path);
+        self
     }
 
     /// Uses this service. The plugin then builds no service and reads no
     /// secrets. It still reads `[san_mateo]` for the background loops.
     #[must_use]
-    pub fn service(self, san: SanMateo) -> Self {
-        let _ = san;
-        todo!()
+    pub fn service(mut self, san: SanMateo) -> Self {
+        self.service = Some(san);
+        self
     }
 
     /// Sets all syncs and actions.
     #[must_use]
-    pub fn registry(self, registry: Registry) -> Self {
-        let _ = registry;
-        todo!()
+    pub fn registry(mut self, registry: Registry) -> Self {
+        self.registry = Some(registry);
+        self
     }
 
     /// Adds a sync.
     #[must_use]
-    pub fn sync(self, function: impl SyncFunction) -> Self {
-        let _ = function;
-        todo!()
+    pub fn sync(mut self, function: impl SyncFunction) -> Self {
+        self.registry = Some(self.registry.take().unwrap_or_default().sync(function));
+        self
     }
 
     /// Adds an action.
     #[must_use]
-    pub fn action(self, function: impl ActionFunction) -> Self {
-        let _ = function;
-        todo!()
+    pub fn action(mut self, function: impl ActionFunction) -> Self {
+        self.registry = Some(self.registry.take().unwrap_or_default().action(function));
+        self
     }
 
     /// Uses this catalog, not the built-in one. A `providers_file` still
     /// merges over it.
     #[must_use]
-    pub fn catalog(self, catalog: Catalog) -> Self {
-        let _ = catalog;
-        todo!()
+    pub fn catalog(mut self, catalog: Catalog) -> Self {
+        self.catalog = Some(catalog);
+        self
     }
 
     /// Uses this store. Default: a memory store, which loses all data at
     /// restart.
     #[must_use]
-    pub fn store(self, store: Arc<dyn Store>) -> Self {
-        let _ = store;
-        todo!()
+    pub fn store(mut self, store: Arc<dyn Store>) -> Self {
+        self.store = Some(store);
+        self
     }
 
     /// Uses this transport for provider calls and webhooks. Default: the
     /// reqwest transport.
     #[must_use]
-    pub fn transport(self, transport: Arc<dyn HttpTransport>) -> Self {
-        let _ = transport;
-        todo!()
+    pub fn transport(mut self, transport: Arc<dyn HttpTransport>) -> Self {
+        self.transport = Some(transport);
+        self
     }
 
     /// Turns the background loops on or off. This replaces
     /// `[san_mateo.background] enabled`.
     #[must_use]
-    pub fn background(self, on: bool) -> Self {
-        let _ = on;
-        todo!()
+    pub const fn background(mut self, on: bool) -> Self {
+        self.background = Some(on);
+        self
     }
 
     /// Uses `value` for the env var `name`. The plugin then does not read
     /// `name` from the environment. Use it for tests, or for secrets from a
     /// vault.
     #[must_use]
-    pub fn secret_env(self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        let _ = (name.into(), value.into());
-        todo!()
+    pub fn secret_env(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.secrets.insert(name.into(), value.into());
+        self
     }
 
     /// The route prefix after normalization, for example `/san-mateo`. The
     /// root is `""`.
     #[must_use]
     pub fn route_prefix(&self) -> &str {
-        todo!()
+        &self.prefix
     }
 
     /// Starts the plugin outside an app build. Use it in tests. The app
@@ -178,8 +199,8 @@ impl SanMateoPlugin {
     /// # Errors
     /// Returns a config error, or an error from the service build.
     pub fn start(self, state: &AppState) -> Result<SanMateoRuntime, PluginError> {
-        let _ = state;
-        todo!()
+        let role = state.role();
+        self.start_with_role(state, role)
     }
 
     /// Starts the plugin as if the process has `role`. A role that serves no
@@ -193,36 +214,206 @@ impl SanMateoPlugin {
         state: &AppState,
         role: ProcessRole,
     ) -> Result<SanMateoRuntime, PluginError> {
-        let _ = (state, role);
-        todo!()
+        let cell: Cell = Arc::new(OnceLock::new());
+        let health = Arc::new(SanMateoHealth::new(Arc::clone(&cell)));
+        let runtime = self.start_inner(state, role)?;
+        let _ = cell.set(Arc::clone(&runtime));
+        Ok(SanMateoRuntime {
+            runtime,
+            cell,
+            health,
+        })
+    }
+
+    fn start_inner(self, state: &AppState, role: ProcessRole) -> Result<Arc<Runtime>, PluginError> {
+        let config = match &self.config {
+            Some(c) => {
+                c.validate()?;
+                c.clone()
+            }
+            // autumn sets the state profile from the config; "default" means none.
+            None => SanMateoConfig::load(Some(state.profile()).filter(|p| *p != "default"))?,
+        };
+        if role.serves_http() {
+            let app_config = state.config();
+            check_security(&app_config, &self.prefix)?;
+            if let Some(warning) = csp_warning(&app_config) {
+                tracing::warn!("san mateo: {warning}");
+            }
+        }
+        let prefix = self.prefix.clone();
+        let loops_on = self.background.unwrap_or(config.background.enabled) && role.runs_workers();
+        let san = self.into_service(&config)?;
+        let background = if loops_on {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                Some(san.start_background(config.background.settings()))
+            } else {
+                tracing::warn!("san mateo: no tokio runtime, so no background loops");
+                None
+            }
+        } else {
+            None
+        };
+        state.insert_extension(SanMateoService::new(san.clone()));
+        tracing::info!(
+            prefix = %prefix,
+            environments = san.config().environments.len(),
+            providers = san.catalog().len(),
+            background = background.is_some(),
+            "san mateo started"
+        );
+        Ok(Arc::new(Runtime::new(
+            san,
+            background,
+            Duration::from_secs(config.drain_timeout_secs),
+        )))
+    }
+
+    /// The given service, or a new service from the config and the secrets.
+    fn into_service(self, config: &SanMateoConfig) -> Result<SanMateo, PluginError> {
+        if let Some(san) = self.service {
+            let unused: Vec<&str> = [
+                ("registry", self.registry.is_some()),
+                ("catalog", self.catalog.is_some()),
+                ("store", self.store.is_some()),
+                ("transport", self.transport.is_some()),
+            ]
+            .into_iter()
+            .filter_map(|(name, set)| set.then_some(name))
+            .collect();
+            if !unused.is_empty() {
+                return Err(PluginError::config(format!(
+                    "these plugin options do not apply with .service(): {}. \
+                     Set them on the SanMateo builder.",
+                    unused.join(", ")
+                )));
+            }
+            return Ok(san);
+        }
+        let secrets = Secrets::new(self.secrets);
+        let core = san_mateo::Config {
+            server_url: format!("{}{}", config.server_url.trim_end_matches('/'), self.prefix),
+            connect_url: config.connect_url.clone(),
+            environments: config.environment_configs(&secrets)?,
+            proxy: config.proxy.settings(),
+            ..san_mateo::Config::default()
+        };
+        let mut builder = SanMateo::builder()
+            .config(core)
+            .key_ring(config.key_ring(&secrets)?)
+            .catalog(config.catalog(self.catalog)?);
+        match self.store {
+            Some(store) => builder = builder.store(store),
+            None => tracing::warn!("san mateo: a memory store; all data is lost at restart"),
+        }
+        if let Some(transport) = self.transport {
+            builder = builder.transport(transport);
+        }
+        if let Some(registry) = self.registry {
+            builder = builder.registry(registry);
+        }
+        Ok(builder.build()?)
     }
 }
 
 /// `"/san-mateo/"` and `"san-mateo"` become `"/san-mateo"`. `"/"` becomes
 /// `""` (the root).
 fn normalize_prefix(path: &str) -> String {
-    let _ = path;
-    todo!()
+    let trimmed = path.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("/{trimmed}")
+    }
 }
 
 /// Same rule as autumn: an exact match, or a `/`-delimited subtree.
 fn is_exempt(path: &str, exempt: &[String]) -> bool {
-    let _ = (path, exempt);
-    todo!()
+    exempt.iter().any(|p| {
+        path == p
+            || path
+                .strip_prefix(p.as_str())
+                .is_some_and(|rest| p.ends_with('/') || rest.starts_with('/'))
+    })
+}
+
+/// The routes that change data: the CSRF and CAPTCHA layers check them.
+fn mutating_routes(cfg: &AutumnConfig, prefix: &str) -> Vec<(&'static str, String)> {
+    routes::mounted_specs(prefix.is_empty())
+        .into_iter()
+        .filter(|r| {
+            r.method == "ANY"
+                || !cfg
+                    .security
+                    .csrf
+                    .safe_methods
+                    .iter()
+                    .any(|m| m.eq_ignore_ascii_case(r.method))
+        })
+        .map(|r| (r.method, format!("{prefix}{}", r.path)))
+        .collect()
+}
+
+/// The exempt list to add. At the root, name each top path: `"/"` would
+/// exempt the whole app.
+fn exemption_fix(prefix: &str) -> String {
+    if !prefix.is_empty() {
+        return format!("[\"{prefix}\"]");
+    }
+    let tops: BTreeSet<String> = routes::mounted_specs(true)
+        .into_iter()
+        .filter(|r| r.method != "GET")
+        .filter_map(|r| r.path.split('/').nth(1).map(|top| format!("\"/{top}\"")))
+        .collect();
+    format!("[{}]", tops.into_iter().collect::<Vec<_>>().join(", "))
 }
 
 /// Fails when CSRF or CAPTCHA would block a San Mateo route. A plugin cannot
 /// add an exemption, so the error gives the config fix.
 fn check_security(cfg: &AutumnConfig, prefix: &str) -> Result<(), PluginError> {
-    let _ = (cfg, prefix);
-    todo!()
+    let webhook_paths = cfg.security.webhooks.endpoints.iter().map(|e| e.path.clone());
+    let mutating = mutating_routes(cfg, prefix);
+    if cfg.security.csrf.enabled {
+        let mut exempt = cfg.security.csrf.exempt_paths.clone();
+        exempt.extend(webhook_paths.clone());
+        if let Some((method, path)) = mutating.iter().find(|(_, p)| !is_exempt(p, &exempt)) {
+            return Err(PluginError::config(format!(
+                "CSRF protection blocks {method} {path}. San Mateo clients send a secret key \
+                 or a connect session token, not a CSRF cookie. Add {} to [security.csrf] \
+                 exempt_paths. San Mateo checks its own tokens on these routes.",
+                exemption_fix(prefix)
+            )));
+        }
+    }
+    // autumn checks CAPTCHA only on form bodies, and not with `dev_bypass`.
+    let bot = &cfg.bot_protection;
+    if bot.enabled && !bot.dev_bypass {
+        let mut exempt = cfg.security.captcha_exempt_paths.clone();
+        exempt.extend(webhook_paths);
+        if let Some((method, path)) = mutating.iter().find(|(_, p)| !is_exempt(p, &exempt)) {
+            return Err(PluginError::config(format!(
+                "Bot protection blocks {method} {path} for form bodies, for example a proxy \
+                 call. San Mateo clients send no CAPTCHA token. Add {} to [security] \
+                 captcha_exempt_paths.",
+                exemption_fix(prefix)
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// A warning when the autumn CSP blocks the script of the hosted connect
 /// page.
 fn csp_warning(cfg: &AutumnConfig) -> Option<&'static str> {
-    let _ = cfg;
-    todo!()
+    let headers = &cfg.security.headers;
+    let nonce_in_policy = headers.csp_nonce.enabled
+        && headers.content_security_policy
+            == autumn_web::security::default_content_security_policy();
+    (!nonce_in_policy).then_some(
+        "the autumn Content-Security-Policy blocks the script of the hosted connect page. \
+         Set [security.headers.csp_nonce] enabled = true and keep the default \
+         content_security_policy, or use your own connect page.",
+    )
 }
 
 /// A started plugin.
@@ -234,8 +425,9 @@ pub struct SanMateoRuntime {
 
 impl std::fmt::Debug for SanMateoRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        todo!()
+        f.debug_struct("SanMateoRuntime")
+            .field("runtime", &self.runtime)
+            .finish_non_exhaustive()
     }
 }
 
@@ -243,55 +435,109 @@ impl SanMateoRuntime {
     /// The service.
     #[must_use]
     pub fn service(&self) -> SanMateoService {
-        todo!()
+        SanMateoService::new(self.runtime.san.clone())
     }
 
     /// The routes, relative to the prefix. Use it in tests, or to mount the
     /// routes yourself.
     #[must_use]
     pub fn router(&self) -> Router {
-        todo!()
+        routes::mounted_router(&self.cell, false)
     }
 
     /// The health indicator.
     #[must_use]
     pub fn health(&self) -> Arc<SanMateoHealth> {
-        todo!()
+        Arc::clone(&self.health)
     }
 
     /// `true` while the background loops run.
     #[must_use]
     pub fn background_running(&self) -> bool {
-        todo!()
+        self.runtime.background_running()
     }
 
     /// Stops the routes and the background loops. Then waits for webhooks
     /// and syncs, up to `drain_timeout_secs`. After this, the routes reply
     /// 503.
     pub async fn shutdown(&self) {
-        todo!()
+        self.runtime.shutdown().await;
     }
 }
 
 impl Plugin for SanMateoPlugin {
     fn name(&self) -> Cow<'static, str> {
-        todo!()
+        Cow::Borrowed(PLUGIN_NAME)
     }
 
     fn contract(&self) -> Option<PluginContract> {
-        todo!()
+        Some(plugin_contract())
     }
 
     fn build(self, app: AppBuilder) -> AppBuilder {
-        let _ = app;
-        todo!()
+        let prefix = self.prefix.clone();
+        let cell: Cell = Arc::new(OnceLock::new());
+        let health = Arc::new(SanMateoHealth::new(Arc::clone(&cell)));
+        let failure: Arc<Mutex<Option<PluginError>>> = Arc::default();
+        let router = routes::mounted_router(&cell, prefix.is_empty());
+        let app = app
+            .config_section(SECTION)
+            .health_indicator(
+                INDICATOR_NAME,
+                Arc::clone(&health) as Arc<dyn HealthIndicator>,
+            )
+            .declare_plugin_routes(routes::route_infos(&prefix));
+        // axum rejects a nest at the root, so the root uses a merge.
+        let app = if prefix.is_empty() {
+            app.merge(router)
+        } else {
+            app.nest(&prefix, router)
+        };
+        let (init_cell, init_failure) = (Arc::clone(&cell), Arc::clone(&failure));
+        let (check_cell, stop_cell) = (Arc::clone(&cell), Arc::clone(&cell));
+        // Start before job workers, so a `#[job]` can use `SanMateoService`.
+        app.state_initializer(move |state| match self.start_inner(state, state.role()) {
+            Ok(rt) => {
+                let _ = init_cell.set(rt);
+            }
+            Err(e) => {
+                // Also log: some autumn modes run no startup hook.
+                tracing::error!(error = %e, "san mateo plugin did not start");
+                health.mark_failed();
+                *init_failure
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(e);
+            }
+        })
+        // An initializer cannot fail the boot. This hook reports its error.
+        .on_startup(move |_state| {
+            let failed = failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            let started = check_cell.get().is_some();
+            async move {
+                match failed {
+                    Some(e) => Err(AutumnError::internal_server_error(e)),
+                    None if !started => Err(AutumnError::internal_server_error(
+                        PluginError::config("the san_mateo plugin did not start"),
+                    )),
+                    None => Ok(()),
+                }
+            }
+        })
+        .on_shutdown(move || shutdown_hook(&stop_cell))
     }
 }
 
 /// The autumn shutdown hook: stop the started runtime, if any.
 fn shutdown_hook(cell: &Cell) -> impl Future<Output = ()> + Send + use<> {
-    let _ = cell;
-    async {}
+    let runtime = cell.get().cloned();
+    async move {
+        if let Some(runtime) = runtime {
+            runtime.shutdown().await;
+        }
+    }
 }
 
 #[cfg(test)]

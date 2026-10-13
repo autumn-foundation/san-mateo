@@ -3,13 +3,21 @@
 //! autumn mounts routes before the service exists. So each declared path
 //! forwards to a cell that the startup sets.
 
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
 use autumn_web::reexports::axum::Router;
-use autumn_web::reexports::axum::body::Body;
+use autumn_web::reexports::axum::body::{Body, to_bytes};
 use autumn_web::reexports::axum::response::Response;
-use autumn_web::reexports::http::Request;
-use autumn_web::route_listing::RouteInfo;
+use autumn_web::reexports::axum::routing::any;
+use autumn_web::reexports::http::{HeaderValue, Request, StatusCode, header};
+use autumn_web::route_listing::{RouteClassification, RouteInfo};
+use autumn_web::security::CspNonce;
+use san_mateo::api::{ROUTES, RouteSpec};
+use tower::ServiceExt as _;
 
 use crate::runtime::Cell;
+use crate::service::NOT_STARTED;
 
 /// The largest HTML page that the nonce bridge reads.
 pub(crate) const MAX_PAGE_BYTES: usize = 1024 * 1024;
@@ -17,11 +25,16 @@ pub(crate) const MAX_PAGE_BYTES: usize = 1024 * 1024;
 /// The route label for routes that need the API secret key.
 pub(crate) const SECRET_KEY_LABEL: &str = "san_mateo:secret_key";
 
+/// The module name in the route listing.
+const MODULE: &str = "san_mateo::api";
+
 /// The core routes that the plugin mounts. At the root, autumn owns
 /// `/health`, so the plugin leaves out the core `/health`.
-pub(crate) fn mounted_specs(root: bool) -> Vec<&'static san_mateo::api::RouteSpec> {
-    let _ = root;
-    todo!()
+pub(crate) fn mounted_specs(root: bool) -> Vec<&'static RouteSpec> {
+    ROUTES
+        .iter()
+        .filter(|r| !(root && r.path == "/health"))
+        .collect()
 }
 
 /// The router to nest under the prefix. Each path forwards to the core API.
@@ -29,32 +42,104 @@ pub(crate) fn mounted_router<S>(cell: &Cell, root: bool) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    let _ = (cell, root);
-    todo!()
+    // One route for each path. The core router then matches the method.
+    let paths: BTreeSet<&'static str> = mounted_specs(root).iter().map(|r| r.path).collect();
+    paths.into_iter().fold(Router::new(), |router, path| {
+        let cell = Arc::clone(cell);
+        router.route(
+            path,
+            any(move |req: Request<Body>| {
+                let cell = Arc::clone(&cell);
+                async move { forward(&cell, req).await }
+            }),
+        )
+    })
 }
 
 /// The routes for `autumn routes` and the routes audit.
 pub(crate) fn route_infos(prefix: &str) -> Vec<RouteInfo> {
-    let _ = prefix;
-    todo!()
+    mounted_specs(prefix.is_empty())
+        .into_iter()
+        .map(|spec| {
+            // San Mateo checks its own tokens: the secret key, a connect
+            // session token, or the OAuth state.
+            let (classification, middleware) = if spec.secret_key {
+                (RouteClassification::Gated, vec![SECRET_KEY_LABEL.to_owned()])
+            } else {
+                (RouteClassification::Public, Vec::new())
+            };
+            RouteInfo {
+                method: spec.method.to_owned(),
+                path: format!("{prefix}{}", spec.path),
+                handler: format!("{MODULE} {} {}", spec.method, spec.path),
+                middleware,
+                classification,
+                module: Some(MODULE.to_owned()),
+                ..RouteInfo::default()
+            }
+        })
+        .collect()
 }
 
 /// Sends one request to the core API.
 async fn forward(cell: &Cell, req: Request<Body>) -> Response {
-    let _ = (cell, req);
-    todo!()
+    let Some(rt) = cell.get() else {
+        return unavailable(NOT_STARTED);
+    };
+    if rt.is_closed() {
+        return unavailable("San Mateo is stopping");
+    }
+    let nonce = req
+        .extensions()
+        .get::<CspNonce>()
+        .map(|n| n.value().to_owned());
+    // A new request with no extensions. The outer match put path parameters
+    // in the extensions, and the core router adds its own.
+    let (parts, body) = req.into_parts();
+    let mut inner = Request::new(body);
+    *inner.method_mut() = parts.method;
+    *inner.uri_mut() = parts.uri;
+    *inner.version_mut() = parts.version;
+    *inner.headers_mut() = parts.headers;
+    let res = match rt.api.clone().oneshot(inner).await {
+        Ok(res) => res,
+        Err(never) => match never {},
+    };
+    match nonce {
+        Some(nonce) => bridge_nonce(res, &nonce).await,
+        None => res,
+    }
 }
 
 /// A 503 with the San Mateo error shape.
 pub(crate) fn unavailable(message: &str) -> Response {
-    let _ = message;
-    todo!()
+    let body = serde_json::json!({"error": {"code": "service_unavailable", "message": message}});
+    status_json(StatusCode::SERVICE_UNAVAILABLE, &body)
+}
+
+fn status_json(status: StatusCode, body: &serde_json::Value) -> Response {
+    let mut res = Response::new(Body::from(body.to_string()));
+    *res.status_mut() = status;
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    res
 }
 
 /// The nonce in a core `Content-Security-Policy` value.
 fn core_nonce(csp: &str) -> Option<&str> {
-    let _ = csp;
-    todo!()
+    let rest = csp.split("'nonce-").nth(1)?;
+    let nonce = rest.split('\'').next().filter(|n| *n != rest)?;
+    (!nonce.is_empty()).then_some(nonce)
+}
+
+/// `true` for a nonce that is safe in an HTML attribute and a CSP value.
+fn safe_nonce(nonce: &str) -> bool {
+    !nonce.is_empty()
+        && nonce
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'+' | b'/' | b'='))
 }
 
 /// Puts the autumn CSP nonce in a core HTML page.
@@ -63,8 +148,41 @@ fn core_nonce(csp: &str) -> Option<&str> {
 /// With `[security.headers.csp_nonce]`, the autumn policy allows scripts
 /// with the autumn nonce only. So the page must use that nonce.
 async fn bridge_nonce(res: Response, nonce: &str) -> Response {
-    let _ = (res, nonce);
-    todo!()
+    let html = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/html"));
+    let core = res
+        .headers()
+        .get(header::CONTENT_SECURITY_POLICY)
+        .and_then(|v| v.to_str().ok())
+        .and_then(core_nonce)
+        .map(str::to_owned);
+    let (Some(core), true, true) = (core, html, safe_nonce(nonce)) else {
+        return res;
+    };
+    let (mut parts, body) = res.into_parts();
+    let Ok(bytes) = to_bytes(body, MAX_PAGE_BYTES).await else {
+        tracing::warn!("san mateo: an HTML page is larger than the nonce bridge limit");
+        let body = serde_json::json!({"error": {"code": "page_too_large", "message": "the page is too large"}});
+        return status_json(StatusCode::BAD_GATEWAY, &body);
+    };
+    let text = String::from_utf8_lossy(&bytes).replace(
+        &format!("nonce=\"{core}\""),
+        &format!("nonce=\"{nonce}\""),
+    );
+    let csp = parts
+        .headers
+        .get(header::CONTENT_SECURITY_POLICY)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.replace(&format!("'nonce-{core}'"), &format!("'nonce-{nonce}'")))
+        .and_then(|v| HeaderValue::from_str(&v).ok());
+    if let Some(csp) = csp {
+        parts.headers.insert(header::CONTENT_SECURITY_POLICY, csp);
+    }
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(text))
 }
 
 #[cfg(test)]
@@ -75,7 +193,6 @@ mod tests {
     use autumn_web::reexports::axum::body::to_bytes;
     use autumn_web::reexports::http::{HeaderValue, StatusCode, header};
     use autumn_web::route_listing::RouteClassification;
-    use tower::ServiceExt as _;
 
     use super::*;
     use crate::runtime::Runtime;

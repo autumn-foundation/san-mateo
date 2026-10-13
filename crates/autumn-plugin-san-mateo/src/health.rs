@@ -2,9 +2,11 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::AtomicBool;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use autumn_web::actuator::{HealthCheckOutput, HealthIndicator};
+use serde_json::json;
 
 use crate::runtime::Cell;
 
@@ -24,8 +26,10 @@ pub struct SanMateoHealth {
 
 impl std::fmt::Debug for SanMateoHealth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        todo!()
+        f.debug_struct("SanMateoHealth")
+            .field("started", &self.cell.get().is_some())
+            .field("failed", &self.failed.load(Ordering::SeqCst))
+            .finish()
     }
 }
 
@@ -39,19 +43,36 @@ impl SanMateoHealth {
 
     /// Records that the start failed.
     pub(crate) fn mark_failed(&self) {
-        todo!()
+        self.failed.store(true, Ordering::SeqCst);
     }
 
     /// The current result.
     #[must_use]
     pub fn status(&self) -> HealthCheckOutput {
-        todo!()
+        let down = |reason: &str| {
+            HealthCheckOutput::down()
+                .with_details(HashMap::from([("reason".to_owned(), json!(reason))]))
+        };
+        match self.cell.get() {
+            Some(rt) if rt.is_closed() => down("stopped"),
+            Some(rt) => HealthCheckOutput::up().with_details(HashMap::from([
+                (
+                    "environments".to_owned(),
+                    json!(rt.san.config().environments.len()),
+                ),
+                ("providers".to_owned(), json!(rt.san.catalog().len())),
+                ("background".to_owned(), json!(rt.background_running())),
+            ])),
+            None if self.failed.load(Ordering::SeqCst) => down("start failed"),
+            None => down("not started"),
+        }
     }
 }
 
 impl HealthIndicator for SanMateoHealth {
     fn check(&self) -> Pin<Box<dyn Future<Output = HealthCheckOutput> + Send + '_>> {
-        todo!()
+        let out = self.status();
+        Box::pin(async move { out })
     }
 }
 
