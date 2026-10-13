@@ -76,7 +76,7 @@ Selected scope: items 1 to 11.
 | Send signed webhooks to an internal host. | A webhook override must use HTTPS and a public host. |
 | Change `redirect_uri`, `state` or `scope` from the browser. | Reject reserved OAuth parameters from the end user. Only session defaults can set them. |
 | Leak the token on an HTTP redirect. | The transport never follows redirects. |
-| Two refreshes at the same time. One rotated refresh token is lost. | Single flight in the process. A store lease across processes. Version check (CAS) on write. |
+| Two refreshes at the same time. One rotated refresh token is lost. | Single flight in the process. A store lease across processes (120 s; a token call stops before the lease ends). Version check (CAS) on write. The write keeps the result only when the stored credentials did not change. The refresh runs in a tracked task, so a caller that goes away does not lose the new tokens. |
 | Lose the refresh token when the provider omits it. | Keep the old refresh token. |
 | Refresh in a loop against a broken provider. | 30 s cooldown after a failure. Exhausted after 4 days with failures. |
 | Do a `POST` two times after a 5xx. | Retry 5xx and network errors only for idempotent methods. A caller can opt in with `Retry-On`. |
@@ -178,11 +178,12 @@ flowchart LR
 ### 6.4 Data flow: refresh
 
 1. A caller asks for a connection.
-2. `policy::token_expired(now, expires_at, buffer)` decides.
-3. `policy::refresh_gate` blocks a refresh in cooldown or after exhaustion (unless forced).
-4. Single flight: one refresh for each connection key in the process.
+2. `policy::token_expired(now, expires_at, buffer)` decides. A token in the first half of its life since the last refresh waits.
+3. `policy::refresh_gate` blocks a refresh in cooldown or after exhaustion (unless forced by the API). A 401 from the proxy does not force.
+4. Single flight: one refresh for each connection key in the process. A forced refresh uses the result of a refresh that started after the call.
 5. The store lease blocks other processes. After the lease, read the row again. If it is fresh, use it.
-6. Write with a version check.
+6. Write with a version check, and only when the stored credentials are the credentials that the refresh started from.
+7. When an automatic refresh fails, a token that is still valid comes back. The failure is stored.
 
 ### 6.5 Data flow: proxy
 
@@ -191,7 +192,7 @@ flowchart LR
 3. Add provider headers and query (interpolated), auth headers, and caller `San-Mateo-Proxy-*` / `Nango-Proxy-*` headers.
 4. Send with no redirect.
 5. `policy::decide` gives done, retry with a wait, or give up.
-6. On a 401 for OAuth2, refresh one time and send again.
+6. On a 401 for OAuth2, refresh one time (with the cooldown and the exhaustion gate) and send again.
 7. Return status, safe headers and body.
 
 ## 7. Delivery semantics

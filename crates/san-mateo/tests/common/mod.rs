@@ -13,8 +13,8 @@ use san_mateo::transport::HttpResponse;
 use san_mateo::webhook::WebhookSettings;
 use san_mateo::{
     Catalog, ConnectOptions, ConnectSessionInput, Connection, ConnectionKey, Credentials, EndUser,
-    EnvironmentConfig, ImportConnection, KeyRing, MemoryStore, MemoryTransport, NewIntegration,
-    ProxySettings, Registry, SanMateo, Secret,
+    EnvironmentConfig, HttpTransport, ImportConnection, KeyRing, MemoryStore, MemoryTransport,
+    NewIntegration, ProxySettings, Registry, SanMateo, SanMateoBuilder, Secret, Store,
 };
 use serde_json::{Map, Value, json};
 
@@ -130,27 +130,36 @@ pub fn start() -> chrono::DateTime<Utc> {
     Utc.timestamp_opt(1_700_000_000, 0).unwrap()
 }
 
-pub fn harness_with(registry: Registry) -> Harness {
-    harness_with_catalog(registry, CATALOG)
+/// Returns a builder with the test settings, on these parts. Use it to make
+/// a second process that shares the store.
+pub fn builder(
+    store: Arc<dyn Store>,
+    transport: Arc<dyn HttpTransport>,
+    clock: Arc<ManualClock>,
+    registry: Registry,
+) -> SanMateoBuilder {
+    builder_with_catalog(store, transport, clock, registry, CATALOG)
 }
 
-/// A harness with the catalog `yaml`.
-pub fn harness_with_catalog(registry: Registry, yaml: &str) -> Harness {
-    let http = MemoryTransport::new();
-    http.reply("POST", HOOK, HttpResponse::new(200, ""));
-    let clock = Arc::new(ManualClock::new(start()));
-    let store = Arc::new(MemoryStore::new());
+/// Same as [`builder`], with the catalog `yaml`.
+pub fn builder_with_catalog(
+    store: Arc<dyn Store>,
+    transport: Arc<dyn HttpTransport>,
+    clock: Arc<ManualClock>,
+    registry: Registry,
+    yaml: &str,
+) -> SanMateoBuilder {
     let mut dev = EnvironmentConfig::new("dev", SECRET);
     dev.webhooks = webhooks();
-    let san = SanMateo::builder()
+    SanMateo::builder()
         .server_url(SERVER)
         .environment(dev)
         .environment(EnvironmentConfig::new("prod", PROD_SECRET))
         .catalog(Catalog::from_yaml_str(yaml).unwrap())
-        .store(store.clone())
+        .store(store)
         .key_ring(keys())
-        .transport(Arc::new(http.clone()))
-        .clock(clock.clone())
+        .transport(transport)
+        .clock(clock)
         .entropy(Arc::new(SeqEntropy::default()))
         .proxy_settings(ProxySettings {
             initial_backoff_ms: 0,
@@ -158,13 +167,64 @@ pub fn harness_with_catalog(registry: Registry, yaml: &str) -> Harness {
             ..ProxySettings::default()
         })
         .registry(registry)
-        .build()
-        .unwrap();
+}
+
+/// A harness that sends through `transport(http)` and stores through
+/// `store(memory)`.
+pub fn harness_on(
+    registry: Registry,
+    transport: impl FnOnce(MemoryTransport) -> Arc<dyn HttpTransport>,
+    store: impl FnOnce(Arc<MemoryStore>) -> Arc<dyn Store>,
+) -> Harness {
+    let http = MemoryTransport::new();
+    http.reply("POST", HOOK, HttpResponse::new(200, ""));
+    let clock = Arc::new(ManualClock::new(start()));
+    let memory = Arc::new(MemoryStore::new());
+    let san = builder(
+        store(memory.clone()),
+        transport(http.clone()),
+        clock.clone(),
+        registry,
+    )
+    .build()
+    .unwrap();
     Harness {
         san,
         http,
         clock,
-        store,
+        store: memory,
+        keys: keys(),
+    }
+}
+
+pub fn harness_with(registry: Registry) -> Harness {
+    harness_on(
+        registry,
+        |http| Arc::new(http) as Arc<dyn HttpTransport>,
+        |memory| memory as Arc<dyn Store>,
+    )
+}
+
+/// A harness with the catalog `yaml`.
+pub fn harness_with_catalog(registry: Registry, yaml: &str) -> Harness {
+    let http = MemoryTransport::new();
+    http.reply("POST", HOOK, HttpResponse::new(200, ""));
+    let clock = Arc::new(ManualClock::new(start()));
+    let memory = Arc::new(MemoryStore::new());
+    let san = builder_with_catalog(
+        memory.clone(),
+        Arc::new(http.clone()),
+        clock.clone(),
+        registry,
+        yaml,
+    )
+    .build()
+    .unwrap();
+    Harness {
+        san,
+        http,
+        clock,
+        store: memory,
         keys: keys(),
     }
 }
@@ -176,6 +236,12 @@ pub fn harness() -> Harness {
 /// A harness with one integration for each test provider.
 pub async fn ready_with(registry: Registry) -> Harness {
     let h = harness_with(registry);
+    add_integrations(&h).await;
+    h
+}
+
+/// Adds one integration for each test provider.
+pub async fn add_integrations(h: &Harness) {
     for (key, provider, id, secret, scopes) in [
         (
             "crm",
@@ -206,7 +272,6 @@ pub async fn ready_with(registry: Registry) -> Harness {
             .await
             .unwrap();
     }
-    h
 }
 
 pub async fn ready() -> Harness {

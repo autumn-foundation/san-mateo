@@ -264,7 +264,7 @@ pub struct SyncStateRow {
     pub last_started_at: Option<DateTime<Utc>>,
     /// End of the last run.
     pub last_finished_at: Option<DateTime<Utc>>,
-    /// End of the last successful run.
+    /// Start of the last successful run.
     pub last_success_at: Option<DateTime<Utc>>,
     /// The error of the last failed run.
     pub last_error: Option<String>,
@@ -307,6 +307,10 @@ pub trait Store: Send + Sync + 'static {
     /// the stored row (with `version + 1`), or `None` when the version is
     /// stale or the row is gone.
     async fn update_connection(&self, row: &ConnectionRow) -> Result<Option<ConnectionRow>>;
+    /// Sets `last_fetched_at` of a connection. It does not change `version`,
+    /// so a read does not make a compare-and-set write fail. A missing row
+    /// is not an error.
+    async fn touch_connection(&self, id: Uuid, at: DateTime<Utc>) -> Result<()>;
     /// Deletes a connection, its records and its sync states.
     async fn delete_connection(
         &self,
@@ -315,10 +319,12 @@ pub trait Store: Send + Sync + 'static {
         connection_id: &str,
     ) -> Result<Option<ConnectionRow>>;
     /// Lists connections, in all environments, that are not exhausted and
-    /// expire before `before`. Sorted by expiry.
+    /// expire before `before`. Sorted by `(credentials_expires_at, id)`. With
+    /// `after`, only rows after that `(expiry, id)` come back, for paging.
     async fn connections_expiring_before(
         &self,
         before: DateTime<Utc>,
+        after: Option<(DateTime<Utc>, Uuid)>,
         limit: usize,
     ) -> Result<Vec<ConnectionRow>>;
 
@@ -354,6 +360,11 @@ pub trait Store: Send + Sync + 'static {
 
     /// Writes records. Each row is compared with the stored row. Returns the
     /// change for each external id, in input order.
+    ///
+    /// The write time is [`crate::records::next_write_time`] of `now`, so
+    /// times of one (connection, model) only go up. Batches of one
+    /// (connection, model) do not overlap. [`crate::Error::UnknownConnection`]
+    /// when the connection does not exist.
     async fn upsert_records(
         &self,
         connection: Uuid,
@@ -362,6 +373,7 @@ pub trait Store: Send + Sync + 'static {
         now: DateTime<Utc>,
     ) -> Result<Vec<(String, Change)>>;
     /// Marks records as deleted. Returns the change for each external id.
+    /// The write time and the errors are as for [`Store::upsert_records`].
     async fn delete_records(
         &self,
         connection: Uuid,
@@ -373,8 +385,14 @@ pub trait Store: Send + Sync + 'static {
     /// `query.limit + 1` rows, so the caller can tell if a next page exists.
     async fn list_records(&self, connection: Uuid, query: &RecordQuery) -> Result<Vec<RecordRow>>;
 
-    /// Writes the state of a sync.
+    /// Writes the state of a sync. It keeps the stored `paused` value: only
+    /// [`Store::set_sync_paused`] changes it. A new state takes `row.paused`.
+    /// [`crate::Error::UnknownConnection`] when the connection does not exist.
     async fn put_sync_state(&self, row: SyncStateRow) -> Result<()>;
+    /// Sets `paused` of a sync state to `row.paused`. It changes no other
+    /// field. When no state is stored, it adds `row`. The errors are as for
+    /// [`Store::put_sync_state`].
+    async fn set_sync_paused(&self, row: SyncStateRow) -> Result<()>;
     /// Reads the state of a sync.
     async fn get_sync_state(
         &self,

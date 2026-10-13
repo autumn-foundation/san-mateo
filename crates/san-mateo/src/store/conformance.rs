@@ -38,10 +38,12 @@ where
     integration_conflict(make().await).await;
     connection_upsert_and_get(make().await).await;
     connection_compare_and_set(make().await).await;
+    connection_touch_keeps_the_version(make().await).await;
     connection_list_filters(make().await).await;
     connection_delete_cascades(make().await).await;
     integration_delete_cascades(make().await).await;
     expiring_connections(make().await).await;
+    expiring_connections_page_with_a_cursor(make().await).await;
     leases(make().await).await;
     connect_sessions(make().await).await;
     oauth_sessions_are_single_use(make().await).await;
@@ -49,7 +51,10 @@ where
     record_upsert_classes(make().await).await;
     record_deletes(make().await).await;
     record_listing(make().await).await;
+    record_times_only_go_up(make().await).await;
+    writes_for_an_unknown_connection_fail(make().await).await;
     sync_states(make().await).await;
+    sync_pause_is_its_own_write(make().await).await;
     environments_are_isolated(make().await).await;
 }
 
@@ -209,6 +214,25 @@ pub async fn connection_compare_and_set(s: Arc<dyn Store>) {
     assert_eq!(s.update_connection(&gone).await.unwrap(), None);
 }
 
+pub async fn connection_touch_keeps_the_version(s: Arc<dyn Store>) {
+    let e = env();
+    let row = s
+        .upsert_connection(connection(&e, "gh", "c1"))
+        .await
+        .unwrap()
+        .row;
+    s.touch_connection(row.id, t(50)).await.unwrap();
+    let touched = s.get_connection(&e, "gh", "c1").await.unwrap().unwrap();
+    assert_eq!(touched.last_fetched_at, Some(t(50)));
+    assert_eq!(touched.version, row.version);
+    // A writer that read the row before the touch still wins.
+    let mut w = row.clone();
+    "sm1.k.w".clone_into(&mut w.credentials);
+    assert!(s.update_connection(&w).await.unwrap().is_some());
+    // A touch of a missing row is not an error.
+    s.touch_connection(Uuid::new_v4(), t(51)).await.unwrap();
+}
+
 pub async fn connection_list_filters(s: Arc<dyn Store>) {
     let e = env();
     let mut a = connection(&e, "gh", "c1");
@@ -257,6 +281,16 @@ pub async fn connection_list_filters(s: Arc<dyn Store>) {
         ids(s.list_connections(&e, &by_id).await.unwrap()),
         vec!["c2"]
     );
+}
+
+/// Adds a connection in a new environment and returns its id. Records and
+/// sync states need a connection.
+async fn new_connection(s: &Arc<dyn Store>) -> Uuid {
+    s.upsert_connection(connection(&env(), "gh", "c1"))
+        .await
+        .unwrap()
+        .row
+        .id
 }
 
 fn write(conn: Uuid, external: &str, hash: &str) -> RecordWrite {
@@ -355,7 +389,7 @@ pub async fn expiring_connections(s: Arc<dyn Store>) {
         s.upsert_connection(r).await.unwrap();
     }
     let got: Vec<String> = s
-        .connections_expiring_before(base + Duration::seconds(60), 1_000)
+        .connections_expiring_before(base + Duration::seconds(60), None, 1_000)
         .await
         .unwrap()
         .into_iter()
@@ -364,10 +398,54 @@ pub async fn expiring_connections(s: Arc<dyn Store>) {
         .collect();
     assert_eq!(got, vec!["sooner", "soon"]);
     let limited = s
-        .connections_expiring_before(base + Duration::seconds(60), 1)
+        .connections_expiring_before(base + Duration::seconds(60), None, 1)
         .await
         .unwrap();
     assert_eq!(limited.len(), 1);
+}
+
+pub async fn expiring_connections_page_with_a_cursor(s: Arc<dyn Store>) {
+    let e = env();
+    // Far-future instants, so rows of other tests do not interfere.
+    let base = Utc.timestamp_opt(4_010_000_000, 0).unwrap();
+    let mut ids = Vec::new();
+    for (i, secs) in [5, 5, 7, 9].into_iter().enumerate() {
+        let mut r = connection(&e, "gh", &format!("c{i}"));
+        r.credentials_expires_at = Some(base + Duration::seconds(secs));
+        s.upsert_connection(r).await.unwrap();
+    }
+    let before = base + Duration::seconds(60);
+    let mine = |rows: Vec<ConnectionRow>| {
+        rows.into_iter()
+            .filter(|r| r.environment == e)
+            .collect::<Vec<_>>()
+    };
+    let start = Some((base, Uuid::nil()));
+    let all = mine(
+        s.connections_expiring_before(before, start, 1_000)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(all.len(), 4);
+    for w in all.windows(2) {
+        assert!((w[0].credentials_expires_at, w[0].id) < (w[1].credentials_expires_at, w[1].id));
+    }
+    // Pages of one row reach each row once, also two rows with one expiry.
+    // Start at `base`: the rows of other tests come before it.
+    let mut after = start;
+    loop {
+        let page = s
+            .connections_expiring_before(before, after, 1)
+            .await
+            .unwrap();
+        let Some(r) = page.first() else { break };
+        assert_eq!(page.len(), 1);
+        after = Some((r.credentials_expires_at.unwrap(), r.id));
+        if r.environment == e {
+            ids.push(r.id);
+        }
+    }
+    assert_eq!(ids, all.iter().map(|r| r.id).collect::<Vec<_>>());
 }
 
 pub async fn leases(s: Arc<dyn Store>) {
@@ -485,7 +563,7 @@ pub async fn purge_expired(s: Arc<dyn Store>) {
 }
 
 pub async fn record_upsert_classes(s: Arc<dyn Store>) {
-    let conn = Uuid::new_v4();
+    let conn = new_connection(&s).await;
     let got = s
         .upsert_records(
             conn,
@@ -560,7 +638,7 @@ pub async fn record_upsert_classes(s: Arc<dyn Store>) {
 }
 
 pub async fn record_deletes(s: Arc<dyn Store>) {
-    let conn = Uuid::new_v4();
+    let conn = new_connection(&s).await;
     s.upsert_records(conn, "m", vec![write(conn, "1", "a")], t(1))
         .await
         .unwrap();
@@ -599,7 +677,7 @@ pub async fn record_deletes(s: Arc<dyn Store>) {
 }
 
 pub async fn record_listing(s: Arc<dyn Store>) {
-    let conn = Uuid::new_v4();
+    let conn = new_connection(&s).await;
     for (i, ext) in ["a", "b", "c", "d", "e"].iter().enumerate() {
         s.upsert_records(
             conn,
@@ -611,6 +689,7 @@ pub async fn record_listing(s: Arc<dyn Store>) {
         .unwrap();
     }
     // a, b at t(0); c, d at t(1); e at t(2). Then b changes at t(3), d is deleted at t(4).
+    // The second batch of a time gets 1 µs more: write times only go up.
     s.upsert_records(conn, "m", vec![write(conn, "b", "h2")], t(3))
         .await
         .unwrap();
@@ -760,15 +839,127 @@ pub async fn record_listing(s: Arc<dyn Store>) {
     assert!(other_model.is_empty());
 }
 
+pub async fn record_times_only_go_up(s: Arc<dyn Store>) {
+    let conn = new_connection(&s).await;
+    let base = RecordQuery {
+        model: "m".to_owned(),
+        limit: 100,
+        ..RecordQuery::default()
+    };
+    s.upsert_records(
+        conn,
+        "m",
+        vec![write(conn, "a", "h"), write(conn, "b", "h")],
+        t(10),
+    )
+    .await
+    .unwrap();
+    let first = s.list_records(conn, &base).await.unwrap();
+    assert_eq!(first.len(), 2);
+    let cursor = Cursor {
+        updated_at_us: first[1].updated_at.timestamp_micros(),
+        id: first[1].id,
+    };
+    // Later batches with an earlier `now`: a slow writer or a clock step back.
+    s.upsert_records(conn, "m", vec![write(conn, "c", "h")], t(5))
+        .await
+        .unwrap();
+    s.upsert_records(conn, "m", vec![write(conn, "a", "h2")], t(5))
+        .await
+        .unwrap();
+    s.delete_records(
+        conn,
+        "m",
+        vec![(crate::records::record_id(conn, "m", "b"), "b".to_owned())],
+        t(5),
+    )
+    .await
+    .unwrap();
+    // A reader with the old cursor sees each later change, in write order.
+    let next = s
+        .list_records(
+            conn,
+            &RecordQuery {
+                cursor: Some(cursor),
+                ..base.clone()
+            },
+        )
+        .await
+        .unwrap();
+    let ext: Vec<&str> = next.iter().map(|r| r.external_id.as_str()).collect();
+    assert_eq!(ext, vec!["c", "a", "b"]);
+    assert!(next[0].updated_at > first[1].updated_at);
+    for w in next.windows(2) {
+        assert!(w[0].updated_at < w[1].updated_at);
+    }
+    assert_eq!(next[0].last_action(), LastAction::Added);
+    assert_eq!(next[1].last_action(), LastAction::Updated);
+    assert_eq!(next[2].deleted_at, Some(next[2].updated_at));
+    // A later `now` is used as it is.
+    s.upsert_records(conn, "m", vec![write(conn, "d", "h")], t(100))
+        .await
+        .unwrap();
+    let d = s
+        .list_records(
+            conn,
+            &RecordQuery {
+                external_ids: vec!["d".to_owned()],
+                ..base
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(d[0].updated_at, t(100));
+}
+
+pub async fn writes_for_an_unknown_connection_fail(s: Arc<dyn Store>) {
+    let unknown = |r: crate::error::Result<()>| {
+        assert!(matches!(r, Err(Error::UnknownConnection(_))), "{r:?}");
+    };
+    let e = env();
+    let row = s
+        .upsert_connection(connection(&e, "gh", "c1"))
+        .await
+        .unwrap()
+        .row;
+    s.delete_connection(&e, "gh", "c1").await.unwrap().unwrap();
+    for conn in [Uuid::new_v4(), row.id] {
+        unknown(
+            s.upsert_records(conn, "m", vec![write(conn, "1", "h")], t(1))
+                .await
+                .map(drop),
+        );
+        unknown(
+            s.delete_records(
+                conn,
+                "m",
+                vec![(crate::records::record_id(conn, "m", "1"), "1".to_owned())],
+                t(1),
+            )
+            .await
+            .map(drop),
+        );
+        unknown(s.put_sync_state(sync_state(conn, "s")).await);
+        unknown(s.set_sync_paused(sync_state(conn, "s")).await);
+        let q = RecordQuery {
+            model: "m".to_owned(),
+            limit: 10,
+            ..RecordQuery::default()
+        };
+        assert!(s.list_records(conn, &q).await.unwrap().is_empty());
+        assert_eq!(s.get_sync_state(conn, "s").await.unwrap(), None);
+    }
+}
+
 pub async fn sync_states(s: Arc<dyn Store>) {
-    let conn = Uuid::new_v4();
+    let conn = new_connection(&s).await;
     assert_eq!(s.get_sync_state(conn, "b").await.unwrap(), None);
     s.put_sync_state(sync_state(conn, "b")).await.unwrap();
     s.put_sync_state(sync_state(conn, "a")).await.unwrap();
     let mut changed = sync_state(conn, "b");
     changed.status = SyncStatus::Error;
     changed.last_error = Some("boom".to_owned());
-    changed.paused = true;
+    changed.last_counts = SyncCounts::default();
     s.put_sync_state(changed.clone()).await.unwrap();
     assert_eq!(s.get_sync_state(conn, "b").await.unwrap(), Some(changed));
     let names: Vec<String> = s
@@ -779,6 +970,45 @@ pub async fn sync_states(s: Arc<dyn Store>) {
         .map(|r| r.sync_name)
         .collect();
     assert_eq!(names, vec!["a", "b"]);
+}
+
+pub async fn sync_pause_is_its_own_write(s: Arc<dyn Store>) {
+    let e = env();
+    let conn = s
+        .upsert_connection(connection(&e, "gh", "c1"))
+        .await
+        .unwrap()
+        .row
+        .id;
+    // With no state, a pause adds the row.
+    let mut first = sync_state(conn, "a");
+    first.paused = true;
+    s.set_sync_paused(first.clone()).await.unwrap();
+    assert_eq!(s.get_sync_state(conn, "a").await.unwrap(), Some(first));
+    // The end of a run does not undo a pause.
+    let mut run = sync_state(conn, "a");
+    run.status = SyncStatus::Error;
+    run.last_error = Some("boom".to_owned());
+    s.put_sync_state(run.clone()).await.unwrap();
+    let got = s.get_sync_state(conn, "a").await.unwrap().unwrap();
+    assert!(got.paused);
+    assert_eq!(got.status, SyncStatus::Error);
+    assert_eq!(got.last_error.as_deref(), Some("boom"));
+    // A pause change keeps all other fields.
+    let mut other = sync_state(conn, "a");
+    other.status = SyncStatus::Running;
+    other.last_error = None;
+    other.paused = false;
+    s.set_sync_paused(other).await.unwrap();
+    let got = s.get_sync_state(conn, "a").await.unwrap().unwrap();
+    assert!(!got.paused);
+    assert_eq!(got.status, SyncStatus::Error);
+    assert_eq!(got.last_error.as_deref(), Some("boom"));
+    // A new state from a run takes its own value.
+    let mut b = sync_state(conn, "b");
+    b.paused = true;
+    s.put_sync_state(b.clone()).await.unwrap();
+    assert_eq!(s.get_sync_state(conn, "b").await.unwrap(), Some(b));
 }
 
 pub async fn environments_are_isolated(s: Arc<dyn Store>) {

@@ -108,7 +108,8 @@ impl SyncContext {
         &self.environment
     }
 
-    /// Returns the end of the last successful run, if any.
+    /// Returns the start of the last successful run, if any. Read changes
+    /// since this time: changes during that run come after it.
     #[must_use]
     pub const fn last_sync_date(&self) -> Option<DateTime<Utc>> {
         self.last_success_at

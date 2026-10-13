@@ -16,7 +16,9 @@ use super::{
     RecordWrite, Store, SyncStateRow, Upserted,
 };
 use crate::error::{Error, Result};
-use crate::records::{Change, RecordQuery, RecordState, classify_delete, classify_upsert};
+use crate::records::{
+    Change, RecordQuery, RecordState, classify_delete, classify_upsert, next_write_time,
+};
 
 #[derive(Debug, Default)]
 struct Inner {
@@ -39,6 +41,24 @@ fn key_of(row: &ConnectionRow) -> (String, String, String) {
 }
 
 impl Inner {
+    /// Fails when the connection does not exist. Records and sync states
+    /// need a connection, as with a foreign key.
+    fn require_connection(&self, id: Uuid) -> Result<()> {
+        if self.connections.contains_key(&id) {
+            Ok(())
+        } else {
+            Err(Error::UnknownConnection(id.to_string()))
+        }
+    }
+
+    /// Returns the write time of a record batch. See [`next_write_time`].
+    fn write_time(&self, connection: Uuid, model: &str, now: DateTime<Utc>) -> DateTime<Utc> {
+        let lo = (connection, model.to_owned(), Uuid::nil());
+        let hi = (connection, model.to_owned(), Uuid::max());
+        let newest = self.records.range(lo..=hi).map(|(_, r)| r.updated_at).max();
+        next_write_time(now, newest)
+    }
+
     fn remove_connection(&mut self, id: Uuid) -> Option<ConnectionRow> {
         let row = self.connections.remove(&id)?;
         self.by_key.remove(&key_of(&row));
@@ -231,6 +251,13 @@ impl Store for MemoryStore {
         Ok(Some(next))
     }
 
+    async fn touch_connection(&self, id: Uuid, at: DateTime<Utc>) -> Result<()> {
+        if let Some(c) = self.lock().connections.get_mut(&id) {
+            c.last_fetched_at = Some(at);
+        }
+        Ok(())
+    }
+
     async fn delete_connection(
         &self,
         env: &str,
@@ -248,6 +275,7 @@ impl Store for MemoryStore {
     async fn connections_expiring_before(
         &self,
         before: DateTime<Utc>,
+        after: Option<(DateTime<Utc>, Uuid)>,
         limit: usize,
     ) -> Result<Vec<ConnectionRow>> {
         let g = self.lock();
@@ -255,7 +283,9 @@ impl Store for MemoryStore {
             .connections
             .values()
             .filter(|c| {
-                !c.refresh_exhausted && c.credentials_expires_at.is_some_and(|t| t < before)
+                !c.refresh_exhausted
+                    && c.credentials_expires_at
+                        .is_some_and(|t| t < before && after.is_none_or(|a| (t, c.id) > a))
             })
             .cloned()
             .collect();
@@ -348,6 +378,8 @@ impl Store for MemoryStore {
         now: DateTime<Utc>,
     ) -> Result<Vec<(String, Change)>> {
         let mut g = self.lock();
+        g.require_connection(connection)?;
+        let now = g.write_time(connection, model, now);
         let mut out = Vec::with_capacity(rows.len());
         for w in rows {
             let key = (connection, model.to_owned(), w.id);
@@ -393,6 +425,8 @@ impl Store for MemoryStore {
         now: DateTime<Utc>,
     ) -> Result<Vec<(String, Change)>> {
         let mut g = self.lock();
+        g.require_connection(connection)?;
+        let now = g.write_time(connection, model, now);
         let mut out = Vec::with_capacity(ids.len());
         for (id, external) in ids {
             let key = (connection, model.to_owned(), id);
@@ -427,10 +461,25 @@ impl Store for MemoryStore {
         Ok(rows)
     }
 
-    async fn put_sync_state(&self, row: SyncStateRow) -> Result<()> {
-        self.lock()
-            .sync_states
-            .insert((row.connection, row.sync_name.clone()), row);
+    async fn put_sync_state(&self, mut row: SyncStateRow) -> Result<()> {
+        let mut g = self.lock();
+        g.require_connection(row.connection)?;
+        let key = (row.connection, row.sync_name.clone());
+        if let Some(old) = g.sync_states.get(&key) {
+            row.paused = old.paused;
+        }
+        g.sync_states.insert(key, row);
+        Ok(())
+    }
+
+    async fn set_sync_paused(&self, row: SyncStateRow) -> Result<()> {
+        let mut g = self.lock();
+        g.require_connection(row.connection)?;
+        let paused = row.paused;
+        g.sync_states
+            .entry((row.connection, row.sync_name.clone()))
+            .and_modify(|s| s.paused = paused)
+            .or_insert(row);
         Ok(())
     }
 

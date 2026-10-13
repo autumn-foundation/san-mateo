@@ -1,17 +1,23 @@
 //! Connections and token refresh.
 //!
-//! A refresh has three guards:
+//! A refresh has four guards:
 //!
 //! 1. Single flight: one refresh lock for each connection in this process.
 //! 2. A store lease (`refresh:<env>:<integration>:<connection id>`) for other
-//!    processes.
+//!    processes. A token call stops before the lease ends.
 //! 3. A version check (compare and set) on each write.
+//! 4. A fence: the write keeps the result only when the stored credentials
+//!    are the credentials that the refresh started from.
+//!
+//! A refresh runs in a task of the service. When the caller goes away, the
+//! task still writes the new tokens.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value, json};
+use uuid::Uuid;
 
 use super::{
     Connection, ConnectionPatch, ConnectionSummary, GetOptions, RefreshReport, SanMateo, invalid,
@@ -28,6 +34,14 @@ use crate::webhook::{AuthEvent, AuthOperation, ErrorPayload, WebhookEvent};
 const CAS_TRIES: usize = 5;
 /// The time between checks while another process holds the refresh lease.
 const LEASE_POLL: Duration = Duration::from_millis(250);
+/// The largest number of tries to write the result of a refresh.
+const WRITE_TRIES: u32 = 10;
+/// The first wait after a store error in a refresh write.
+const WRITE_BACKOFF: Duration = Duration::from_millis(50);
+/// The longest wait after a store error in a refresh write.
+const WRITE_BACKOFF_MAX: Duration = Duration::from_secs(1);
+/// The largest page of the refresh sweep.
+const SWEEP_PAGE: usize = 100;
 
 /// Why a refresh starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,8 +50,36 @@ pub(crate) enum RefreshMode {
     IfExpired,
     /// The token expires before this instant (the sweep).
     Before(DateTime<Utc>),
-    /// The caller asks for a refresh now.
+    /// The provider did not accept the token (HTTP 401). The gate applies.
+    Rejected,
+    /// The caller asks for a refresh now. The gate does not apply.
     Force,
+}
+
+impl RefreshMode {
+    /// Returns `true` for a mode that also refreshes a token that does not
+    /// expire soon.
+    const fn eager(self) -> bool {
+        matches!(self, Self::Rejected | Self::Force)
+    }
+}
+
+/// The result of one try to write the result of a refresh.
+enum Write {
+    /// The row is stored.
+    Stored(Box<ConnectionRow>),
+    /// Other credentials are stored now. The result is dropped.
+    Superseded,
+    /// Another write changed the row first. Try again.
+    Lost,
+}
+
+/// Returns `true` when less than half of the token life has passed since the
+/// last refresh. Such a token is valid for at least half of its life.
+fn in_first_half(row: &ConnectionRow, exp_ms: u64, now_ms: u64) -> bool {
+    row.last_refresh_success
+        .map(crate::clock::to_ms)
+        .is_some_and(|r| exp_ms > r && now_ms < r + (exp_ms - r) / 2)
 }
 
 fn as_map(v: &Value) -> Map<String, Value> {
@@ -162,6 +204,9 @@ impl SanMateo {
 
     /// Reads a connection with fresh credentials.
     ///
+    /// When a refresh that is not forced fails, the current credentials come
+    /// back while they are valid. The failure is stored as usual.
+    ///
     /// # Errors
     ///
     /// [`Error::UnknownConnection`], [`Error::RefreshCooldown`],
@@ -181,18 +226,32 @@ impl SanMateo {
         } else {
             None
         };
-        let (row, creds) = match mode {
-            Some(m) if self.needs_refresh(&row, &creds, m)? => self.refresh(env, key, m).await?,
+        let (mut row, creds) = match mode {
+            Some(m) if self.needs_refresh(&row, &creds, m)? => {
+                match self.refresh(env, key, m).await {
+                    Ok(fresh) => fresh,
+                    Err(e)
+                        if m == RefreshMode::IfExpired
+                            && !matches!(e, Error::UnknownConnection(_))
+                            && creds.expires_at().is_some_and(|t| t > self.now()) =>
+                    {
+                        tracing::debug!(
+                            code = e.code(),
+                            "refresh failed; the token is still valid"
+                        );
+                        (row, creds)
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
             _ => (row, creds),
         };
         let now = self.now();
-        // Best effort: a lost race only skips the read time.
-        let mut touched = row.clone();
-        touched.last_fetched_at = Some(now);
-        let row = match self.inner.store.update_connection(&touched).await {
-            Ok(Some(stored)) => stored,
-            _ => touched,
-        };
+        // Best effort. The read time does not change the row version.
+        if let Err(e) = self.inner.store.touch_connection(row.id, now).await {
+            tracing::debug!(code = e.code(), "the read time was not stored");
+        }
+        row.last_fetched_at = Some(now);
         Ok(Self::to_connection(row, creds))
     }
 
@@ -210,17 +269,34 @@ impl SanMateo {
             return Ok(false);
         }
         let Some(expires_at) = creds.expires_at() else {
-            return Ok(mode == RefreshMode::Force);
+            return Ok(mode.eager());
         };
         let exp = crate::clock::to_ms(expires_at);
+        let now = self.now_ms();
         Ok(match mode {
-            RefreshMode::Force => true,
-            RefreshMode::Before(t) => exp < crate::clock::to_ms(t),
+            RefreshMode::Rejected | RefreshMode::Force => true,
+            RefreshMode::Before(t) => exp < crate::clock::to_ms(t) && !in_first_half(row, exp, now),
             RefreshMode::IfExpired => {
                 let buffer = self.provider_of(row)?.refresh_buffer_ms();
-                policy::token_expired(self.now_ms(), exp, buffer)
+                policy::token_expired(now, exp, buffer) && !in_first_half(row, exp, now)
             }
         })
+    }
+
+    /// Returns `true` when the row needs no refresh for this call. For an
+    /// eager mode, a refresh that started after the call is enough.
+    fn refresh_done(
+        &self,
+        row: &ConnectionRow,
+        creds: &Credentials,
+        mode: RefreshMode,
+        started: DateTime<Utc>,
+    ) -> Result<bool> {
+        if mode.eager() {
+            Ok(row.last_refresh_success.is_some_and(|t| t >= started))
+        } else {
+            Ok(!self.needs_refresh(row, creds, mode)?)
+        }
     }
 
     fn flight(&self, name: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -241,17 +317,34 @@ impl SanMateo {
         key: &ConnectionKey,
         mode: RefreshMode,
     ) -> Result<(ConnectionRow, Credentials)> {
+        // Take the time before the lock, so that waiters can coalesce.
+        let started = self.now();
+        let san = self.clone();
+        let (env, key) = (env.to_owned(), key.clone());
+        self.inner
+            .tasks
+            .spawn(async move { san.refresh_task(&env, &key, mode, started).await })
+            .await
+            .map_err(|_| Error::Internal("the refresh task stopped".to_owned()))?
+    }
+
+    async fn refresh_task(
+        &self,
+        env: &str,
+        key: &ConnectionKey,
+        mode: RefreshMode,
+        started: DateTime<Utc>,
+    ) -> Result<(ConnectionRow, Credentials)> {
         let name = format!(
             "refresh:{env}:{}:{}",
             key.provider_config_key, key.connection_id
         );
         let flight = self.flight(&name);
         let _local = flight.lock().await;
-        let started = self.now();
         // Another task can have refreshed while this task waited.
         let row = self.connection_row(env, key).await?;
         let creds = self.open_credentials(&row)?;
-        if mode != RefreshMode::Force && !self.needs_refresh(&row, &creds, mode)? {
+        if self.refresh_done(&row, &creds, mode, started)? {
             return Ok((row, creds));
         }
         let gate = policy::refresh_gate(
@@ -274,13 +367,19 @@ impl SanMateo {
             .try_lease(&name, &self.inner.owner, self.now(), ttl)
             .await?
         {
-            return self.wait_for_other(env, key, mode, started).await;
+            return self
+                .wait_for_other(env, key, mode, started, &row.credentials)
+                .await;
         }
-        let result = self.refresh_locked(env, key, mode).await;
-        self.inner
+        let result = self.refresh_locked(env, key, mode, started).await;
+        if let Err(e) = self
+            .inner
             .store
             .release_lease(&name, &self.inner.owner)
-            .await?;
+            .await
+        {
+            tracing::warn!(code = e.code(), "the refresh lease was not given back");
+        }
         result
     }
 
@@ -291,21 +390,34 @@ impl SanMateo {
         key: &ConnectionKey,
         mode: RefreshMode,
         started: DateTime<Utc>,
+        from: &str,
     ) -> Result<(ConnectionRow, Credentials)> {
         let deadline = tokio::time::Instant::now() + self.inner.config.refresh_lease_wait;
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(LEASE_POLL).await;
             let row = self.connection_row(env, key).await?;
             let creds = self.open_credentials(&row)?;
-            let done = match mode {
-                RefreshMode::Force => row.last_refresh_success.is_some_and(|t| t >= started),
-                m => !self.needs_refresh(&row, &creds, m)?,
-            };
-            if done {
+            if row.credentials != from || self.refresh_done(&row, &creds, mode, started)? {
                 return Ok((row, creds));
             }
         }
         Err(Error::RefreshCooldown)
+    }
+
+    /// Returns the time limit of a token call: 3/4 of the lease life.
+    fn token_call_limit(&self) -> Duration {
+        let ttl = self.inner.config.refresh_lease_ttl;
+        ttl.saturating_sub(ttl / 4)
+    }
+
+    async fn current(
+        &self,
+        env: &str,
+        key: &ConnectionKey,
+    ) -> Result<(ConnectionRow, Credentials)> {
+        let row = self.connection_row(env, key).await?;
+        let creds = self.open_credentials(&row)?;
+        Ok((row, creds))
     }
 
     async fn refresh_locked(
@@ -313,40 +425,56 @@ impl SanMateo {
         env: &str,
         key: &ConnectionKey,
         mode: RefreshMode,
+        started: DateTime<Utc>,
     ) -> Result<(ConnectionRow, Credentials)> {
         // Read again: another process can have refreshed before the lease.
-        let row = self.connection_row(env, key).await?;
-        let creds = self.open_credentials(&row)?;
-        if mode != RefreshMode::Force && !self.needs_refresh(&row, &creds, mode)? {
+        let (row, creds) = self.current(env, key).await?;
+        if self.refresh_done(&row, &creds, mode, started)? {
             return Ok((row, creds));
         }
         let provider = self.provider_of(&row)?;
-        match self.new_credentials(&row, &provider, &creds).await {
+        let reply = tokio::time::timeout(
+            self.token_call_limit(),
+            self.new_credentials(&row, &provider, &creds),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(Error::Provider {
+                code: "refresh_failed",
+                status: None,
+                message: "the token call took too long".to_owned(),
+            })
+        });
+        match reply {
             Ok(fresh) => {
                 let now = self.now();
                 let sealed = self.inner.keys.seal_json(
                     &fresh,
                     &Self::connection_aad(env, &key.provider_config_key, &key.connection_id),
                 )?;
+                let expires_at = fresh.expires_at();
                 let stored = self
-                    .update_row(env, key, |r| {
+                    .write_refresh(env, key, &row.credentials, |r| {
                         r.credentials.clone_from(&sealed);
-                        r.credentials_expires_at = fresh.expires_at();
+                        r.credentials_expires_at = expires_at;
+                        // Calls that started before this time share this result.
                         r.last_refresh_success = Some(now);
                         r.last_refresh_failure = None;
                         r.refresh_attempts = 0;
                         r.refresh_exhausted = false;
                         r.updated_at = now;
-                        Ok(())
                     })
                     .await?;
-                Ok((stored, fresh))
+                match stored {
+                    Some(stored) => Ok((stored, fresh)),
+                    None => self.current(env, key).await,
+                }
             }
             Err(e) => {
                 let now = self.now();
                 let today = self.now_ms() / policy::MS_PER_DAY;
                 let stored = self
-                    .update_row(env, key, |r| {
+                    .write_refresh(env, key, &row.credentials, |r| {
                         let last_day = r
                             .last_refresh_failure
                             .map(|t| crate::clock::to_ms(t) / policy::MS_PER_DAY);
@@ -359,9 +487,17 @@ impl SanMateo {
                         r.refresh_attempts = attempts;
                         r.refresh_exhausted = exhausted;
                         r.last_refresh_failure = Some(now);
-                        Ok(())
                     })
-                    .await?;
+                    .await;
+                let stored = match stored {
+                    Ok(Some(stored)) => stored,
+                    // New credentials are stored. This is not their failure.
+                    Ok(None) => return self.current(env, key).await,
+                    Err(w) => {
+                        tracing::warn!(code = w.code(), "a refresh failure was not stored");
+                        return Err(e);
+                    }
+                };
                 self.spawn_webhook(
                     env,
                     stored.webhook_url_override.clone(),
@@ -384,6 +520,52 @@ impl SanMateo {
                 Err(e)
             }
         }
+    }
+
+    /// Writes the result of a refresh with compare and set. Returns `None`
+    /// when the stored credentials are not `from`: a reconnect or an import
+    /// wrote newer credentials. A store error gives a wait and a new try.
+    async fn write_refresh(
+        &self,
+        env: &str,
+        key: &ConnectionKey,
+        from: &str,
+        change: impl Fn(&mut ConnectionRow) + Sync,
+    ) -> Result<Option<ConnectionRow>> {
+        let mut wait = WRITE_BACKOFF;
+        for attempt in 1..=WRITE_TRIES {
+            match self.try_write_refresh(env, key, from, &change).await {
+                Ok(Write::Stored(row)) => return Ok(Some(*row)),
+                Ok(Write::Superseded) => return Ok(None),
+                Ok(Write::Lost) => {}
+                Err(e @ Error::UnknownConnection(_)) => return Err(e),
+                Err(e) if attempt == WRITE_TRIES => return Err(e),
+                Err(e) => {
+                    tracing::warn!(code = e.code(), "a refresh write failed; it tries again");
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(WRITE_BACKOFF_MAX);
+                }
+            }
+        }
+        Err(Error::Store(
+            "the connection changed too often during a refresh write".to_owned(),
+        ))
+    }
+
+    async fn try_write_refresh(
+        &self,
+        env: &str,
+        key: &ConnectionKey,
+        from: &str,
+        change: &(impl Fn(&mut ConnectionRow) + Sync),
+    ) -> Result<Write> {
+        let mut row = self.connection_row(env, key).await?;
+        if row.credentials != from {
+            return Ok(Write::Superseded);
+        }
+        change(&mut row);
+        let stored = self.inner.store.update_connection(&row).await?;
+        Ok(stored.map_or(Write::Lost, |r| Write::Stored(Box::new(r))))
     }
 
     /// Asks the provider for new credentials.
@@ -556,38 +738,101 @@ impl SanMateo {
         Ok(())
     }
 
-    /// Refreshes the tokens that expire before `now + within`.
+    /// Refreshes the tokens that expire before `now + within`. A token in
+    /// the first half of its life since the last refresh waits.
+    ///
+    /// The sweep reads pages in `(expiry, id)` order. It goes on from the
+    /// row where the last sweep stopped, so rows that it skips or that fail
+    /// do not block later rows. `limit` counts the refresh tries.
     ///
     /// # Errors
     ///
     /// Store errors.
     pub async fn refresh_due(&self, within: Duration, limit: usize) -> Result<RefreshReport> {
+        let mut report = RefreshReport::default();
+        if limit == 0 {
+            return Ok(report);
+        }
         let before =
             self.now() + chrono::Duration::from_std(within).unwrap_or(chrono::Duration::days(1));
-        let rows = self
-            .inner
-            .store
-            .connections_expiring_before(before, limit)
-            .await?;
-        let mut report = RefreshReport::default();
-        for row in rows {
-            let refreshable_now = self.open_credentials(&row).is_ok_and(|c| refreshable(&c));
-            if !refreshable_now {
-                report.skipped += 1;
+        let page = limit.min(SWEEP_PAGE);
+        let start = *self.sweep_after();
+        let mut after = start;
+        // At the end of the rows, go on from the first row, up to `start`.
+        let mut wrapped = start.is_none();
+        let mut tries = 0;
+        loop {
+            let rows = self
+                .inner
+                .store
+                .connections_expiring_before(before, after, page)
+                .await?;
+            if rows.is_empty() {
+                if wrapped {
+                    break;
+                }
+                wrapped = true;
+                after = None;
                 continue;
             }
-            match self
-                .refresh(&row.environment, &row.key(), RefreshMode::Before(before))
-                .await
-            {
-                Ok(_) => report.refreshed += 1,
-                Err(Error::RefreshCooldown | Error::RefreshExhausted) => report.skipped += 1,
-                Err(e) => {
-                    tracing::warn!(connection = %row.connection_id, code = e.code(), "token refresh failed");
-                    report.failed += 1;
+            for row in rows {
+                let Some(at) = row.credentials_expires_at.map(|t| (t, row.id)) else {
+                    continue;
+                };
+                if wrapped && start.is_some_and(|s| at >= s) {
+                    *self.sweep_after() = None;
+                    return Ok(report);
+                }
+                after = Some(at);
+                if self.sweep_one(&row, before, &mut report).await {
+                    tries += 1;
+                    if tries >= limit {
+                        *self.sweep_after() = after;
+                        return Ok(report);
+                    }
                 }
             }
         }
+        *self.sweep_after() = None;
         Ok(report)
+    }
+
+    fn sweep_after(&self) -> std::sync::MutexGuard<'_, Option<(DateTime<Utc>, Uuid)>> {
+        self.inner
+            .sweep_after
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Refreshes one row of the sweep. Returns `true` when it tried a refresh.
+    async fn sweep_one(
+        &self,
+        row: &ConnectionRow,
+        before: DateTime<Utc>,
+        report: &mut RefreshReport,
+    ) -> bool {
+        let mode = RefreshMode::Before(before);
+        let due = self
+            .open_credentials(row)
+            .is_ok_and(|c| self.needs_refresh(row, &c, mode).unwrap_or(false));
+        if !due {
+            report.skipped += 1;
+            return false;
+        }
+        match self.refresh(&row.environment, &row.key(), mode).await {
+            Ok(_) => {
+                report.refreshed += 1;
+                true
+            }
+            Err(Error::RefreshCooldown | Error::RefreshExhausted) => {
+                report.skipped += 1;
+                false
+            }
+            Err(e) => {
+                tracing::warn!(connection = %row.connection_id, code = e.code(), "token refresh failed");
+                report.failed += 1;
+                true
+            }
+        }
     }
 }

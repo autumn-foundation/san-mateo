@@ -75,7 +75,8 @@ pub struct Config {
     pub connect_session_ttl: Duration,
     /// OAuth session life. Default 15 minutes.
     pub oauth_session_ttl: Duration,
-    /// Refresh lease life. Default 10 seconds.
+    /// Refresh lease life. Default 120 seconds. It must be longer than the
+    /// slowest token call: a token call stops after 3/4 of this time.
     pub refresh_lease_ttl: Duration,
     /// The longest wait for the lease of another process. Default 12 seconds.
     pub refresh_lease_wait: Duration,
@@ -90,7 +91,7 @@ impl Default for Config {
             proxy: ProxySettings::default(),
             connect_session_ttl: Duration::from_secs(30 * 60),
             oauth_session_ttl: Duration::from_secs(15 * 60),
-            refresh_lease_ttl: Duration::from_secs(10),
+            refresh_lease_ttl: Duration::from_secs(120),
             refresh_lease_wait: Duration::from_secs(12),
         }
     }
@@ -288,6 +289,7 @@ pub struct GetOptions {
     /// Refresh when the token expires soon. Default `true`.
     pub refresh_if_needed: bool,
     /// Refresh now, also when the token is fresh, in cooldown or exhausted.
+    /// Calls at the same time share one refresh.
     pub force_refresh: bool,
 }
 
@@ -340,7 +342,8 @@ pub struct RefreshReport {
     pub refreshed: usize,
     /// Connections with a failed refresh.
     pub failed: usize,
-    /// Connections that another process refreshed, or that are in cooldown.
+    /// Connections with no refresh now: no refresh token, a token in the
+    /// first half of its life, a cooldown or an exhausted refresh.
     pub skipped: usize,
 }
 
@@ -589,6 +592,7 @@ impl SanMateoBuilder {
                 env_by_hash,
                 flights: std::sync::Mutex::new(HashMap::new()),
                 running_syncs: std::sync::Mutex::new(HashSet::new()),
+                sweep_after: std::sync::Mutex::new(None),
                 tasks: TaskTracker::new(),
                 owner,
             }),
@@ -612,7 +616,9 @@ pub(crate) struct Inner {
     pub(crate) flights: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Syncs that run now, by (connection, sync name).
     pub(crate) running_syncs: std::sync::Mutex<HashSet<(Uuid, String)>>,
-    /// Background tasks: webhooks and triggered syncs.
+    /// The `(expiry, id)` where the last refresh sweep stopped.
+    pub(crate) sweep_after: std::sync::Mutex<Option<(DateTime<Utc>, Uuid)>>,
+    /// Background tasks: webhooks, refreshes and triggered syncs.
     pub(crate) tasks: TaskTracker,
     /// The lease owner id of this process.
     pub(crate) owner: String,
@@ -716,12 +722,25 @@ impl SanMateo {
             .ok_or_else(|| invalid(format!("unknown environment {id}")))
     }
 
-    /// Waits for background tasks (webhooks and triggered syncs) to end.
+    /// Waits for background tasks to end, at most `limit`. Returns `true`
+    /// when all tasks ended. Use it at shutdown.
+    pub async fn flush_within(&self, limit: Duration) -> bool {
+        tokio::time::timeout(limit, self.flush()).await.is_ok()
+    }
+
+    /// Waits for background tasks (webhooks, refreshes and syncs) to end.
     pub async fn flush(&self) {
+        /// Opens the tracker again, also when the wait stops early.
+        struct Reopen<'a>(&'a TaskTracker);
+        impl Drop for Reopen<'_> {
+            fn drop(&mut self) {
+                self.0.reopen();
+            }
+        }
         let tasks = &self.inner.tasks;
         tasks.close();
+        let _reopen = Reopen(tasks);
         tasks.wait().await;
-        tasks.reopen();
     }
 
     // -------------------------------------------------------------- helpers
@@ -800,16 +819,6 @@ impl Default for BackgroundSettings {
 pub struct Background {
     stop: tokio_util::sync::CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl Background {
-    /// Stops the loops and waits for the current tick to end.
-    pub async fn stop(mut self) {
-        self.stop.cancel();
-        if let Some(task) = self.task.take() {
-            let _ = task.await;
-        }
-    }
 }
 
 pub(crate) fn invalid(msg: impl Into<String>) -> Error {

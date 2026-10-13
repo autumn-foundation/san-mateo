@@ -130,10 +130,30 @@ async fn concurrent_upserts_of_one_key_make_one_row() {
     assert_eq!(ids.len(), 1);
 }
 
+/// Adds a connection in a new environment and returns its id.
+async fn new_connection(s: &PgStore) -> Uuid {
+    let env = format!("env-{}", Uuid::new_v4().simple());
+    s.upsert_connection(row(&env, "c1")).await.unwrap().row.id
+}
+
+fn writes(conn: Uuid, prefix: &str, n: usize, hash: &str) -> Vec<RecordWrite> {
+    (0..n)
+        .map(|i| {
+            let ext = format!("{prefix}{i}");
+            RecordWrite {
+                id: san_mateo::records::record_id(conn, "m", &ext),
+                external_id: ext.clone(),
+                data: format!("sm1.k.{ext}.{hash}"),
+                data_hash: hash.to_owned(),
+            }
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn concurrent_record_batches_count_each_record_once() {
     let Some(s) = store().await else { return };
-    let conn = Uuid::new_v4();
+    let conn = new_connection(&s).await;
     let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
     let batches = (0..4).map(|_| {
         let s = s.clone();
@@ -262,4 +282,100 @@ async fn the_service_runs_on_postgres() {
         .unwrap();
     assert!(page.next_cursor.is_some());
     san.delete_connection(&env, &conn.key()).await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_batches_get_distinct_times() {
+    let Some(s) = store().await else { return };
+    let conn = new_connection(&s).await;
+    let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    let batches = (0..8).map(|b| {
+        let s = s.clone();
+        async move {
+            s.upsert_records(conn, "m", writes(conn, &format!("b{b}-"), 5, "h"), now)
+                .await
+                .unwrap()
+        }
+    });
+    futures::future::join_all(batches).await;
+    let q = RecordQuery {
+        model: "m".into(),
+        limit: 100,
+        ..RecordQuery::default()
+    };
+    let rows = s.list_records(conn, &q).await.unwrap();
+    assert_eq!(rows.len(), 40);
+    // One time for each batch, and no time for two batches: a reader with a
+    // cursor in one batch cannot miss a batch that commits later.
+    let mut times: BTreeMap<String, std::collections::BTreeSet<i64>> = BTreeMap::new();
+    for r in &rows {
+        let batch = r.external_id.split('-').next().unwrap().to_owned();
+        times
+            .entry(batch)
+            .or_default()
+            .insert(r.updated_at.timestamp_micros());
+    }
+    assert!(times.values().all(|t| t.len() == 1), "{times:?}");
+    let all: std::collections::BTreeSet<i64> = times.values().flatten().copied().collect();
+    assert_eq!(all.len(), 8, "{times:?}");
+}
+
+#[tokio::test]
+async fn opposite_order_batches_do_not_deadlock() {
+    let Some(s) = store().await else { return };
+    let conn = new_connection(&s).await;
+    let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    s.upsert_records(conn, "m", writes(conn, "r", 40, "h0"), now)
+        .await
+        .unwrap();
+    for round in 0..5 {
+        let forward = writes(conn, "r", 40, &format!("f{round}"));
+        let mut backward = writes(conn, "r", 40, &format!("b{round}"));
+        backward.reverse();
+        let (a, b) = tokio::join!(
+            s.upsert_records(conn, "m", forward, now),
+            s.upsert_records(conn, "m", backward, now)
+        );
+        a.unwrap();
+        b.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn the_schema_cascades_connection_deletes() {
+    use diesel_async::RunQueryDsl as _;
+    let Some(s) = store().await else { return };
+    let conn = new_connection(&s).await;
+    let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    s.upsert_records(conn, "m", writes(conn, "r", 2, "h"), now)
+        .await
+        .unwrap();
+    s.put_sync_state(san_mateo::store::SyncStateRow {
+        connection: conn,
+        sync_name: "s".into(),
+        status: san_mateo::store::SyncStatus::Success,
+        frequency_ms: 60_000,
+        paused: false,
+        last_started_at: None,
+        last_finished_at: None,
+        last_success_at: None,
+        last_error: None,
+        last_counts: san_mateo::store::SyncCounts::default(),
+    })
+    .await
+    .unwrap();
+    // A plain SQL delete, with no help from `PgStore`.
+    let mut c = s.pool().get().await.unwrap();
+    diesel::sql_query("DELETE FROM sm_connections WHERE id = $1")
+        .bind::<diesel::sql_types::Uuid, _>(conn)
+        .execute(&mut c)
+        .await
+        .unwrap();
+    let q = RecordQuery {
+        model: "m".into(),
+        limit: 10,
+        ..RecordQuery::default()
+    };
+    assert!(s.list_records(conn, &q).await.unwrap().is_empty());
+    assert_eq!(s.get_sync_state(conn, "s").await.unwrap(), None);
 }
