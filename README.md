@@ -184,6 +184,9 @@ let background = san.start_background(Default::default());
 Write syncs and actions as Rust types that implement `SyncFunction` and
 `ActionFunction`. Put them in a `Registry` and give it to the builder.
 
+The [`embedded`](crates/san-mateo/examples/embedded.rs) example is a full
+app that you can run. See [Examples](#examples).
+
 ## Use from the ecosystem
 
 ### autumn-web
@@ -225,6 +228,10 @@ and the `SanMateo` service as harvest state.
   `SyncLoopInput::new(..)` and its `workflow_id()`.
 - When harvest runs the syncs, set `run_syncs = false` in the plugin. Else
   each sync runs two times.
+- `san_mateo_sync_loop` and `san_mateo_refresh_sweep` send their activities
+  to the queue `default`. Run a worker on `default`. Or write your own
+  workflow that sends activities to `ctx.queue_name()`, as the
+  `harvest_workflow` example does.
 - See [`san-mateo-harvest`](crates/san-mateo-harvest).
 
 ### rust-camel
@@ -241,13 +248,48 @@ san-mateo:hubspot?connectionId=acme&path=/crm/v3/objects/contacts&retries=2
 - The reply sets the body, `CamelHttpResponseCode` and
   `SanMateoResponse-<name>` headers. The component does not copy secret
   reply headers.
-- Errors map to camel errors with the retry rules of harvest-camel.
-  harvest-camel 0.1 uses camel 0.55, so its contexts cannot hold this
-  component yet.
+- Errors map to camel errors with the retry rules of harvest-camel. The
+  `harvest_camel` example calls this component from harvest activities with
+  harvest-camel on camel 0.57.
 - The `SanMateoConnectionId`, `SanMateoMethod` and `SanMateoPath` headers
   replace the URI options only with `allowHeaderOverrides=true`. The
   default is `false`. Do not set it on a route where an outside caller can
   set headers.
+
+## Examples
+
+Each example runs as it is, with a fake provider (`MemoryTransport`), so
+you need no provider account. Each example checks its result and fails when
+the result is wrong. CI runs each example on each PR and each week.
+
+| Example | It shows | Postgres |
+|---|---|---|
+| [`embedded`](crates/san-mateo/examples/embedded.rs) | San Mateo in your own axum app: the REST API, an OAuth connect with no browser, a refresh before a proxy call, a signed webhook. | No |
+| [`autumn_app`](crates/autumn-plugin-san-mateo/examples/autumn_app/main.rs) | An autumn-web app with the plugin. A route with `SanMateoService`. Config in `autumn.toml`. | No |
+| [`harvest_workflow`](crates/san-mateo-harvest/examples/harvest_workflow.rs) | Your harvest workflow calls `san_mateo_proxy`. harvest retries a `POST` after a 503, with one idempotency key. | Yes |
+| [`harvest_camel`](examples/harvest-camel/src/main.rs) | harvest activities call camel routes with harvest-camel. The routes call `san-mateo:`. A 503 is retried, a 404 is not. | Yes |
+
+Run them from the repository root:
+
+```sh
+cargo run --locked -p san-mateo --example embedded
+
+export AUTUMN_MANIFEST_DIR=crates/autumn-plugin-san-mateo/examples/autumn_app
+export SAN_MATEO_ENCRYPTION_KEY="$(openssl rand -base64 32)"
+export SAN_MATEO_DEV_SECRET_KEY="sk_example_$(openssl rand -hex 16)"
+cargo run --locked -p autumn-plugin-san-mateo --example autumn_app
+
+docker run -d -e POSTGRES_USER=sm -e POSTGRES_PASSWORD=sm -e POSTGRES_DB=sm_test -p 5432:5432 postgres:16
+export DATABASE_URL=postgres://sm:sm@localhost:5432/sm_test
+cargo run --locked -p san-mateo-harvest --example harvest_workflow
+cargo run --locked --manifest-path examples/harvest-camel/Cargo.toml
+```
+
+- `autumn_app` serves until Ctrl-C. `scripts/smoke-autumn-example.sh`
+  boots it in the dev and prod profiles and checks it.
+- `harvest_camel` is a separate cargo workspace, because harvest-camel turns
+  on the autumn-web default features. See
+  [ADR 0006](docs/adr/0006-runnable-examples.md).
 
 ## Differences from Nango
 

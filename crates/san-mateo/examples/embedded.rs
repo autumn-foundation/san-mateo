@@ -5,7 +5,7 @@
 //! backend ─► /contacts/{connection}  your handler ─► san.proxy(..) ─► provider
 //! ```
 //!
-//! The example makes an integration and connects an OAuth2 account over the
+//! The example makes an integration and connects an `OAuth2` account over the
 //! REST API, with no browser. Then your handler calls the provider. The first
 //! token expires soon, so San Mateo refreshes it before the call. The example
 //! checks the result. It returns an error when the result is wrong.
@@ -16,23 +16,49 @@
 //! keys from a secret store.
 //!
 //! ```sh
-//! cargo run -p san-mateo --example embedded
+//! cargo run --locked -p san-mateo --example embedded
 //! ```
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use san_mateo::MemoryTransport;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::routing::get;
+use axum::{Json, Router};
+use san_mateo::clock::{Entropy, OsEntropy};
 use san_mateo::transport::HttpResponse;
+use san_mateo::{
+    BackgroundSettings, Catalog, ConnectionKey, EnvironmentConfig, KeyRing, MemoryTransport,
+    ProxyRequest, SanMateo, Secret, WebhookSettings,
+};
 use serde_json::{Value, json};
+use tokio::net::TcpListener;
+use url::Url;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// The longest time for the scenario. CI must not hang.
 const RUN_TIMEOUT: Duration = Duration::from_secs(60);
 
+const ENV: &str = "dev";
+const INTEGRATION: &str = "acme-crm";
 const TOKEN_URL: &str = "https://auth.acme-crm.example.com/token";
 const CONTACTS_URL: &str = "https://api.acme-crm.example.com/v3/contacts";
 const HOOK_URL: &str = "https://backend.example.com/san-mateo-hooks";
+
+/// The provider, in the Nango `providers.yaml` format.
+const CATALOG: &str = r"
+acme-crm:
+    display_name: Acme CRM
+    auth_mode: OAUTH2
+    authorization_url: https://auth.acme-crm.example.com/authorize
+    token_url: https://auth.acme-crm.example.com/token
+    default_scopes: [contacts.read]
+    proxy:
+        base_url: https://api.acme-crm.example.com
+    docs: https://acme-crm.example.com/docs
+";
 
 /// Fake tokens. The checks make sure that no output shows them.
 const FAKE_SECRETS: [&str; 4] = ["at-1", "at-2", "rt-1", "rt-2"];
@@ -68,10 +94,290 @@ fn fake_network() -> MemoryTransport {
     fake
 }
 
+/// Your handler. San Mateo adds the auth and refreshes the token.
+///
+/// This demo takes the connection id from the URL. In production, find the
+/// connection of the signed-in user. Do not trust an id from the client.
+async fn contacts(
+    State(san): State<SanMateo>,
+    Path(connection_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let key = ConnectionKey::new(INTEGRATION, connection_id);
+    let reply = san
+        .proxy(ENV, &key, ProxyRequest::get("/v3/contacts"))
+        .await;
+    match reply.and_then(|r| r.json::<Value>()) {
+        Ok(body) => Ok(Json(body)),
+        Err(e) => {
+            let status = StatusCode::from_u16(e.status()).unwrap_or(StatusCode::BAD_GATEWAY);
+            Err((status, Json(json!({"error": {"code": e.code()}}))))
+        }
+    }
+}
+
+/// The secrets of one run. In production, read them from a secret store.
+struct Secrets {
+    secret_key: String,
+    client_secret: String,
+    webhook_secret: String,
+}
+
+impl Secrets {
+    fn random() -> Self {
+        Self {
+            secret_key: format!("sk_example_{}", OsEntropy.hex(16)),
+            client_secret: OsEntropy.hex(16),
+            webhook_secret: OsEntropy.hex(16),
+        }
+    }
+}
+
+/// Builds the service. `server_url` is the public URL of the San Mateo API.
+fn san_mateo(
+    server_url: &str,
+    secrets: &Secrets,
+    fake: &MemoryTransport,
+) -> Result<SanMateo, BoxError> {
+    let mut key = [0_u8; 32];
+    OsEntropy.fill(&mut key);
+    let mut env = EnvironmentConfig::new(ENV, secrets.secret_key.as_str());
+    env.webhooks = WebhookSettings {
+        primary_url: Some(HOOK_URL.to_owned()),
+        signing_secret: Some(Secret::new(secrets.webhook_secret.as_str())),
+        ..WebhookSettings::default()
+    };
+    Ok(SanMateo::builder()
+        .server_url(server_url)
+        .environment(env)
+        .key_ring(KeyRing::new("k1", key)?)
+        .catalog(Catalog::from_yaml_str(CATALOG)?)
+        .transport(Arc::new(fake.clone()))
+        .build()?)
+}
+
+/// What the backend saw.
+struct Seen {
+    /// The provider URL from the 302 of the OAuth start.
+    authorize: Url,
+    app_status: u16,
+    app_body: Value,
+}
+
 /// Runs the scenario on `fake`, stops all parts, and checks the result.
 async fn run(fake: MemoryTransport) -> Result<Value, BoxError> {
-    let _ = fake;
-    Err("not yet".into())
+    // Bind first: the OAuth callback URL needs the port.
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let server_url = format!("{base}/san-mateo");
+    let secrets = Secrets::random();
+    let san = san_mateo(&server_url, &secrets, &fake)?;
+
+    // The refresh sweep, the sync scheduler and the session purge.
+    let background = san.start_background(BackgroundSettings::default());
+    let app = Router::new()
+        .route("/contacts/{connection_id}", get(contacts))
+        .with_state(san.clone())
+        .nest("/san-mateo", san_mateo::api::router(san.clone()));
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let serving = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+    });
+
+    let seen = tokio::time::timeout(RUN_TIMEOUT, backend(&base, &secrets)).await;
+
+    // Stop in all cases: the server, the loops, then the webhooks.
+    let _ = stop.send(());
+    let served = serving.await;
+    background.stop().await;
+    let flushed = san.flush_within(Duration::from_secs(5)).await;
+
+    let seen = seen.map_err(|_| format!("the scenario did not end in {RUN_TIMEOUT:?}"))??;
+    served??;
+    let summary = summarize(&seen, &fake, &server_url, &secrets, flushed);
+    check(&summary)?;
+    Ok(summary)
+}
+
+/// Your backend. It calls San Mateo over HTTP with the secret key.
+async fn backend(base: &str, secrets: &Secrets) -> Result<Seen, BoxError> {
+    // San Mateo never follows a redirect. The backend does not either.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let api = |method: reqwest::Method, path: &str| {
+        client
+            .request(method, format!("{base}/san-mateo{path}"))
+            .header("authorization", format!("Bearer {}", secrets.secret_key))
+    };
+
+    // 1. The integration. The client secret is sealed and never comes back.
+    let integration = json!({
+        "unique_key": INTEGRATION,
+        "provider": INTEGRATION,
+        "credentials": {"type": "OAUTH2", "client_id": "acme-client", "client_secret": secrets.client_secret},
+    });
+    send(
+        api(reqwest::Method::POST, "/integrations"),
+        Some(&integration),
+        200,
+    )
+    .await?;
+
+    // 2. A connect session for one end user.
+    let session = json!({"end_user": {"id": "user-1"}});
+    let session = send(
+        api(reqwest::Method::POST, "/connect/sessions"),
+        Some(&session),
+        201,
+    )
+    .await?;
+    let token = session["data"]["token"]
+        .as_str()
+        .ok_or("no session token")?;
+
+    // 3. The OAuth start. A browser follows the 302 to the provider.
+    let start = client
+        .get(format!(
+            "{base}/san-mateo/oauth/connect/{INTEGRATION}?connect_session_token={token}"
+        ))
+        .send()
+        .await?;
+    if start.status() != reqwest::StatusCode::FOUND {
+        return Err(format!("the OAuth start gave {}", start.status()).into());
+    }
+    let location = start
+        .headers()
+        .get("location")
+        .ok_or("no Location header")?;
+    let authorize = Url::parse(location.to_str()?)?;
+
+    // 4. The user agrees. The provider sends the browser to the callback.
+    let state = query(&authorize, "state").unwrap_or_default();
+    let callback = client
+        .get(format!(
+            "{base}/san-mateo/oauth/callback?code=code-1&state={state}"
+        ))
+        .send()
+        .await?;
+    if !callback.status().is_success() {
+        return Err(format!("the OAuth callback gave {}", callback.status()).into());
+    }
+
+    // 5. The new connection.
+    let list = send(
+        api(
+            reqwest::Method::GET,
+            &format!("/connections?integrationId={INTEGRATION}"),
+        ),
+        None,
+        200,
+    )
+    .await?;
+    let connection_id = list["connections"][0]["connection_id"]
+        .as_str()
+        .ok_or("no connection")?;
+
+    // 6. Your own route.
+    let reply = client
+        .get(format!("{base}/contacts/{connection_id}"))
+        .send()
+        .await?;
+    let app_status = reply.status().as_u16();
+    let app_body = serde_json::from_slice(&reply.bytes().await?)?;
+    Ok(Seen {
+        authorize,
+        app_status,
+        app_body,
+    })
+}
+
+/// Sends a request with an optional JSON body and wants `status`.
+async fn send(
+    request: reqwest::RequestBuilder,
+    body: Option<&Value>,
+    status: u16,
+) -> Result<Value, BoxError> {
+    let request = match body {
+        Some(body) => request
+            .header("content-type", "application/json")
+            .body(body.to_string()),
+        None => request,
+    };
+    let reply = request.send().await?;
+    let got = reply.status().as_u16();
+    let bytes = reply.bytes().await?;
+    if got != status {
+        return Err(format!(
+            "want {status}, got {got}: {}",
+            String::from_utf8_lossy(&bytes)
+        )
+        .into());
+    }
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn query(url: &Url, name: &str) -> Option<String> {
+    url.query_pairs()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.into_owned())
+}
+
+/// Builds the summary from what the backend saw and from the fake log.
+fn summarize(
+    seen: &Seen,
+    fake: &MemoryTransport,
+    server_url: &str,
+    secrets: &Secrets,
+    flushed: bool,
+) -> Value {
+    let token_calls = fake.requests_to(TOKEN_URL);
+    let form = |i: usize, name: &str| -> Option<String> {
+        let body = &token_calls.get(i)?.body;
+        url::form_urlencoded::parse(body)
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.into_owned())
+    };
+    let grants: Vec<Option<String>> = (0..token_calls.len())
+        .map(|i| form(i, "grant_type"))
+        .collect();
+    let verifier = form(0, "code_verifier").unwrap_or_default();
+    let challenge = query(&seen.authorize, "code_challenge").unwrap_or_default();
+    let upstream = fake.requests_to(CONTACTS_URL);
+    let new_token = upstream
+        .iter()
+        .all(|r| r.header_value("authorization") == Some("Bearer at-2"));
+    let hooks = fake.requests_to(HOOK_URL);
+    let webhook = hooks.first().map_or(Value::Null, |hook| {
+        let body: Value = serde_json::from_slice(&hook.body).unwrap_or(Value::Null);
+        let signature = hook.header_value("x-san-mateo-hmac-sha256").unwrap_or_default();
+        json!({
+            "type": body["type"],
+            "operation": body["operation"],
+            "success": body["success"],
+            "signature_valid": san_mateo::webhook::verify(&secrets.webhook_secret, &hook.body, signature),
+        })
+    });
+    let redirect_uri = query(&seen.authorize, "redirect_uri").unwrap_or_default();
+    json!({
+        "authorize": {
+            "host": seen.authorize.host_str(),
+            "redirect_uri": redirect_uri.replace(server_url, "{server}"),
+            "code_challenge_method": query(&seen.authorize, "code_challenge_method"),
+            "pkce_verifier_matches": !verifier.is_empty() && san_mateo::oauth2::pkce_challenge(&verifier) == challenge,
+            "state_is_set": query(&seen.authorize, "state").is_some_and(|s| !s.is_empty()),
+        },
+        "token_grants": grants,
+        "upstream_calls": upstream.len(),
+        "upstream_used_new_token": !upstream.is_empty() && new_token,
+        "app_reply": {"status": seen.app_status, "body": seen.app_body},
+        "webhook": webhook,
+        "stopped_cleanly": flushed,
+    })
 }
 
 /// Compares the summary with the expected values.

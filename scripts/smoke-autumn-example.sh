@@ -35,6 +35,9 @@ bin="${CARGO_TARGET_DIR:-$root/target}/debug/examples/autumn_app"
 # show them.
 key=$(openssl rand -base64 32)
 secret="sk_example_$(openssl rand -hex 16)"
+# The prod profile of autumn-web also needs a signing secret and trusted
+# hosts.
+signing=$(openssl rand -hex 32)
 
 free_port() {
   python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
@@ -94,14 +97,16 @@ stop_cleanly() {
 }
 
 no_secrets_in_log() {
-  if grep -qF -e "$key" -e "$secret" "$work/app.log"; then
+  if grep -qF -e "$key" -e "$secret" -e "$signing" "$work/app.log"; then
     fail "the log shows a secret"
   fi
 }
 
 for profile in dev prod; do
   echo "autumn_app: profile $profile"
-  start "$profile" SAN_MATEO_ENCRYPTION_KEY="$key"
+  start "$profile" SAN_MATEO_ENCRYPTION_KEY="$key" \
+    AUTUMN_SECURITY__SIGNING_SECRET="$signing" \
+    AUTUMN_SECURITY__TRUSTED_HOSTS__HOSTS=127.0.0.1
   wait_healthy
   auth="authorization: Bearer $secret"
   expect 200 "$base/"

@@ -107,10 +107,22 @@ fn each_example_has_a_test_a_ci_step_and_a_readme_row() {
         }
         let source = read(ex.source);
         for must in ["const RUN_TIMEOUT", "#[cfg(test)]"] {
-            assert!(source.contains(must), "{}: the source needs {must}", ex.name);
+            assert!(
+                source.contains(must),
+                "{}: the source needs {must}",
+                ex.name
+            );
         }
-        for never in ["allow_private_hosts", "allow_plain_http", "full_migrations_sql"] {
-            assert!(!source.contains(never), "{}: the source has {never}", ex.name);
+        for never in [
+            "allow_private_hosts",
+            "allow_plain_http",
+            "full_migrations_sql",
+        ] {
+            assert!(
+                !source.contains(never),
+                "{}: the source has {never}",
+                ex.name
+            );
         }
         assert!(
             ci.iter().any(|l| l.contains(ex.ci)),
@@ -163,7 +175,12 @@ fn the_harvest_camel_workspace_stays_apart() {
     // These crates come only with harvest-camel. They must not enter the
     // main workspace (ADR 0006).
     let lock = read("Cargo.lock");
-    for name in ["harvest-camel", "autumn-harvest-plugin", "pq-src", "libsqlite3-sys"] {
+    for name in [
+        "harvest-camel",
+        "autumn-harvest-plugin",
+        "pq-src",
+        "libsqlite3-sys",
+    ] {
         assert!(
             !lock.contains(&format!("name = \"{name}\"")),
             "the root Cargo.lock has {name}"
