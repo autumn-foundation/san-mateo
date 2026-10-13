@@ -30,6 +30,9 @@
 //! - With `.service(san)`, the `server_url` of `san` must end with the
 //!   prefix. Else OAuth callbacks give 404. The plugin logs a warning.
 //!
+//! The `autumn_app` example (`examples/autumn_app`) is a full app that you
+//! can run.
+//!
 //! ```rust,no_run
 //! use autumn_plugin_san_mateo::SanMateoPlugin;
 //!

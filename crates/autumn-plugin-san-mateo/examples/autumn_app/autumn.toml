@@ -1,0 +1,24 @@
+# Config of the autumn_app example. autumn reads this file from the
+# directory in AUTUMN_MANIFEST_DIR, else from the current directory.
+# It holds the names of env vars, never the secrets.
+
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[san_mateo]
+# The public URL of the app. The plugin adds the route prefix.
+server_url = "http://127.0.0.1:3000"
+encryption_key_env = "SAN_MATEO_ENCRYPTION_KEY"
+
+[san_mateo.environments.dev]
+secret_key_env = "SAN_MATEO_DEV_SECRET_KEY"
+
+# The San Mateo API uses a Bearer key, not a cookie. The prod profile turns
+# CSRF on, so the API paths must be exempt.
+[security.csrf]
+exempt_paths = ["/san-mateo"]
+
+# The hosted connect page uses the autumn CSP nonce.
+[security.headers.csp_nonce]
+enabled = true

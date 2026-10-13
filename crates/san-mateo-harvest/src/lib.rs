@@ -34,6 +34,10 @@
 //! - When this crate runs the syncs, turn off the in-process sync scheduler
 //!   (`run_syncs = false` in the autumn plugin). Else each sync runs two
 //!   times.
+//! - The workflows of this crate send their activities to the queue
+//!   `default`. Run a worker on `default`. Or write your own workflow that
+//!   sends activities to `ctx.queue_name()`, as the `harvest_workflow`
+//!   example does (`examples/harvest_workflow.rs`).
 //!
 //! With `autumn-harvest-plugin`, the plugin has the same three calls:
 //!

@@ -19,6 +19,9 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! The `embedded` example (`examples/embedded.rs`) is a full axum app that
+//! you can run.
 
 pub mod api;
 pub mod clock;

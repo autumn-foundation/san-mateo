@@ -188,7 +188,8 @@ pub fn json_reply(status: u16, value: &serde_json::Value) -> HttpResponse {
 }
 
 /// A copy of `harvest_camel::is_retryable` (harvest-camel `src/route.rs`).
-/// harvest-camel uses camel 0.55, so these tests cannot depend on it.
+/// harvest-camel is not on crates.io, so these tests do not depend on it.
+/// The `harvest_camel` example checks the real function.
 pub fn harvest_retryable(err: &CamelError) -> bool {
     match err {
         CamelError::ValidationError(_)

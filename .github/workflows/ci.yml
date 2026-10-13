@@ -4,6 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Each week (and on a manual run), the examples run with the newest
+  # compatible dependencies. That finds rot from new upstream releases.
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -32,7 +40,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Docs build with no warnings
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --workspace --no-deps --lib --examples
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -80,6 +88,124 @@ jobs:
         with:
           name: lcov
           path: lcov.info
+
+  # Runs each example in the main workspace as a user does. Each example
+  # checks its result and exits with an error when it is wrong.
+  examples:
+    needs: fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sm
+          POSTGRES_PASSWORD: sm
+          POSTGRES_DB: sm_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sm -d sm_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://sm:sm@127.0.0.1:5432/sm_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Keep the cache of the locked dependencies.
+          save-if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+      - name: Newest compatible dependencies (weekly and manual runs)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: cargo update
+      - name: "example: embedded"
+        run: cargo run --locked -p san-mateo --example embedded
+      - name: "example: autumn_app (boot, dev and prod, SIGTERM)"
+        run: bash scripts/smoke-autumn-example.sh
+      - name: "example: harvest_workflow"
+        run: cargo run --locked -p san-mateo-harvest --example harvest_workflow
+      - name: "example: harvest_workflow, two runs at the same time"
+        run: |
+          bin=target/debug/examples/harvest_workflow
+          "$bin" > a.log 2>&1 & a=$!
+          "$bin" > b.log 2>&1 & b=$!
+          ra=0; wait "$a" || ra=$?
+          rb=0; wait "$b" || rb=$?
+          cat a.log b.log
+          test "$ra" -eq 0 && test "$rb" -eq 0
+      - name: Shell scripts
+        run: shellcheck scripts/*.sh
+
+  # The harvest-camel example is a separate workspace (ADR 0006). The root
+  # jobs do not see it, so this job has its own gates.
+  example-harvest-camel:
+    needs: fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sm
+          POSTGRES_PASSWORD: sm
+          POSTGRES_DB: sm_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sm -d sm_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://sm:sm@127.0.0.1:5432/sm_test
+      SAN_MATEO_TEST_DATABASE_URL: postgres://sm:sm@127.0.0.1:5432/sm_test
+      MANIFEST: examples/harvest-camel/Cargo.toml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.89.0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: examples/harvest-camel -> target
+          key: harvest-camel
+          # Keep the cache of the locked dependencies.
+          save-if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+      - name: Newest compatible dependencies (weekly and manual runs)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: cargo update --manifest-path "$MANIFEST"
+      - name: The lock file is up to date
+        run: |
+          if ! err=$(cargo metadata --locked --format-version 1 --manifest-path "$MANIFEST" 2>&1 > /dev/null); then
+            printf '%s\n' "$err" >&2
+            if printf '%s' "$err" | grep -q "needs to be updated"; then
+              echo "::error::examples/harvest-camel/Cargo.lock is out of date. Run: cargo update --manifest-path $MANIFEST -p san-mateo -p san-mateo-camel"
+            fi
+            exit 1
+          fi
+      - run: cargo fmt --manifest-path "$MANIFEST" --check
+      - run: cargo clippy --locked --manifest-path "$MANIFEST" --all-targets -- -D warnings
+      - run: cargo test --locked --manifest-path examples/harvest-camel/Cargo.toml
+      - name: "example: harvest_camel"
+        run: cargo run --locked --manifest-path examples/harvest-camel/Cargo.toml
+      - name: One version each of camel and autumn-harvest
+        run: |
+          out=$(cargo tree --locked -e normal -d --manifest-path "$MANIFEST")
+          if printf '%s\n' "$out" | grep -E '^(camel-core|camel-api|camel-component-api|autumn-harvest) v'; then
+            echo "::error::two versions of a crate above: the types do not match"
+            exit 1
+          fi
+      - name: MSRV 1.89
+        run: cargo +1.89.0 check --locked --manifest-path "$MANIFEST" --all-targets
 
   msrv:
     needs: fmt

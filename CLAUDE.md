@@ -21,7 +21,10 @@ Style for all docs and comments: ASD-STE100.
 | `crates/autumn-plugin-san-mateo` | autumn-web 0.8 plugin. |
 | `crates/san-mateo-harvest` | autumn-harvest 0.7 activities and workflows. |
 | `crates/san-mateo-camel` | rust-camel 0.57 `san-mateo:` component. |
-| `docs/` | `plan.md`, `ac-evidence.md`, ADRs. |
+| `crates/*/examples/` | Runnable examples: `embedded`, `autumn_app`, `harvest_workflow`. |
+| `examples/harvest-camel` | The `harvest_camel` example. A separate workspace (ADR 0006). |
+| `scripts/smoke-autumn-example.sh` | Boots the `autumn_app` binary and checks it. CI runs it. |
+| `docs/` | `plan.md`, `examples-plan.md`, `ac-evidence.md`, ADRs. |
 
 ## Commands
 
@@ -32,6 +35,14 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 SAN_MATEO_TEST_DATABASE_URL=postgres://sm:sm@localhost/sm_test cargo test --workspace
 cargo llvm-cov --workspace --summary-only
 verus verus/policy.rs
+cargo run --locked -p san-mateo --example embedded
+bash scripts/smoke-autumn-example.sh
+DATABASE_URL=postgres://sm:sm@localhost/sm_test cargo run --locked -p san-mateo-harvest --example harvest_workflow
+DATABASE_URL=postgres://sm:sm@localhost/sm_test cargo run --locked --manifest-path examples/harvest-camel/Cargo.toml
+# The separate workspace: the root commands do not see it.
+cargo fmt --manifest-path examples/harvest-camel/Cargo.toml --check
+cargo clippy --locked --manifest-path examples/harvest-camel/Cargo.toml --all-targets -- -D warnings
+SAN_MATEO_TEST_DATABASE_URL=postgres://sm:sm@localhost/sm_test cargo test --locked --manifest-path examples/harvest-camel/Cargo.toml
 ```
 
 ## Rules
@@ -40,7 +51,8 @@ verus verus/policy.rs
 - A change to `policy.rs` needs the same change in `verus/policy.rs`. Run
   Verus. The test `verus_bodies_match` compares the two. Do not accept a
   clippy auto-fix in `policy.rs`. Add an `allow` with a reason.
-- Only `transport.rs` does network I/O. Other code uses `HttpTransport`.
+- Only `transport.rs` does network I/O. Other code in `src/` uses
+  `HttpTransport`.
 - Seal each secret with the AAD of its row. Never store a plaintext secret.
 - Store tokens, secret keys and OAuth state only as lookup hashes.
 - Never follow a redirect in the proxy or the OAuth client.
@@ -56,3 +68,9 @@ verus verus/policy.rs
 - Do not copy Nango code or data. Read only the Nango file format.
 - Do mutation tests on a `git clone` in the scratchpad. Never in the repo.
 - Webhooks are at least once. Do not claim exactly once.
+- A new example needs `test = true`, a CI step, a README row, a
+  `RUN_TIMEOUT`, a `check` function and a failure test. The test
+  `examples_wired` checks these items by text.
+- After a dependency change in `san-mateo` or `san-mateo-camel`, update
+  `examples/harvest-camel/Cargo.lock`:
+  `cargo update --manifest-path examples/harvest-camel/Cargo.toml -p san-mateo -p san-mateo-camel`.

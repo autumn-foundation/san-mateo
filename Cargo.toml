@@ -7,6 +7,8 @@ members = [
     "crates/san-mateo-harvest",
     "crates/san-mateo-camel",
 ]
+# The harvest-camel example is its own workspace. See ADR 0006.
+exclude = ["examples/harvest-camel"]
 resolver = "3"
 
 [workspace.package]
