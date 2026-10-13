@@ -549,7 +549,10 @@ async fn session_defaults_replace_end_user_values() {
         .await
         .unwrap();
     let q = query_of(&url);
-    assert_eq!(q["scope"], "admin,read");
+    // As in Nango: `user_scopes` are user scopes, not a new `scope`. Only
+    // Slack takes them in the URL (see tests/hardening.rs).
+    assert_eq!(q["scope"], "read,write");
+    assert!(!q.contains_key("user_scope"));
     assert_eq!(q["prompt"], "none");
     let url = h.san.oauth_start(&token, "zen", opts).await.unwrap();
     assert!(
@@ -682,7 +685,7 @@ async fn api_key_connections_are_verified() {
         matches!(
             err,
             Error::Provider {
-                code: "verification_failed",
+                code: "connection_test_failed",
                 status: Some(401),
                 ..
             }

@@ -235,7 +235,7 @@ fn is_internal_ip(ip: IpAddr) -> bool {
     }
 }
 
-fn host_allowed(host: &str, allowed: &[String]) -> bool {
+pub(crate) fn host_allowed(host: &str, allowed: &[String]) -> bool {
     allowed.iter().any(|entry| {
         let entry = entry.to_ascii_lowercase();
         entry.strip_prefix("*.").map_or_else(

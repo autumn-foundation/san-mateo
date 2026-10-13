@@ -26,6 +26,71 @@ use crate::webhook::{AuthEvent, AuthOperation, ErrorPayload, WebhookEvent};
 /// The largest length of a connection id.
 const MAX_CONNECTION_ID_LEN: usize = 255;
 
+/// Authorization parameters that only San Mateo sets. An end user cannot set
+/// them. Session defaults from the developer can.
+const RESERVED_PARAMS: &[&str] = &[
+    "client_id",
+    "client_secret",
+    "redirect_uri",
+    "state",
+    "scope",
+    "response_type",
+    "code_challenge",
+    "code_challenge_method",
+];
+
+/// Providers that take user scopes in a `user_scope` parameter.
+const USER_SCOPE_PROVIDERS: &[&str] = &["slack"];
+
+/// Hosts that no safe host pattern accepts.
+const PROBE_HOSTS: &[&str] = &["san-mateo-probe.invalid", "sanmateoprobe"];
+
+/// Returns `true` when `pattern` rejects all probe hosts, so it fixes the
+/// domain of a host value.
+fn pattern_fixes_domain(pattern: &str) -> bool {
+    regex::Regex::new(pattern).is_ok_and(|re| !PROBE_HOSTS.iter().any(|h| re.is_match(h)))
+}
+
+/// Returns the URL templates of a provider.
+fn url_templates(provider: &Provider) -> Vec<&str> {
+    let mut out: Vec<&str> = Vec::new();
+    out.extend(provider.authorization_url.as_deref());
+    match &provider.token_url {
+        Some(crate::provider::TokenUrl::One(u)) => out.push(u),
+        Some(crate::provider::TokenUrl::ByMode(m)) => out.extend(m.values().map(String::as_str)),
+        None => {}
+    }
+    out.extend(provider.refresh_url.as_deref());
+    out.extend(provider.base_url());
+    if let Some(v) = provider
+        .proxy
+        .as_ref()
+        .and_then(|p| p.verification.as_ref())
+    {
+        out.extend(v.base_url_override.as_deref());
+    }
+    out
+}
+
+/// Checks one connection config value against its catalog schema.
+fn check_field(name: &str, schema: &crate::provider::FieldSchema, value: &str) -> Result<()> {
+    if let Some(pattern) = &schema.pattern {
+        let re = regex::Regex::new(pattern)
+            .map_err(|_| Error::Internal(format!("the catalog pattern of {name} is not valid")))?;
+        if !re.is_match(value) {
+            return Err(invalid(format!(
+                "connection config {name} does not match its pattern"
+            )));
+        }
+    }
+    if !schema.allowed.is_empty() && !schema.allowed.iter().any(|a| a == value) {
+        return Err(invalid(format!(
+            "connection config {name} is not an allowed value"
+        )));
+    }
+    Ok(())
+}
+
 /// Returns `true` for a valid connection id: 1 to 255 printable chars.
 pub(crate) fn valid_connection_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= MAX_CONNECTION_ID_LEN && !id.chars().any(char::is_control)
@@ -68,10 +133,12 @@ impl SanMateo {
     pub(crate) fn check_webhook_url(&self, url: &str) -> Result<()> {
         let parsed = url::Url::parse(url).map_err(|_| invalid("the webhook URL is not valid"))?;
         match parsed.scheme() {
-            "https" => Ok(()),
-            "http" if self.inner.config.proxy.allow_plain_http => Ok(()),
-            _ => Err(invalid("the webhook URL must use https")),
+            "https" => {}
+            "http" if self.inner.config.proxy.allow_plain_http => {}
+            _ => return Err(invalid("the webhook URL must use https")),
         }
+        // No internal hosts: a webhook carries a signed body.
+        crate::proxy::check_upstream(url, None, false, &self.inner.config.proxy)
     }
 
     fn connect_link(&self, token: &str) -> String {
@@ -135,7 +202,8 @@ impl SanMateo {
     /// # Errors
     ///
     /// [`Error::UnknownIntegration`] for an allowed integration that does not
-    /// exist. [`Error::Invalid`] for a webhook URL that is not HTTPS.
+    /// exist. [`Error::Invalid`] for a webhook URL that is not HTTPS, and
+    /// [`Error::ForbiddenHost`] for an internal webhook host.
     pub async fn create_connect_session(
         &self,
         env: &str,
@@ -232,12 +300,19 @@ impl SanMateo {
     }
 
     /// Merges and checks connection config: end-user values, then the
-    /// session defaults (they win).
+    /// session defaults (they win). See [`Self::check_user_hosts`] for the
+    /// end-user values that can set a host.
     fn connection_config(
+        &self,
         provider: &Provider,
         user: Map<String, Value>,
         defaults: &Map<String, Value>,
     ) -> Result<Map<String, Value>> {
+        let user_keys: Vec<String> = user
+            .keys()
+            .filter(|k| !defaults.contains_key(*k))
+            .cloned()
+            .collect();
         let mut cfg = user;
         for (k, v) in defaults {
             cfg.insert(k.clone(), v.clone());
@@ -261,44 +336,66 @@ impl SanMateo {
                 }
                 continue;
             };
-            if let Some(pattern) = &schema.pattern {
-                let re = regex::Regex::new(pattern).map_err(|_| {
-                    Error::Internal(format!("the catalog pattern of {name} is not valid"))
-                })?;
-                if !re.is_match(&value) {
-                    return Err(invalid(format!(
-                        "connection config {name} does not match its pattern"
-                    )));
-                }
-            }
-            if !schema.allowed.is_empty() && !schema.allowed.contains(&value) {
-                return Err(invalid(format!(
-                    "connection config {name} is not an allowed value"
-                )));
-            }
+            check_field(name, schema, &value)?;
         }
+        self.check_user_hosts(provider, &cfg, &user_keys)?;
         Ok(cfg)
     }
 
-    fn scopes(target: &Target, user_scopes: Option<&str>) -> Vec<String> {
-        let split = |s: &str| {
-            s.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        };
-        let mut scopes = match (target.defaults.user_scopes.as_deref(), user_scopes) {
-            (Some(d), _) => split(d),
-            (None, Some(u)) => split(u),
-            (None, None) => target.integration.scopes.clone(),
-        };
-        for s in &target.provider.default_scopes {
-            if !scopes.contains(s) {
-                scopes.push(s.clone());
+    /// Checks end-user values that can set the host of a provider URL. Else
+    /// the client secret or the tokens can go to a host of the end user.
+    ///
+    /// Such a value needs one of: an `allowed` list, a `pattern` that fixes
+    /// the domain, or a host in the allowed hosts. Values from the session
+    /// defaults come from the developer. They need no check.
+    fn check_user_hosts(
+        &self,
+        provider: &Provider,
+        cfg: &Map<String, Value>,
+        keys: &[String],
+    ) -> Result<()> {
+        let vars = json!({ "connectionConfig": cfg });
+        let templates = url_templates(provider);
+        for key in keys {
+            let safe = provider.connection_config.get(key).is_some_and(|s| {
+                !s.allowed.is_empty() || s.pattern.as_deref().is_some_and(pattern_fixes_domain)
+            });
+            if safe {
+                continue;
+            }
+            let path = format!("connectionConfig.{key}");
+            for t in &templates {
+                if !template::value_sets_host(t, &vars, &path) {
+                    continue;
+                }
+                let allowed = template::render_url(t, &vars)
+                    .ok()
+                    .and_then(|u| url::Url::parse(&u).ok())
+                    .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+                    .is_some_and(|h| {
+                        crate::proxy::host_allowed(&h, &self.inner.config.proxy.allowed_hosts)
+                    });
+                if !allowed {
+                    return Err(invalid(format!(
+                        "connection config {key} sets the host of a provider URL: set it in the session defaults or add the host to the allowed hosts"
+                    )));
+                }
             }
         }
-        scopes
+        Ok(())
+    }
+
+    /// Returns the scopes to ask for: the integration scopes, or the
+    /// provider default scopes when the integration has none.
+    pub(crate) fn requested_scopes(
+        integration: &IntegrationRow,
+        provider: &Provider,
+    ) -> Vec<String> {
+        if integration.scopes.is_empty() {
+            provider.default_scopes.clone()
+        } else {
+            integration.scopes.clone()
+        }
     }
 
     fn render_params(
@@ -338,12 +435,26 @@ impl SanMateo {
         options: ConnectOptions,
     ) -> Result<String> {
         let t = self.target(token, integration, &AuthMode::OAuth2).await?;
+        if let Some(k) = options
+            .authorization_params
+            .keys()
+            .find(|k| RESERVED_PARAMS.contains(&k.as_str()))
+        {
+            return Err(invalid(format!(
+                "the authorization parameter {k} is reserved"
+            )));
+        }
         let env = t.session.environment.clone();
-        let cfg = Self::connection_config(
+        let mut cfg = self.connection_config(
             &t.provider,
             options.connection_config,
             &t.defaults.connection_config,
         )?;
+        // As in Nango: only the session defaults set user scopes.
+        let user_scope = t.defaults.user_scopes.clone().filter(|s| !s.is_empty());
+        if let Some(us) = &user_scope {
+            cfg.insert("user_scope".to_owned(), json!(us));
+        }
         let vars = json!({ "connectionConfig": cfg });
         let auth_url = t.provider.authorization_url.as_deref().ok_or_else(|| {
             Error::Internal(format!(
@@ -354,13 +465,18 @@ impl SanMateo {
         let auth_url = template::render_url(auth_url, &vars)?;
         let mut params = Self::render_params(&t.provider.authorization_params, &vars)?;
         params.extend(options.authorization_params);
+        if let Some(us) =
+            user_scope.filter(|_| USER_SCOPE_PROVIDERS.contains(&t.provider.name.as_str()))
+        {
+            params.insert("user_scope".to_owned(), us);
+        }
         params.extend(t.defaults.authorization_params.clone());
         let client_id = t
             .integration
             .client_id
             .clone()
             .ok_or_else(|| Error::MissingField("client_id".to_owned()))?;
-        let scopes = Self::scopes(&t, options.user_scopes.as_deref());
+        let scopes = Self::requested_scopes(&t.integration, &t.provider);
         let redirect_uri = self.redirect_uri(&env)?;
         let state = self.random_token(32);
         let state_hash = self.inner.keys.lookup_hash(&state);
@@ -398,7 +514,8 @@ impl SanMateo {
                 connection_config: Value::Object(cfg),
                 redirect_uri,
                 created_at: now,
-                expires_at: now + ttl,
+                // The flow ends with its connect session.
+                expires_at: (now + ttl).min(t.session.expires_at),
             })
             .await?;
         Ok(url)
@@ -456,14 +573,38 @@ impl SanMateo {
         if !session_live(self.now_ms(), crate::clock::to_ms(row.expires_at)) {
             return Err(Error::InvalidOAuthState);
         }
+        // The state is now used. Finish in a tracked task: a dropped request
+        // must not lose the code exchange or the failure event.
+        let this = self.clone();
+        let query = query.clone();
+        self.inner
+            .tasks
+            .spawn(async move { this.finish_callback(row, &query).await })
+            .await
+            .map_err(|_| Error::Internal("the OAuth callback task failed".to_owned()))?
+    }
+
+    async fn finish_callback(
+        &self,
+        row: OAuthSessionRow,
+        query: &BTreeMap<String, String>,
+    ) -> Result<Connection> {
         let env = row.environment.clone();
         let session = match row.connect_session_id {
-            Some(id) => self
-                .inner
-                .store
-                .get_connect_session_by_id(id)
-                .await?
-                .map(to_session),
+            Some(id) => {
+                // A deleted or expired connect session ends its flows.
+                let s = self
+                    .inner
+                    .store
+                    .get_connect_session_by_id(id)
+                    .await?
+                    .map(to_session)
+                    .ok_or(Error::InvalidConnectSession)?;
+                if !session_live(self.now_ms(), crate::clock::to_ms(s.expires_at)) {
+                    return Err(Error::InvalidConnectSession);
+                }
+                Some(s)
+            }
             None => None,
         };
         let integration = self.integration_row(&env, &row.provider_config_key).await?;
@@ -516,6 +657,19 @@ impl SanMateo {
             Value::Object(m) => m.clone(),
             _ => Map::new(),
         };
+        // Values from the callback can go into the token URL. The end user
+        // controls them, so check them first.
+        let mut from_callback = Vec::new();
+        for name in &provider.redirect_uri_metadata {
+            if let Some(v) = query.get(name).filter(|v| !v.is_empty()) {
+                if let Some(schema) = provider.connection_config.get(name) {
+                    check_field(name, schema, v)?;
+                }
+                cfg.insert(name.clone(), json!(v));
+                from_callback.push(name.clone());
+            }
+        }
+        self.check_user_hosts(provider, &cfg, &from_callback)?;
         let vars = json!({ "connectionConfig": cfg });
         let token_url = provider.token_url_for(&AuthMode::OAuth2).ok_or_else(|| {
             Error::Internal(format!("provider {} has no token URL", provider.name))
@@ -552,11 +706,6 @@ impl SanMateo {
         let reply = self
             .token_call(request, provider, "token_exchange_failed")
             .await?;
-        for name in &provider.redirect_uri_metadata {
-            if let Some(v) = query.get(name) {
-                cfg.insert(name.clone(), json!(v));
-            }
-        }
         cfg.extend(oauth2::extract_metadata(
             &reply.raw,
             &provider.token_response_metadata,
@@ -749,15 +898,27 @@ impl SanMateo {
                 .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
                 .collect(),
         );
+        let body = check
+            .data
+            .as_ref()
+            .map(serde_json::to_vec)
+            .transpose()
+            .map_err(|e| Error::Internal(format!("verification data: {e}")))?;
         let mut last = None;
         for endpoint in &check.endpoints {
+            let endpoint = template::render_url(endpoint, &vars)?;
             let url = crate::proxy::add_query(
-                &crate::proxy::join_url(&base, endpoint)?,
+                &crate::proxy::join_url(&base, &endpoint)?,
                 &crate::proxy::provider_query(provider, &vars)?,
             )?;
             crate::proxy::check_upstream(&url, None, false, &self.inner.config.proxy)?;
             let mut req = HttpRequest::new(&check.method, url);
             req.headers.clone_from(&headers);
+            if let Some(b) = &body {
+                req = req
+                    .header("content-type", "application/json")
+                    .body(b.clone());
+            }
             match self.inner.transport.send(req).await {
                 Ok(r) if (200..300).contains(&r.status) => return Ok(()),
                 Ok(r) => last = Some(r.status),
@@ -765,7 +926,7 @@ impl SanMateo {
             }
         }
         Err(Error::Provider {
-            code: "verification_failed",
+            code: "connection_test_failed",
             status: last,
             message: "the provider did not accept the credentials".to_owned(),
         })
@@ -780,7 +941,7 @@ impl SanMateo {
         make: impl FnOnce(&Target) -> Result<Credentials>,
     ) -> Result<Connection> {
         let t = self.target(token, integration, &mode).await?;
-        let cfg = Self::connection_config(
+        let cfg = self.connection_config(
             &t.provider,
             options.connection_config,
             &t.defaults.connection_config,
@@ -797,7 +958,7 @@ impl SanMateo {
     ///
     /// # Errors
     ///
-    /// Session errors, and [`Error::Provider`] with `verification_failed`.
+    /// Session errors, and [`Error::Provider`] with `connection_test_failed`.
     pub async fn connect_api_key(
         &self,
         token: &str,
@@ -818,7 +979,7 @@ impl SanMateo {
     ///
     /// # Errors
     ///
-    /// Session errors, and [`Error::Provider`] with `verification_failed`.
+    /// Session errors, and [`Error::Provider`] with `connection_test_failed`.
     pub async fn connect_basic(
         &self,
         token: &str,
@@ -908,12 +1069,12 @@ impl SanMateo {
         if client_secret.is_empty() {
             return Err(Error::MissingField("client_secret".to_owned()));
         }
-        let cfg = Self::connection_config(
+        let cfg = self.connection_config(
             &t.provider,
             options.connection_config,
             &t.defaults.connection_config,
         )?;
-        let scopes = Self::scopes(&t, options.user_scopes.as_deref());
+        let scopes = Self::requested_scopes(&t.integration, &t.provider);
         let creds = self
             .client_credentials_token(
                 &t.provider,

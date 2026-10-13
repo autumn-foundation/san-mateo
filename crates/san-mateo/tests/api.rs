@@ -259,7 +259,9 @@ async fn oauth_over_http() {
     assert_eq!(r.status, StatusCode::FOUND, "{}", r.text());
     let location = r.header("location").unwrap().to_owned();
     let q = query_of(&location);
-    assert_eq!(q["scope"], "read");
+    // As in Nango: with a connect session, the end user cannot change scopes.
+    assert_eq!(q["scope"], "read,write");
+    assert!(!q.contains_key("user_scope"));
     assert_eq!(q["prompt"], "login");
     h.http.reply(
         "POST",

@@ -74,7 +74,7 @@ fn error_page(san: &SanMateo, e: &Error) -> Response {
     let status = StatusCode::from_u16(e.status()).unwrap_or(StatusCode::BAD_REQUEST);
     let body = format!(
         "<h1>The connection did not complete</h1><p class=\"error\">{}</p><p><code>{}</code></p>",
-        escape(&e.to_string()),
+        escape(&e.public_message()),
         escape(e.code())
     );
     let msg = json!({"type": "san-mateo:auth", "eventType": "AUTHORIZATION_FAILED", "error": {"type": e.code()}});
@@ -169,11 +169,13 @@ fn integration_section(san: &SanMateo, token: &str, key: &str, provider: &Provid
                     escape(key)
                 );
             }
+            // The script opens the URL as a link. A form submit that ends in
+            // a redirect to the provider breaks the CSP `form-action`.
             return format!(
-                "<section>{title}<form method=\"get\" action=\"{server}/oauth/connect/{}\"><input type=\"hidden\" name=\"connect_session_token\" value=\"{}\">{}<button type=\"submit\">Connect</button></form></section>",
-                escape(key),
+                "<section>{title}<form class=\"sm-oauth\" method=\"get\" action=\"{server}/oauth/connect/{key}\" data-action=\"{server}/oauth/connect/{key}?{token_q}\"><input type=\"hidden\" name=\"connect_session_token\" value=\"{}\">{}<button type=\"submit\">Connect</button></form></section>",
                 escape(token),
-                field_inputs(provider, &[])
+                field_inputs(provider, &[]),
+                key = escape(key),
             );
         }
         AuthMode::ApiKey => ("api-auth/api-key", vec![("apiKey", "API key")]),
@@ -191,15 +193,26 @@ fn integration_section(san: &SanMateo, token: &str, key: &str, provider: &Provid
         AuthMode::None => ("auth/unauthenticated", vec![]),
         AuthMode::Other(_) => return String::new(),
     };
+    // `method="post"`: with no script, a submit never puts a secret in a URL.
     format!(
-        "<section>{title}<form class=\"sm-json\" data-action=\"{server}/{path}/{}?{token_q}\">{}<button type=\"submit\">Connect</button><p class=\"result\"></p></form></section>",
-        escape(key),
-        field_inputs(provider, &fields)
+        "<section>{title}<form class=\"sm-json\" method=\"post\" action=\"{action}\" data-action=\"{action}\">{}<button type=\"submit\">Connect</button><p class=\"result\"></p></form></section>",
+        field_inputs(provider, &fields),
+        action = format_args!("{server}/{path}/{}?{token_q}", escape(key)),
     )
 }
 
-/// Posts each `.sm-json` form as JSON and shows the result.
-const FORM_SCRIPT: &str = "document.querySelectorAll('form.sm-json').forEach(function (f) {\
+/// Opens each `.sm-oauth` form as a link. Posts each `.sm-json` form as JSON
+/// and shows the result.
+const FORM_SCRIPT: &str = "document.querySelectorAll('form.sm-oauth').forEach(function (f) {\
+  f.addEventListener('submit', function (e) {\
+    e.preventDefault();\
+    var q = new URLSearchParams();\
+    new FormData(f).forEach(function (v, k) { if (k !== 'connect_session_token') { q.append(k, v); } });\
+    var s = q.toString();\
+    window.location.assign(f.dataset.action + (s ? '&' + s : ''));\
+  });\
+});\
+document.querySelectorAll('form.sm-json').forEach(function (f) {\
   f.addEventListener('submit', async function (e) {\
     e.preventDefault();\
     var body = {}; var cfg = {};\

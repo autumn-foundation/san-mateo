@@ -129,6 +129,10 @@ impl Error {
             | Self::UnsupportedAuthMode(_)
             | Self::Template(_) => 400,
             Self::IntegrationNotAllowed(_) | Self::ForbiddenHost(_) => 403,
+            // As in Nango: a failed credential check is a client error.
+            Self::Provider { code, .. } if matches!(code.as_bytes(), b"connection_test_failed") => {
+                400
+            }
             Self::UnknownProvider(_)
             | Self::UnknownIntegration(_)
             | Self::UnknownConnection(_)
@@ -137,6 +141,16 @@ impl Error {
             Self::RefreshExhausted | Self::RefreshCooldown => 424,
             Self::Provider { .. } | Self::Upstream(_) | Self::UpstreamTooLarge => 502,
             Self::Function(_) | Self::Crypto | Self::Store(_) | Self::Internal(_) => 500,
+        }
+    }
+
+    /// Returns the message for a client. Store and internal errors give a
+    /// fixed text: their details stay in the log.
+    #[must_use]
+    pub fn public_message(&self) -> String {
+        match self {
+            Self::Store(_) | Self::Internal(_) => "an internal error occurred".to_owned(),
+            other => other.to_string(),
         }
     }
 

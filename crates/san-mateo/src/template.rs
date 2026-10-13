@@ -69,6 +69,47 @@ pub fn render_url(template: &str, vars: &Value) -> Result<String> {
     render_with(template, vars, true)
 }
 
+/// Returns `true` when the value at `path` can change the site (the last two
+/// host labels) of the URL that `template` makes.
+///
+/// The check renders the template two times with two probe values at
+/// `path`. A value at the start of a URL, or a value that is all of the
+/// host, changes the site. A value before a fixed domain, as in
+/// `https://${sub}.example.com`, does not.
+#[must_use]
+pub fn value_sets_host(template: &str, vars: &Value, path: &str) -> bool {
+    let site = |probe: &str| -> Option<String> {
+        let mut v = vars.clone();
+        set_path(&mut v, path, Value::String(probe.to_owned()));
+        let url = url::Url::parse(&render_url(template, &v).ok()?).ok()?;
+        let host = url.host_str()?.trim_end_matches('.').to_ascii_lowercase();
+        let labels: Vec<&str> = host.rsplitn(3, '.').take(2).collect();
+        Some(labels.join("."))
+    };
+    let (a, b) = (site("smprobea"), site("smprobeb"));
+    // A probe that makes no URL can be a full URL in the real value.
+    a.is_none() || b.is_none() || a != b
+}
+
+/// Sets `value` at a dotted `path` in `vars`. It makes objects on the way.
+fn set_path(vars: &mut Value, path: &str, value: Value) {
+    let mut cur = vars;
+    let mut parts = path.split('.').peekable();
+    while let Some(part) = parts.next() {
+        if !cur.is_object() {
+            *cur = Value::Object(serde_json::Map::new());
+        }
+        let Value::Object(map) = cur else { return };
+        if parts.peek().is_none() {
+            map.insert(part.to_owned(), value);
+            return;
+        }
+        cur = map
+            .entry(part.to_owned())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    }
+}
+
 fn render_with(template: &str, vars: &Value, url: bool) -> Result<String> {
     let alts = alternatives(template)?;
     let mut missing = String::new();
@@ -329,6 +370,43 @@ fn is_host_part(v: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn finds_values_that_set_the_host() {
+        let v = json!({"connectionConfig": {"d": "x", "sub": "acme"}});
+        let p = "connectionConfig.d";
+        assert!(value_sets_host(
+            "https://${connectionConfig.d}/token",
+            &v,
+            p
+        ));
+        assert!(value_sets_host("${connectionConfig.d}/token", &v, p));
+        assert!(value_sets_host(
+            "https://${connectionConfig.sub}.${connectionConfig.d}/x",
+            &v,
+            p
+        ));
+        assert!(!value_sets_host(
+            "https://${connectionConfig.d}.example.com/x",
+            &v,
+            p
+        ));
+        assert!(!value_sets_host(
+            "https://api.example.com/${connectionConfig.d}",
+            &v,
+            p
+        ));
+        assert!(!value_sets_host("https://api.example.com/x", &v, p));
+        // A path with no value yet is made.
+        assert!(value_sets_host(
+            "https://${connectionConfig.new}/x",
+            &json!({}),
+            "connectionConfig.new"
+        ));
+        let mut deep = json!({"a": 1});
+        set_path(&mut deep, "a.b", json!("v"));
+        assert_eq!(deep, json!({"a": {"b": "v"}}));
+    }
 
     fn vars() -> Value {
         json!({

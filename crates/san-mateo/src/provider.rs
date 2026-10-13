@@ -212,6 +212,9 @@ pub struct Verification {
     /// A base URL to use in place of `proxy.base_url`.
     #[serde(default)]
     pub base_url_override: Option<String>,
+    /// A JSON body to send.
+    #[serde(default)]
+    pub data: Option<serde_json::Value>,
     /// Extra headers.
     #[serde(default, deserialize_with = "de_string_map")]
     pub headers: BTreeMap<String, String>,
