@@ -202,6 +202,9 @@ san-mateo:hubspot?connectionId=acme&path=/crm/v3/objects/contacts&retries=2
   `SanMateoResponse-<name>` headers. Secret reply headers are not copied.
 - Errors map to camel errors. harvest-camel retries the same errors that
   San Mateo marks as retryable.
+- The `SanMateoConnectionId`, `SanMateoMethod` and `SanMateoPath` headers
+  replace the URI options only with `allowHeaderOverrides=true`. Do not set
+  it on a route where an outside caller can set headers.
 
 ## Differences from Nango
 
@@ -235,15 +238,22 @@ items are different:
   [ADR 0003](docs/adr/0003-row-bound-encryption.md).
 - **Keys.** Keep `SAN_MATEO_ENCRYPTION_KEY` in a secret store. To rotate,
   set a new key and move the old one to `SAN_MATEO_OLD_ENCRYPTION_KEYS`.
-  Keep `SAN_MATEO_LOOKUP_KEY_ID` on the first key: the lookup hashes of
-  secret keys and tokens use it.
+  Set `SAN_MATEO_LOOKUP_KEY_ID` to the first key id: the lookup hashes of
+  secret keys, tokens and records use it. The server does not start with
+  old keys and no lookup key id.
 - **Lookups.** Secret keys, connect session tokens and OAuth state are
   stored only as HMAC-SHA256 hashes. San Mateo compares them in constant
   time.
 - **Proxy.** The proxy does not follow redirects. `Base-Url-Override` must
   use HTTPS and the provider host or a host in `SAN_MATEO_ALLOWED_HOSTS`.
-  The proxy rejects private, loopback and link-local IP literals. See
+  The proxy rejects private, loopback, link-local, multicast and reserved
+  IP literals, also inside IPv6 forms (mapped, NAT64, 6to4). See
   [ADR 0004](docs/adr/0004-proxy-retry-and-ssrf.md).
+- **End-user hosts.** An end-user value that sets the host of a provider
+  URL needs an `allowed` list or a `pattern` that fixes the domain in the
+  catalog, or a host in `SAN_MATEO_ALLOWED_HOSTS`. Values in the session
+  defaults come from you and need no check.
+- **Webhook overrides** must use HTTPS and a public host.
 - **DNS.** The SSRF check reads IP literals. It does not resolve host names.
   Put a network policy in front of San Mateo if a provider host can resolve
   to a private address.

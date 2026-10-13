@@ -37,6 +37,10 @@ pub struct EndpointOptions {
     pub throw_exception_on_failure: bool,
     /// The largest request body in bytes.
     pub max_body_size: usize,
+    /// Let the connection id, method and path headers replace the options.
+    /// Default `false`: a header from an outside caller must not pick the
+    /// tenant or the path.
+    pub allow_header_overrides: bool,
 }
 
 impl EndpointOptions {
@@ -79,6 +83,7 @@ impl EndpointOptions {
             base_url_override: None,
             throw_exception_on_failure: true,
             max_body_size: default_max_body_size,
+            allow_header_overrides: false,
         };
         let mut environment = None;
         // Sort the keys, so that the first error is the same on each run.
@@ -110,6 +115,10 @@ impl EndpointOptions {
                         parse_bool_param(value).map_err(|e| bad_uri(format!("{key}: {e}")))?;
                 }
                 "maxBodySize" => options.max_body_size = parse_max_body_size(value)?,
+                "allowHeaderOverrides" => {
+                    options.allow_header_overrides =
+                        parse_bool_param(value).map_err(|e| bad_uri(format!("{key}: {e}")))?;
+                }
                 other => {
                     return Err(bad_uri(format!(
                         "unknown {SCHEME}: option '{other}'; the options are {}",
@@ -217,7 +226,7 @@ pub fn uri_options() -> Vec<UriOption> {
     vec![
         UriOption::new(
             "connectionId",
-            "The connection id. The SanMateoConnectionId header replaces it.",
+            "The connection id. With allowHeaderOverrides, the SanMateoConnectionId header replaces it.",
             OptionKind::String,
         ),
         UriOption::new(
@@ -227,13 +236,13 @@ pub fn uri_options() -> Vec<UriOption> {
         ),
         UriOption::new(
             "method",
-            "The HTTP method. The SanMateoMethod header replaces it.",
+            "The HTTP method. With allowHeaderOverrides, the SanMateoMethod header replaces it.",
             OptionKind::Enum(METHODS.iter().map(|m| (*m).to_owned()).collect()),
         )
         .with_default("GET"),
         UriOption::new(
             "path",
-            "The upstream path and query, percent-encoded. The SanMateoPath header replaces it.",
+            "The upstream path and query, percent-encoded. With allowHeaderOverrides, the SanMateoPath header replaces it.",
             OptionKind::String,
         ),
         UriOption::new(
@@ -264,6 +273,12 @@ pub fn uri_options() -> Vec<UriOption> {
             OptionKind::Int,
         )
         .with_default(&max),
+        UriOption::new(
+            "allowHeaderOverrides",
+            "Let the SanMateoConnectionId, SanMateoMethod and SanMateoPath headers replace the options. Use it only when no outside caller can set headers.",
+            OptionKind::Bool,
+        )
+        .with_default("false"),
     ]
 }
 
@@ -424,6 +439,7 @@ mod tests {
                 "baseUrlOverride",
                 "throwExceptionOnFailure",
                 "maxBodySize",
+                "allowHeaderOverrides",
             ]
         );
         for o in &opts {

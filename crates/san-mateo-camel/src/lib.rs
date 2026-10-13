@@ -34,15 +34,16 @@
 //!
 //! | Option | Default | Meaning |
 //! |---|---|---|
-//! | `connectionId` | none | The connection id. The [`HEADER_CONNECTION_ID`] header replaces it. |
+//! | `connectionId` | none | The connection id. With `allowHeaderOverrides`, the [`HEADER_CONNECTION_ID`] header replaces it. |
 //! | `environment` | component default | The San Mateo environment. |
-//! | `method` | `GET` | The HTTP method. The [`HEADER_METHOD`] header replaces it. |
-//! | `path` | none | The upstream path and query. The [`HEADER_PATH`] header replaces it. |
+//! | `method` | `GET` | The HTTP method. With `allowHeaderOverrides`, the [`HEADER_METHOD`] header replaces it. |
+//! | `path` | none | The upstream path and query. With `allowHeaderOverrides`, the [`HEADER_PATH`] header replaces it. |
 //! | `retries` | `0` | Retries after the first attempt, 0 to 9. |
 //! | `retryOn` | none | Status codes to retry also for non-idempotent methods, for example `500,502`. |
 //! | `baseUrlOverride` | none | A base URL in place of the provider base URL. San Mateo checks the host. |
 //! | `throwExceptionOnFailure` | `true` | Fail the exchange on a non-2xx reply. |
 //! | `maxBodySize` | 2 MiB | The largest request body in bytes. |
+//! | `allowHeaderOverrides` | `false` | Let the headers below replace `connectionId`, `method` and `path`. |
 //!
 //! Percent-encode `?` and `&` in a `path` value, for example
 //! `path=/v3/contacts%3Flimit%3D10`.
@@ -51,9 +52,9 @@
 //!
 //! | Header | Direction | Meaning |
 //! |---|---|---|
-//! | [`HEADER_CONNECTION_ID`] | in | Replaces `connectionId`. |
-//! | [`HEADER_METHOD`] | in | Replaces `method`. |
-//! | [`HEADER_PATH`] | in | Replaces `path`. The value can have a query. |
+//! | [`HEADER_CONNECTION_ID`] | in | Replaces `connectionId` (needs `allowHeaderOverrides`). |
+//! | [`HEADER_METHOD`] | in | Replaces `method` (needs `allowHeaderOverrides`). |
+//! | [`HEADER_PATH`] | in | Replaces `path` (needs `allowHeaderOverrides`). The value can have a query. |
 //! | `SanMateoProxy-<Name>` | in | Goes upstream as `<Name>`. |
 //! | [`HEADER_RESPONSE_CODE`] | out | The reply status as a number. |
 //! | `SanMateoResponse-<name>` | out | One reply header. Secret headers stay out. |

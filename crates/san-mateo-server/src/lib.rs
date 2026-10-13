@@ -10,7 +10,7 @@
 //! | `SAN_MATEO_ENCRYPTION_KEY` | Base64 32-byte key. Required. |
 //! | `SAN_MATEO_ENCRYPTION_KEY_ID` | Id of that key. Default `k1`. |
 //! | `SAN_MATEO_OLD_ENCRYPTION_KEYS` | Old keys for rotation: `id:base64,id:base64`. |
-//! | `SAN_MATEO_LOOKUP_KEY_ID` | Key id for lookup hashes. Default: the first key id. |
+//! | `SAN_MATEO_LOOKUP_KEY_ID` | Key id for lookup hashes. Default: the active key. Required with old keys. |
 //! | `SAN_MATEO_ENVIRONMENTS` | Environment ids, comma separated. Default `dev`. |
 //! | `SAN_MATEO_<ENV>_SECRET_KEY` | Secret key of each environment. Required. |
 //! | `SAN_MATEO_<ENV>_CALLBACK_URL` | OAuth callback URL of the environment. |
@@ -200,11 +200,6 @@ impl ServerConfig {
     fn check_keys(&self) -> Result<()> {
         let mut ids: Vec<&str> = self.old_keys.iter().map(|(id, _)| id.as_str()).collect();
         ids.push(&self.encryption_key.0);
-        if let Some(id) = &self.lookup_key_id
-            && !ids.contains(&id.as_str())
-        {
-            return Err(bad("SAN_MATEO_LOOKUP_KEY_ID", "must name a configured key"));
-        }
         ids.sort_unstable();
         if ids.windows(2).any(|w| w[0] == w[1]) {
             return Err(bad(
@@ -212,7 +207,18 @@ impl ServerConfig {
                 "key ids must be unique",
             ));
         }
-        Ok(())
+        // With old keys, the lookup key must stay on the first key. A
+        // default would follow the new active key and break live sessions.
+        match &self.lookup_key_id {
+            None if !self.old_keys.is_empty() => Err(bad(
+                "SAN_MATEO_LOOKUP_KEY_ID",
+                "is required with old keys: use the id of the first key",
+            )),
+            Some(id) if !ids.contains(&id.as_str()) => {
+                Err(bad("SAN_MATEO_LOOKUP_KEY_ID", "must name a configured key"))
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Builds the key ring.

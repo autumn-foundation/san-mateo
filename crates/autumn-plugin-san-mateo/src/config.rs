@@ -390,6 +390,14 @@ impl SanMateoConfig {
                 return bad(format!("old_encryption_keys.{id} must name an env var"));
             }
         }
+        // With old keys, the lookup key must stay on the first key. A
+        // default would follow the new active key and break live sessions.
+        if !self.old_encryption_keys.is_empty() && self.lookup_key_id.is_none() {
+            return bad(
+                "lookup_key_id is required with old_encryption_keys: use the id of the first key"
+                    .to_owned(),
+            );
+        }
         if let Some(id) = &self.lookup_key_id
             && *id != self.encryption_key_id
             && !self.old_encryption_keys.contains_key(id)
@@ -880,6 +888,7 @@ enabled = false
                     "false",
                 ),
                 ("AUTUMN_SAN_MATEO__OLD_ENCRYPTION_KEYS__K0", "OLD_KEY"),
+                ("AUTUMN_SAN_MATEO__LOOKUP_KEY_ID", "k0"),
                 ("AUTUMN_SAN_MATEO__BACKGROUND__ENABLED", "false"),
                 ("AUTUMN_SAN_MATEO__BACKGROUND__REFRESH_BATCH", "7"),
                 (

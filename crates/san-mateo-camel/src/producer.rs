@@ -89,10 +89,17 @@ fn bad_header(name: &str, problem: &str) -> CamelError {
     CamelError::ValidationError(format!("the {name} header {problem}"))
 }
 
-/// Reads the connection id, the method and the path from the headers, else
-/// from the endpoint options.
+/// Reads the connection id, the method and the path. The headers replace
+/// the endpoint options only with `allowHeaderOverrides`.
 pub(crate) fn target(message: &Message, options: &EndpointOptions) -> Result<Target, CamelError> {
-    let connection_id = match header(message, HEADER_CONNECTION_ID) {
+    let header = |name: &str| {
+        if options.allow_header_overrides {
+            header(message, name)
+        } else {
+            None
+        }
+    };
+    let connection_id = match header(HEADER_CONNECTION_ID) {
         Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
         Some(Value::Number(n)) => n.to_string(),
         Some(_) => {
@@ -107,7 +114,7 @@ pub(crate) fn target(message: &Message, options: &EndpointOptions) -> Result<Tar
             ))
         })?,
     };
-    let method = match header(message, HEADER_METHOD) {
+    let method = match header(HEADER_METHOD) {
         Some(Value::String(s)) => normalize_method(s)
             .ok_or_else(|| {
                 bad_header(
@@ -119,7 +126,7 @@ pub(crate) fn target(message: &Message, options: &EndpointOptions) -> Result<Tar
         Some(_) => return Err(bad_header(HEADER_METHOD, "must be a string")),
         None => options.method.clone(),
     };
-    let path = match header(message, HEADER_PATH) {
+    let path = match header(HEADER_PATH) {
         Some(Value::String(s)) => {
             check_path(s).map_err(|m| bad_header(HEADER_PATH, &m))?;
             s.clone()
@@ -294,7 +301,7 @@ mod tests {
 
     fn options() -> EndpointOptions {
         EndpointOptions::parse(
-            "san-mateo:crm?connectionId=c1&method=GET&path=/v3/contacts",
+            "san-mateo:crm?connectionId=c1&method=GET&path=/v3/contacts&allowHeaderOverrides=true",
             Some("dev"),
             1024,
         )
@@ -350,7 +357,9 @@ mod tests {
 
     #[test]
     fn bad_target_headers_fail_validation() {
-        let no_defaults = EndpointOptions::parse("san-mateo:crm", Some("dev"), 1024).unwrap();
+        let no_defaults =
+            EndpointOptions::parse("san-mateo:crm?allowHeaderOverrides=true", Some("dev"), 1024)
+                .unwrap();
         assert!(validation(target(&Message::default(), &no_defaults)).contains("connection"));
         let mut m = Message::default();
         m.set_header(HEADER_CONNECTION_ID, "c1");

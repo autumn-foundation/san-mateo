@@ -209,8 +209,10 @@ pub fn add_query(url: &str, params: &[(String, String)]) -> Result<String> {
     Ok(format!("{url}{sep}{query}"))
 }
 
-/// Returns `true` for an IP that is private, loopback, link-local,
-/// unspecified, broadcast or shared (CGNAT).
+/// Returns `true` for an IP that is not a public unicast address: private,
+/// loopback, link-local, unspecified, shared (CGNAT), benchmark, multicast or
+/// reserved. An IPv6 address with an IPv4 address in it (mapped, compatible,
+/// NAT64 or 6to4) uses the rule of that IPv4 address.
 fn is_internal_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -218,19 +220,40 @@ fn is_internal_ip(ip: IpAddr) -> bool {
             v4.is_private()
                 || v4.is_loopback()
                 || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
+                || v4.is_multicast()
+                || a == 0
+                || a >= 240
                 || (a == 100 && (64..128).contains(&b))
+                || (a == 198 && (b == 18 || b == 19))
         }
         IpAddr::V6(v6) => {
+            let s = v6.segments();
+            let embedded = |hi: u16, lo: u16| {
+                let [h1, h2] = hi.to_be_bytes();
+                let [l1, l2] = lo.to_be_bytes();
+                is_internal_ip(IpAddr::V4(std::net::Ipv4Addr::new(h1, h2, l1, l2)))
+            };
             if let Some(mapped) = v6.to_ipv4_mapped() {
                 return is_internal_ip(IpAddr::V4(mapped));
             }
-            let first = v6.segments()[0];
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || (first & 0xfe00) == 0xfc00
-                || (first & 0xffc0) == 0xfe80
+            if v6.is_loopback() || v6.is_unspecified() {
+                return true;
+            }
+            match s {
+                // IPv4-compatible (::a.b.c.d), NAT64 (64:ff9b::/96) and 6to4
+                // (2002::/16).
+                [0, 0, 0, 0, 0, 0, hi, lo]
+                | [0x64, 0xff9b, 0, 0, 0, 0, hi, lo]
+                | [0x2002, hi, lo, ..] => embedded(hi, lo),
+                // Local NAT64 (64:ff9b:1::/48).
+                [0x64, 0xff9b, 1, ..] => true,
+                [first, ..] => {
+                    (first & 0xfe00) == 0xfc00
+                        || (first & 0xffc0) == 0xfe80
+                        || (first & 0xffc0) == 0xfec0
+                        || (first & 0xff00) == 0xff00
+                }
+            }
         }
     }
 }
@@ -284,7 +307,10 @@ pub fn check_upstream(
     let internal = match parsed.host() {
         Some(url::Host::Ipv4(ip)) => is_internal_ip(IpAddr::V4(ip)),
         Some(url::Host::Ipv6(ip)) => is_internal_ip(IpAddr::V6(ip)),
-        _ => host == "localhost" || host.ends_with(".localhost"),
+        _ => {
+            let name = host.trim_end_matches('.');
+            name == "localhost" || name.ends_with(".localhost")
+        }
     };
     if internal && !settings.allow_private_hosts {
         return Err(Error::ForbiddenHost(format!("the host {host} is internal")));
