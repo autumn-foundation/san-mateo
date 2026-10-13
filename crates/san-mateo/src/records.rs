@@ -87,6 +87,19 @@ pub const fn classify_delete(existing: Option<&RecordState>) -> Change {
     }
 }
 
+/// Returns the write time of a record batch.
+///
+/// The time is `now`, or 1 µs after `newest` (the newest `updated_at` of the
+/// connection and model) when that is later. So write times only go up, also
+/// for a slow batch or a clock step back, and a cursor that a reader holds
+/// does not skip a later batch.
+#[must_use]
+pub fn next_write_time(now: DateTime<Utc>, newest: Option<DateTime<Utc>>) -> DateTime<Utc> {
+    newest
+        .and_then(|t| t.checked_add_signed(chrono::Duration::microseconds(1)))
+        .map_or(now, |next| next.max(now))
+}
+
 /// Returns the stable id of a record: a UUID v5 from the connection, the
 /// model and the external id.
 #[must_use]
@@ -283,6 +296,20 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use serde_json::json;
+
+    #[test]
+    fn write_times_only_go_up() {
+        let t = |us: i64| DateTime::<Utc>::from_timestamp_micros(us).unwrap();
+        assert_eq!(next_write_time(t(10), None), t(10));
+        assert_eq!(next_write_time(t(10), Some(t(5))), t(10));
+        assert_eq!(next_write_time(t(10), Some(t(10))), t(11));
+        assert_eq!(next_write_time(t(5), Some(t(10))), t(11));
+        assert_eq!(
+            next_write_time(t(5), Some(DateTime::<Utc>::MAX_UTC)),
+            t(5),
+            "no overflow"
+        );
+    }
 
     #[test]
     fn upsert_classes() {

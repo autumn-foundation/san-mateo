@@ -30,7 +30,7 @@ use diesel::sql_types::{Bool, Text, Timestamptz};
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection};
 use san_mateo::records::{
-    Change, LastAction, RecordQuery, RecordState, classify_delete, classify_upsert,
+    Change, LastAction, RecordQuery, RecordState, classify_delete, classify_upsert, next_write_time,
 };
 use san_mateo::store::{
     ConnectSessionRow, ConnectionFilter, ConnectionRow, IntegrationRow, OAuthSessionRow, RecordRow,
@@ -178,18 +178,31 @@ impl PgStore {
     /// `sm_sync_states.data` and `EXCLUDED.data`). `update` is fixed text.
     async fn write_sync_state(&self, row: &SyncStateRow, update: &str) -> Result<()> {
         let data = rows::sync_data(row)?;
-        let mut c = self.conn().await?;
-        diesel::sql_query(format!(
+        let sql = format!(
             "INSERT INTO sm_sync_states (connection, sync_name, data) VALUES ($1, $2, $3) \
              ON CONFLICT (connection, sync_name) DO UPDATE SET data = {update}"
-        ))
-        .bind::<diesel::sql_types::Uuid, _>(row.connection)
-        .bind::<Text, _>(&row.sync_name)
-        .bind::<diesel::sql_types::Jsonb, _>(&data)
-        .execute(&mut c)
-        .await
-        .map_err(db)?;
-        Ok(())
+        );
+        let mut c = self.conn().await?;
+        let written = c
+            .transaction(async |c| {
+                if !lock_connection(c, row.connection).await? {
+                    return Ok(false);
+                }
+                diesel::sql_query(&sql)
+                    .bind::<diesel::sql_types::Uuid, _>(row.connection)
+                    .bind::<Text, _>(&row.sync_name)
+                    .bind::<diesel::sql_types::Jsonb, _>(&data)
+                    .execute(c)
+                    .await?;
+                Ok::<_, diesel::result::Error>(true)
+            })
+            .await
+            .map_err(db)?;
+        if written {
+            Ok(())
+        } else {
+            Err(unknown_connection(row.connection))
+        }
     }
 }
 
@@ -209,6 +222,67 @@ async fn delete_connections(c: &mut AsyncPgConnection, ids: &[Uuid]) -> diesel::
         .execute(c)
         .await?;
     Ok(())
+}
+
+/// Returns `true` when the connection exists, and locks its row against a
+/// delete until the transaction ends. The foreign keys give the same rule;
+/// this check also gives a clear error.
+async fn lock_connection(c: &mut AsyncPgConnection, id: Uuid) -> diesel::QueryResult<bool> {
+    use schema::sm_connections::dsl as cn;
+    let found: Option<Uuid> = cn::sm_connections
+        .filter(cn::id.eq(id))
+        .select(cn::id)
+        .for_key_share()
+        .first(c)
+        .await
+        .optional()?;
+    Ok(found.is_some())
+}
+
+/// Locks the records of (connection, model) until the transaction ends, so
+/// batches of one model run one after the other. Returns the write time of
+/// the batch (see [`next_write_time`]).
+async fn lock_records(
+    c: &mut AsyncPgConnection,
+    connection: Uuid,
+    model: &str,
+    now: DateTime<Utc>,
+) -> diesel::QueryResult<DateTime<Utc>> {
+    use schema::sm_records::dsl as r;
+    diesel::sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind::<Text, _>(format!("sm_records:{connection}:{model}"))
+        .execute(c)
+        .await?;
+    let newest: Option<DateTime<Utc>> = r::sm_records
+        .filter(r::connection.eq(connection))
+        .filter(r::model.eq(model))
+        .select(diesel::dsl::max(r::updated_at))
+        .first(c)
+        .await?;
+    Ok(next_write_time(now, newest))
+}
+
+/// Returns the positions of `ids` in id order. Rows are locked in this
+/// order, so two batches cannot wait for each other.
+fn id_order(ids: impl Iterator<Item = Uuid>) -> Vec<usize> {
+    let mut order: Vec<(Uuid, usize)> = ids.enumerate().map(|(i, id)| (id, i)).collect();
+    order.sort_unstable();
+    order.into_iter().map(|(_, i)| i).collect()
+}
+
+/// Puts results back in input order.
+fn in_input_order(order: &[usize], done: Vec<(String, Change)>) -> Vec<(String, Change)> {
+    let mut out: Vec<Option<(String, Change)>> = vec![None; done.len()];
+    for (&i, d) in order.iter().zip(done) {
+        if let Some(slot) = out.get_mut(i) {
+            *slot = Some(d);
+        }
+    }
+    out.into_iter().flatten().collect()
+}
+
+fn unknown_connection(id: Uuid) -> Error {
+    Error::UnknownConnection(id.to_string())
 }
 
 /// Reads the state of a record and locks its row.
@@ -724,18 +798,24 @@ impl Store for PgStore {
     ) -> Result<Vec<(String, Change)>> {
         let mut c = self.conn().await?;
         let model = model.to_owned();
+        let order = id_order(rows.iter().map(|w| w.id));
         c.transaction(async |c| {
-            let mut out = Vec::with_capacity(rows.len());
-            for w in &rows {
-                out.push((
+            if !lock_connection(c, connection).await? {
+                return Ok(None);
+            }
+            let at = lock_records(c, connection, &model, now).await?;
+            let mut done = Vec::with_capacity(rows.len());
+            for w in order.iter().filter_map(|&i| rows.get(i)) {
+                done.push((
                     w.external_id.clone(),
-                    upsert_record(c, connection, &model, w, now).await?,
+                    upsert_record(c, connection, &model, w, at).await?,
                 ));
             }
-            Ok::<_, diesel::result::Error>(out)
+            Ok::<_, diesel::result::Error>(Some(in_input_order(&order, done)))
         })
         .await
-        .map_err(db)
+        .map_err(db)?
+        .ok_or_else(|| unknown_connection(connection))
     }
 
     async fn delete_records(
@@ -748,9 +828,14 @@ impl Store for PgStore {
         use schema::sm_records::dsl as r;
         let mut c = self.conn().await?;
         let model = model.to_owned();
+        let order = id_order(ids.iter().map(|(id, _)| *id));
         c.transaction(async |c| {
-            let mut out = Vec::with_capacity(ids.len());
-            for (id, external) in &ids {
+            if !lock_connection(c, connection).await? {
+                return Ok(None);
+            }
+            let at = lock_records(c, connection, &model, now).await?;
+            let mut done = Vec::with_capacity(ids.len());
+            for (id, external) in order.iter().filter_map(|&i| ids.get(i)) {
                 let state = record_state(c, connection, &model, *id).await?;
                 let change = classify_delete(state.as_ref());
                 if change == Change::Deleted {
@@ -760,16 +845,17 @@ impl Store for PgStore {
                             .filter(r::model.eq(&model))
                             .filter(r::id.eq(*id)),
                     )
-                    .set((r::deleted_at.eq(Some(now)), r::updated_at.eq(now)))
+                    .set((r::deleted_at.eq(Some(at)), r::updated_at.eq(at)))
                     .execute(c)
                     .await?;
                 }
-                out.push((external.clone(), change));
+                done.push((external.clone(), change));
             }
-            Ok::<_, diesel::result::Error>(out)
+            Ok::<_, diesel::result::Error>(Some(in_input_order(&order, done)))
         })
         .await
-        .map_err(db)
+        .map_err(db)?
+        .ok_or_else(|| unknown_connection(connection))
     }
 
     async fn list_records(&self, connection: Uuid, query: &RecordQuery) -> Result<Vec<RecordRow>> {

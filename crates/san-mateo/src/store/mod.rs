@@ -360,6 +360,11 @@ pub trait Store: Send + Sync + 'static {
 
     /// Writes records. Each row is compared with the stored row. Returns the
     /// change for each external id, in input order.
+    ///
+    /// The write time is [`crate::records::next_write_time`] of `now`, so
+    /// times of one (connection, model) only go up. Batches of one
+    /// (connection, model) do not overlap. [`crate::Error::UnknownConnection`]
+    /// when the connection does not exist.
     async fn upsert_records(
         &self,
         connection: Uuid,
@@ -368,6 +373,7 @@ pub trait Store: Send + Sync + 'static {
         now: DateTime<Utc>,
     ) -> Result<Vec<(String, Change)>>;
     /// Marks records as deleted. Returns the change for each external id.
+    /// The write time and the errors are as for [`Store::upsert_records`].
     async fn delete_records(
         &self,
         connection: Uuid,
@@ -381,9 +387,11 @@ pub trait Store: Send + Sync + 'static {
 
     /// Writes the state of a sync. It keeps the stored `paused` value: only
     /// [`Store::set_sync_paused`] changes it. A new state takes `row.paused`.
+    /// [`crate::Error::UnknownConnection`] when the connection does not exist.
     async fn put_sync_state(&self, row: SyncStateRow) -> Result<()>;
     /// Sets `paused` of a sync state to `row.paused`. It changes no other
-    /// field. When no state is stored, it adds `row`.
+    /// field. When no state is stored, it adds `row`. The errors are as for
+    /// [`Store::put_sync_state`].
     async fn set_sync_paused(&self, row: SyncStateRow) -> Result<()>;
     /// Reads the state of a sync.
     async fn get_sync_state(

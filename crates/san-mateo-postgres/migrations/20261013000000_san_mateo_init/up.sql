@@ -79,8 +79,9 @@ CREATE TABLE IF NOT EXISTS sm_oauth_sessions (
 
 CREATE INDEX IF NOT EXISTS sm_oauth_sessions_expiry ON sm_oauth_sessions (expires_at);
 
+-- Records and sync states go with their connection.
 CREATE TABLE IF NOT EXISTS sm_records (
-    connection UUID NOT NULL,
+    connection UUID NOT NULL REFERENCES sm_connections (id) ON DELETE CASCADE,
     model TEXT NOT NULL,
     id UUID NOT NULL,
     external_id TEXT NOT NULL,
@@ -95,7 +96,7 @@ CREATE TABLE IF NOT EXISTS sm_records (
 CREATE INDEX IF NOT EXISTS sm_records_cursor ON sm_records (connection, model, updated_at, id);
 
 CREATE TABLE IF NOT EXISTS sm_sync_states (
-    connection UUID NOT NULL,
+    connection UUID NOT NULL REFERENCES sm_connections (id) ON DELETE CASCADE,
     sync_name TEXT NOT NULL,
     data JSONB NOT NULL,
     PRIMARY KEY (connection, sync_name)

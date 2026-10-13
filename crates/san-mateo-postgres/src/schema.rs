@@ -102,3 +102,7 @@ diesel::table! {
         data -> Jsonb,
     }
 }
+
+// Foreign keys: `ON DELETE CASCADE` from each table to `sm_connections`.
+diesel::joinable!(sm_records -> sm_connections (connection));
+diesel::joinable!(sm_sync_states -> sm_connections (connection));
