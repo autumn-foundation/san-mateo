@@ -131,7 +131,8 @@ impl Credentials {
     }
 
     /// Returns the template variables: `apiKey`, `accessToken`, `clientId`
-    /// and `credentials.*`.
+    /// and `credentials.*`. For `OAuth2`, [`add_client_vars`] adds the
+    /// integration client.
     #[must_use]
     pub fn template_vars(&self) -> Value {
         match self {
@@ -153,6 +154,20 @@ impl Credentials {
                 "credentials": {"username": username, "password": password.expose()},
             }),
             Self::Unauthenticated => json!({"credentials": {}}),
+        }
+    }
+}
+
+/// Adds the integration client to template `vars`: `clientId` and
+/// `clientSecret`. A key that `vars` has stays. An empty value is left out.
+pub fn add_client_vars(vars: &mut Value, client_id: Option<&str>, client_secret: Option<&str>) {
+    let Value::Object(map) = vars else {
+        return;
+    };
+    for (key, value) in [("clientId", client_id), ("clientSecret", client_secret)] {
+        if let Some(v) = value.filter(|v| !v.is_empty()) {
+            map.entry(key)
+                .or_insert_with(|| Value::String(v.to_owned()));
         }
     }
 }
@@ -295,5 +310,32 @@ mod tests {
         assert_eq!(v["clientId"], "cid");
         assert_eq!(v["clientSecret"], "cs");
         assert!(Credentials::Unauthenticated.template_vars().is_object());
+    }
+
+    #[test]
+    fn client_vars_for_oauth2_templates() {
+        let mut v = oauth().template_vars();
+        add_client_vars(&mut v, Some("cid"), Some("cs"));
+        assert_eq!(v["clientId"], "cid");
+        assert_eq!(v["clientSecret"], "cs");
+        assert_eq!(v["accessToken"], "at-1");
+        let mut v = oauth().template_vars();
+        add_client_vars(&mut v, Some(""), None);
+        assert!(v.get("clientId").is_none() && v.get("clientSecret").is_none());
+        // Client credentials keep their own client.
+        let mut v = Credentials::OAuth2ClientCredentials(ClientCredentials {
+            token: "t".into(),
+            expires_at: None,
+            client_id: "own".into(),
+            client_secret: "own-s".into(),
+            raw: Value::Null,
+        })
+        .template_vars();
+        add_client_vars(&mut v, Some("cid"), Some("cs"));
+        assert_eq!(v["clientId"], "own");
+        assert_eq!(v["clientSecret"], "own-s");
+        let mut not_a_map = Value::Null;
+        add_client_vars(&mut not_a_map, Some("cid"), None);
+        assert_eq!(not_a_map, Value::Null);
     }
 }

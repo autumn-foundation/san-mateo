@@ -343,20 +343,48 @@ pub fn auth_headers(credentials: &Credentials, provider: &Provider) -> Vec<(Stri
         .collect()
 }
 
+/// Returns `true` when `template` reads a value that is not in `vars`, is
+/// `null` or is empty.
+///
+/// # Errors
+///
+/// [`Error::Template`] when the syntax is wrong.
+fn lacks_value(template: &str, vars: &Value) -> Result<bool> {
+    Ok(crate::template::paths(template)?
+        .iter()
+        .any(|p| match crate::template::lookup(vars, p) {
+            None | Some(Value::Null) => true,
+            Some(Value::String(s)) => s.is_empty(),
+            Some(_) => false,
+        }))
+}
+
+/// Renders each template of `map`. An entry with a missing value is left
+/// out, as in Nango.
 fn render_map(
     map: &std::collections::BTreeMap<String, String>,
     vars: &Value,
 ) -> Result<Vec<(String, String)>> {
-    map.iter()
-        .map(|(k, v)| Ok((k.to_ascii_lowercase(), crate::template::render(v, vars)?)))
-        .collect()
+    let mut out = Vec::with_capacity(map.len());
+    for (k, v) in map {
+        match crate::template::render(v, vars) {
+            Ok(value) => out.push((k.to_ascii_lowercase(), value)),
+            Err(e) => {
+                if !lacks_value(v, vars)? {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
-/// Renders the provider `proxy.headers` with `vars`.
+/// Renders the provider `proxy.headers` with `vars`. A header with a missing
+/// value is left out.
 ///
 /// # Errors
 ///
-/// [`Error::Template`] when a value is missing.
+/// [`Error::Template`] when the syntax is wrong or a value is not text.
 pub fn provider_headers(provider: &Provider, vars: &Value) -> Result<Vec<(String, String)>> {
     provider
         .proxy
@@ -364,11 +392,12 @@ pub fn provider_headers(provider: &Provider, vars: &Value) -> Result<Vec<(String
         .map_or_else(|| Ok(Vec::new()), |p| render_map(&p.headers, vars))
 }
 
-/// Renders the provider `proxy.query` with `vars`.
+/// Renders the provider `proxy.query` with `vars`. A parameter with a
+/// missing value is left out.
 ///
 /// # Errors
 ///
-/// [`Error::Template`] when a value is missing.
+/// [`Error::Template`] when the syntax is wrong or a value is not text.
 pub fn provider_query(provider: &Provider, vars: &Value) -> Result<Vec<(String, String)>> {
     provider
         .proxy

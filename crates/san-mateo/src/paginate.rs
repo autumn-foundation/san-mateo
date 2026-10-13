@@ -114,7 +114,8 @@ pub struct Paginator {
     config: PaginationConfig,
     limit: Option<u64>,
     offset: u64,
-    last_link: Option<String>,
+    /// The last next cursor or link. The same value again ends the loop.
+    last_next: Option<String>,
 }
 
 impl Paginator {
@@ -131,7 +132,7 @@ impl Paginator {
             config,
             limit,
             offset,
-            last_link: None,
+            last_next: None,
         }
     }
 
@@ -158,6 +159,7 @@ impl Paginator {
     }
 
     /// Reads a page reply. Returns the query for the next page, or `None` at
+    /// the end. A next cursor or link that is the same as the last one is
     /// the end.
     pub fn advance(&mut self, headers: &[(String, String)], body: &Value) -> Option<PageQuery> {
         let count = self.records(body).len();
@@ -175,6 +177,9 @@ impl Paginator {
                     Value::Number(n) => n.to_string(),
                     _ => return None,
                 };
+                if repeats(&mut self.last_next, &next) {
+                    return None;
+                }
                 let mut params = vec![(cursor_name_in_request.clone(), next)];
                 params.extend(self.limit_param());
                 Some(PageQuery { params, link: None })
@@ -195,10 +200,9 @@ impl Paginator {
                     crate::transport::header_value(headers, "link")
                         .and_then(|h| parse_link_header(h, rel))
                 })?;
-                if self.last_link.as_deref() == Some(next.as_str()) {
+                if repeats(&mut self.last_next, &next) {
                     return None;
                 }
-                self.last_link = Some(next.clone());
                 Some(PageQuery {
                     params: Vec::new(),
                     link: Some(next),
@@ -236,6 +240,16 @@ impl Paginator {
     }
 }
 
+/// Returns `true` when `next` is the same as `last`. Else keeps `next` in
+/// `last`.
+fn repeats(last: &mut Option<String>, next: &str) -> bool {
+    if last.as_deref() == Some(next) {
+        return true;
+    }
+    *last = Some(next.to_owned());
+    false
+}
+
 /// Returns the records at `path`, or the body itself when `path` is `None`.
 /// A value that is not an array gives no records.
 #[must_use]
@@ -247,18 +261,39 @@ pub fn records_from(body: &Value, path: Option<&str>) -> Vec<Value> {
     }
 }
 
+/// Splits a `Link` header value at the commas that are not in `<...>` or in
+/// a quoted string (RFC 8288).
+fn split_links(value: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut in_target, mut in_quote, mut start) = (false, false, 0);
+    for (i, c) in value.char_indices() {
+        match c {
+            '<' if !in_quote => in_target = true,
+            '>' if !in_quote => in_target = false,
+            '"' if !in_target => in_quote = !in_quote,
+            ',' if !in_target && !in_quote => {
+                out.push(&value[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&value[start..]);
+    out
+}
+
 /// Returns the URL with `rel` from an RFC 8288 `Link` header value.
 #[must_use]
 pub fn parse_link_header(value: &str, rel: &str) -> Option<String> {
-    for link in value.split(',') {
-        let mut parts = link.split(';');
-        let Some(target) = parts.next().map(str::trim) else {
+    for link in split_links(value) {
+        let Some((url, params)) = link
+            .trim_start()
+            .strip_prefix('<')
+            .and_then(|t| t.split_once('>'))
+        else {
             continue;
         };
-        let Some(url) = target.strip_prefix('<').and_then(|t| t.strip_suffix('>')) else {
-            continue;
-        };
-        let has_rel = parts.any(|p| {
+        let has_rel = params.split(';').any(|p| {
             let p = p.trim();
             p.strip_prefix("rel")
                 .map(str::trim_start)

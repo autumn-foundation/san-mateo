@@ -345,6 +345,27 @@ fn connection_json(c: &Connection) -> Value {
     })
 }
 
+/// Returns `true` for a refresh token key. Only the letters count, in any
+/// case: `refresh_token`, `refreshToken` and `Refresh-Token` match.
+fn is_refresh_token_key(key: &str) -> bool {
+    key.chars()
+        .filter(char::is_ascii_alphabetic)
+        .map(|c| c.to_ascii_lowercase())
+        .eq("refreshtoken".chars())
+}
+
+/// Removes the refresh token keys at all depths.
+fn strip_refresh_tokens(v: &mut Value) {
+    match v {
+        Value::Object(map) => {
+            map.retain(|k, _| !is_refresh_token_key(k));
+            map.values_mut().for_each(strip_refresh_tokens);
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_refresh_tokens),
+        _ => {}
+    }
+}
+
 fn session_json(s: &ConnectSession) -> Value {
     json!({
         "allowed_integrations": s.allowed_integrations,
@@ -838,7 +859,16 @@ async fn get_connection(
         force_refresh: query_flag(&pairs, "force_refresh"),
     };
     let c = san.get_connection(&env, &key, options).await?;
-    Ok(axum::Json(connection_json(&c)))
+    let mut body = connection_json(&c);
+    // As in Nango, refresh tokens show only with `refresh_token=true`.
+    if !query_flag(&pairs, "refresh_token") {
+        for field in ["credentials", "connection_config"] {
+            if let Some(v) = body.get_mut(field) {
+                strip_refresh_tokens(v);
+            }
+        }
+    }
+    Ok(axum::Json(body))
 }
 
 #[derive(Deserialize)]
@@ -889,10 +919,10 @@ async fn delete_connection(
     State(san): State<SanMateo>,
     Path(id): Path<String>,
     RawQuery(q): RawQuery,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<axum::Json<Value>> {
     let (key, _) = key_from_query(id, q.as_deref())?;
     san.delete_connection(&env, &key).await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(axum::Json(json!({"success": true})))
 }
 
 #[derive(Deserialize)]
@@ -1094,11 +1124,11 @@ async fn list_records(
                 .map_err(|_| invalid("limit must be a whole number"))
         })
         .transpose()?;
+    // Each `ids` value is one external id, as in Nango. Commas stay.
     let ids = pairs
         .iter()
-        .filter(|(k, _)| k == "ids" || k == "ids[]")
-        .flat_map(|(_, v)| v.split(',').map(str::to_owned).collect::<Vec<_>>())
-        .filter(|s| !s.is_empty())
+        .filter(|(k, v)| (k == "ids" || k == "ids[]") && !v.is_empty())
+        .map(|(_, v)| v.clone())
         .collect();
     let request = RecordsRequest {
         model: model.to_owned(),

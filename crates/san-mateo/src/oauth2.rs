@@ -12,7 +12,7 @@ use sha2::{Digest as _, Sha256};
 use crate::clock::{from_ms, to_ms};
 use crate::error::{Error, Result};
 use crate::policy::expires_at_ms;
-use crate::provider::{BodyFormat, Provider, TokenAuthMethod};
+use crate::provider::{BodyFormat, Provider};
 use crate::secret::Secret;
 use crate::transport::HttpRequest;
 
@@ -184,7 +184,7 @@ pub fn client_credentials_params(
 /// Builds a token endpoint request.
 ///
 /// The body is a form or JSON (`body_format`). The client authenticates in
-/// the body, or with Basic auth when `token_request_auth_method` is `basic`.
+/// the body, or with Basic auth (see [`Provider::uses_basic_client_auth`]).
 #[must_use]
 pub fn token_request(
     provider: &Provider,
@@ -196,7 +196,7 @@ pub fn token_request(
     let mut req = HttpRequest::new("POST", url)
         .header("accept", "application/json")
         .header("user-agent", USER_AGENT);
-    if uses_basic(provider) {
+    if provider.uses_basic_client_auth() {
         let id: String = url::form_urlencoded::byte_serialize(client_id.as_bytes()).collect();
         let secret: String =
             url::form_urlencoded::byte_serialize(client_secret.as_bytes()).collect();
@@ -262,17 +262,42 @@ fn non_empty_str(v: Option<&Value>) -> Option<&str> {
     v.and_then(Value::as_str).filter(|s| !s.is_empty())
 }
 
-/// Reads a non-negative number from a number or a numeric string.
+/// Reads a non-negative number from a number or a numeric string. A
+/// fraction becomes a whole number (`"3599.0"` is 3599).
 fn as_count(v: &Value) -> Option<u64> {
     match v {
-        Value::Number(n) => n.as_u64().or_else(|| {
-            let f = n.as_f64()?;
-            // The check keeps the value inside `u64`.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            (f.is_finite() && (0.0..1.8e19).contains(&f)).then_some(f as u64)
-        }),
-        Value::String(s) => s.trim().parse().ok(),
+        Value::Number(n) => n.as_u64().or_else(|| whole(n.as_f64()?)),
+        Value::String(s) => {
+            let s = s.trim();
+            s.parse().ok().or_else(|| whole(s.parse().ok()?))
+        }
         _ => None,
+    }
+}
+
+/// Cuts a finite, non-negative number to a whole number.
+fn whole(f: f64) -> Option<u64> {
+    // The check keeps the value inside `u64`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    (f.is_finite() && (0.0..1.8e19).contains(&f)).then_some(f as u64)
+}
+
+/// Returns `true` for a zero number or a zero numeric string.
+fn is_zero(v: &Value) -> bool {
+    match v {
+        Value::Number(n) => n.as_f64() == Some(0.0),
+        Value::String(s) => s.trim().parse::<f64>().is_ok_and(|f| f == 0.0),
+        _ => false,
+    }
+}
+
+/// Returns `true` when the reply has an `error` that is a non-empty string or
+/// an object. A `null`, `""` or `false` error is not an error.
+fn has_error(obj: &serde_json::Map<String, Value>) -> bool {
+    match obj.get("error") {
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::Object(_)) => true,
+        _ => false,
     }
 }
 
@@ -282,7 +307,7 @@ fn as_count(v: &Value) -> Option<u64> {
 pub fn reply_error(body: &[u8]) -> Option<String> {
     let obj = parse_body(body)?;
     let error = match obj.get("error")? {
-        Value::String(s) => s.clone(),
+        Value::String(s) if !s.is_empty() => s.clone(),
         Value::Object(o) => non_empty_str(o.get("code"))
             .or_else(|| non_empty_str(o.get("type")))?
             .to_owned(),
@@ -302,13 +327,14 @@ pub fn reply_error(body: &[u8]) -> Option<String> {
 /// - The token is `access_token` at the root. When it is missing, the token
 ///   comes from `alternate_path` (an object with `access_token`, or a string).
 /// - The expiry comes from `expires_at` (see [`crate::clock::parse_instant`]),
-///   else from `expires_in` (seconds, or ms when `expires_in_ms`).
+///   else from `expires_in` (seconds, or ms when `expires_in_ms`). A zero
+///   value means no expiry.
 ///
 /// # Errors
 ///
-/// [`Error::Provider`] with `code` when the reply has an `error` field, does
-/// not parse, or has no token. The message has the provider error code and
-/// description only.
+/// [`Error::Provider`] with `code` when the reply has an `error` (a
+/// non-empty string or an object), does not parse, or has no token. The
+/// message has the provider error code and description only.
 pub fn parse_token_reply(
     body: &[u8],
     alternate_path: Option<&str>,
@@ -318,7 +344,7 @@ pub fn parse_token_reply(
 ) -> Result<TokenReply> {
     let raw = parse_body(body)
         .ok_or_else(|| provider_error(code, "the token reply is not a JSON object"))?;
-    if raw.contains_key("error") {
+    if has_error(&raw) {
         let msg = reply_error(body).unwrap_or_else(|| "the provider gave an error".to_owned());
         return Err(provider_error(code, msg));
     }
@@ -342,10 +368,11 @@ pub fn parse_token_reply(
     let refresh_token = non_empty_str(holder.get("refresh_token")).map(Secret::new);
     let expires_at = holder
         .get("expires_at")
+        .filter(|v| !is_zero(v))
         .and_then(crate::clock::parse_instant)
         .or_else(|| {
             let n = as_count(holder.get("expires_in")?)?;
-            Some(from_ms(expires_at_ms(to_ms(now), n, expires_in_ms)))
+            (n > 0).then(|| from_ms(expires_at_ms(to_ms(now), n, expires_in_ms)))
         });
     Ok(TokenReply {
         access_token: Secret::new(token),
@@ -370,13 +397,6 @@ pub fn extract_metadata(raw: &Value, paths: &[String]) -> serde_json::Map<String
         .collect()
 }
 
-const fn uses_basic(provider: &Provider) -> bool {
-    matches!(
-        provider.token_request_auth_method,
-        Some(TokenAuthMethod::Basic)
-    )
-}
-
 fn body_format(provider: &Provider) -> BodyFormat {
     provider.body_format.unwrap_or_default()
 }
@@ -392,6 +412,7 @@ fn provider_error(code: &'static str, message: impl Into<String>) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::TokenAuthMethod;
     use chrono::TimeZone;
     use serde_json::json;
 
@@ -575,7 +596,10 @@ mod tests {
             let r = token_request(&p, "https://t/token", "id", "sec", params);
             assert_eq!(r.header_value("authorization"), Some("Basic aWQ6c2Vj"));
             let body = String::from_utf8(r.body).unwrap();
-            assert!(!body.contains("client_"), "{body}");
+            assert!(
+                !body.contains("client_id") && !body.contains("client_secret"),
+                "{body}"
+            );
         }
         let b = c.get("b").unwrap();
         let r = token_request(&b, "https://t/token", "id", "sec", Vec::new());
