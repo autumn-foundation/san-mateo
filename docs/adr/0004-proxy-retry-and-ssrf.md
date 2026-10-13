@@ -23,8 +23,21 @@ did the call. A `POST` can then occur two times. Nango also accepts any
 - `policy::decide` holds these rules. Verus proves them.
 - `Base-Url-Override` must use HTTPS. Its host must be the provider host or a
   host in `proxy.allowed_hosts`.
-- Upstream URLs with private, loopback or link-local IP literals are rejected,
-  unless `proxy.allow_private_hosts` is on (tests and local development).
+- Upstream URLs with internal IP literals are rejected, unless
+  `proxy.allow_private_hosts` is on (tests and local development). Internal
+  means private, loopback, link-local, shared, benchmark, multicast or
+  reserved. An IPv4 address inside an IPv6 address (mapped, compatible,
+  NAT64, 6to4) uses the IPv4 rule. `localhost` and `*.localhost` (also with a
+  trailing dot) are internal.
+- An end-user value that changes the host of a provider URL needs one of:
+  an `allowed` list in the catalog, a `pattern` that fixes the domain, or a
+  host in `proxy.allowed_hosts`. The check renders the URL with two probe
+  values and compares the last two host labels. A pattern fixes the domain
+  when it rejects the probe hosts `san-mateo-probe.invalid` and
+  `sanmateoprobe`. Values from the session defaults come from the developer.
+  They need no check. Callback values (`redirect_uri_metadata`) get the same
+  check before the token URL renders.
+- Webhook override URLs must use HTTPS and a public host.
 - The transport never follows redirects.
 
 ## Results
@@ -34,3 +47,5 @@ did the call. A `POST` can then occur two times. Nango also accepts any
 - Bad: a caller that wants Nango's retry of `POST` on 5xx must send `Retry-On`.
 - Bad: DNS names that resolve to private IPs are not blocked. Operators must
   use a network policy for that.
+- Bad: the host check takes the last two labels as the site. A template such
+  as `https://${x}.co.uk` passes. Write catalog URLs with a full domain.
