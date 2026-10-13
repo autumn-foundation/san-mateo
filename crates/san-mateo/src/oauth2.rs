@@ -483,6 +483,35 @@ mod tests {
     }
 
     #[test]
+    fn authorize_url_joins_the_query_once() {
+        let params = BTreeMap::new();
+        let url = |base: &str| {
+            authorize_url(&AuthorizeRequest {
+                authorization_url: base,
+                client_id: "cid",
+                redirect_uri: "https://cb",
+                scopes: &[],
+                scope_separator: " ",
+                state: "st",
+                code_challenge: None,
+                params: &params,
+            })
+            .unwrap()
+        };
+        let q = "response_type=code&client_id=cid&redirect_uri=https%3A%2F%2Fcb&state=st";
+        for (base, sep) in [
+            ("https://a.example.com/auth", "?"),
+            ("https://a.example.com/auth?", ""),
+            ("https://a.example.com/auth?x=1", "&"),
+            ("https://a.example.com/auth?x=1&", ""),
+            ("https://a.example.com/auth?x=1&y", "&"),
+            ("https://a.example.com/a&", "?"),
+        ] {
+            assert_eq!(url(base), format!("{base}{sep}{q}"), "{base}");
+        }
+    }
+
+    #[test]
     fn params_for_each_grant() {
         let mut tp = BTreeMap::new();
         tp.insert("grant_type".to_owned(), "authorization_code".to_owned());
@@ -681,6 +710,80 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    #[test]
+    fn an_object_error_in_a_200_reply_fails_with_its_code() {
+        for (body, msg) in [
+            (
+                r#"{"access_token":"at","error":{"code":"E1"},"error_description":"d"}"#,
+                "E1: d",
+            ),
+            (
+                r#"{"error":{"type":"OAuthException","message":"m"}}"#,
+                "OAuthException",
+            ),
+            (
+                r#"{"access_token":"at","error":{"code":"","type":"T2"}}"#,
+                "T2",
+            ),
+            (
+                r#"{"access_token":"at","error":{"code":5}}"#,
+                "the provider gave an error",
+            ),
+            (
+                r#"{"access_token":"at","error":{}}"#,
+                "the provider gave an error",
+            ),
+        ] {
+            assert_eq!(
+                parse_token_reply(body.as_bytes(), None, false, now(), "token_exchange_failed"),
+                Err(Error::Provider {
+                    code: "token_exchange_failed",
+                    status: None,
+                    message: msg.to_owned(),
+                }),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_alternate_token_fails() {
+        let no_token = Err(Error::Provider {
+            code: "x",
+            status: None,
+            message: "the token reply has no access token".to_owned(),
+        });
+        for body in [
+            r#"{"authed_user":""}"#,
+            r#"{"authed_user":{"access_token":""}}"#,
+            r#"{"authed_user":{}}"#,
+            r#"{"authed_user":5}"#,
+            r#"{"authed_user":null}"#,
+            r#"{"access_token":"","authed_user":""}"#,
+            r#"{"other":"at"}"#,
+        ] {
+            assert_eq!(
+                parse_token_reply(body.as_bytes(), Some("authed_user"), false, now(), "x"),
+                no_token,
+                "{body}"
+            );
+        }
+        // An empty root token gives way to the alternate path.
+        let r = parse_token_reply(
+            br#"{"access_token":"","authed_user":"alt"}"#,
+            Some("authed_user"),
+            false,
+            now(),
+            "x",
+        )
+        .unwrap();
+        assert_eq!(r.access_token.expose(), "alt");
+        assert_eq!(
+            parse_token_reply(br#"{"access_token":""}"#, None, false, now(), "x"),
+            no_token
+        );
     }
 
     #[test]

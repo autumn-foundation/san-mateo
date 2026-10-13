@@ -556,6 +556,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_429_is_retried_but_a_3xx_is_not() {
+        let url = "https://hooks.example.com/a";
+        let one = WebhookSettings {
+            secondary_url: None,
+            ..settings()
+        };
+        let send = |replies: &[u16]| {
+            let t = MemoryTransport::new();
+            for s in replies {
+                t.reply("POST", url, HttpResponse::new(*s, ""));
+            }
+            let one = one.clone();
+            async move {
+                let d = WebhookSender::new(Arc::new(t.clone()))
+                    .deliver(&one, None, &auth())
+                    .await;
+                (d[0].clone(), t.requests_to(url).len())
+            }
+        };
+        // A 429 that repeats: one attempt and `retries` (2) retries.
+        let (d, sends) = send(&[429]).await;
+        assert_eq!(
+            (d.status, d.attempts, d.ok, sends),
+            (Some(429), 3, false, 3)
+        );
+        // A 429, then a 200.
+        let (d, sends) = send(&[429, 200]).await;
+        assert_eq!((d.status, d.attempts, d.ok, sends), (Some(200), 2, true, 2));
+        // A 500 is retried. A 3xx or other 4xx is not.
+        let (d, sends) = send(&[500, 200]).await;
+        assert_eq!((d.attempts, d.ok, sends), (2, true, 2));
+        for status in [301, 302, 307, 308, 400, 428, 430, 499] {
+            let (d, sends) = send(&[status, 200]).await;
+            assert_eq!(
+                (d.status, d.attempts, d.ok, sends),
+                (Some(status), 1, false, 1),
+                "{status}"
+            );
+        }
+        // No retries: one send only.
+        let t = MemoryTransport::new();
+        t.reply("POST", url, HttpResponse::new(429, ""));
+        let none = WebhookSettings { retries: 0, ..one };
+        let d = WebhookSender::new(Arc::new(t.clone()))
+            .deliver(&none, None, &auth())
+            .await;
+        assert_eq!((d[0].attempts, t.requests_to(url).len()), (1, 1));
+    }
+
+    #[tokio::test]
     async fn no_urls_or_turned_off_sends_nothing() {
         let t = MemoryTransport::new();
         let s = WebhookSender::new(Arc::new(t.clone()));
