@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS sm_connections (
 );
 
 CREATE INDEX IF NOT EXISTS sm_connections_expiry
-    ON sm_connections (credentials_expires_at)
+    ON sm_connections (credentials_expires_at, id)
     WHERE NOT refresh_exhausted AND credentials_expires_at IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS sm_connections_end_user

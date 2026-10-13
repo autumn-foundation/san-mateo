@@ -490,7 +490,14 @@ impl Store for PgStore {
         .transpose()
     }
 
-    async fn touch_connection(&self, _id: Uuid, _at: DateTime<Utc>) -> Result<()> {
+    async fn touch_connection(&self, id: Uuid, at: DateTime<Utc>) -> Result<()> {
+        use schema::sm_connections::dsl as cn;
+        let mut c = self.conn().await?;
+        diesel::update(cn::sm_connections.filter(cn::id.eq(id)))
+            .set(cn::last_fetched_at.eq(Some(at)))
+            .execute(&mut c)
+            .await
+            .map_err(db)?;
         Ok(())
     }
 
@@ -527,14 +534,23 @@ impl Store for PgStore {
     async fn connections_expiring_before(
         &self,
         before: DateTime<Utc>,
-        _after: Option<(DateTime<Utc>, Uuid)>,
+        after: Option<(DateTime<Utc>, Uuid)>,
         limit: usize,
     ) -> Result<Vec<ConnectionRow>> {
         use schema::sm_connections::dsl as cn;
         let mut c = self.conn().await?;
-        let rows: Vec<rows::ConnectionDb> = cn::sm_connections
+        let mut q = cn::sm_connections
             .filter(cn::refresh_exhausted.eq(false))
             .filter(cn::credentials_expires_at.lt(before))
+            .into_boxed();
+        if let Some((t, id)) = after {
+            q = q.filter(
+                cn::credentials_expires_at
+                    .gt(t)
+                    .or(cn::credentials_expires_at.eq(t).and(cn::id.gt(id))),
+            );
+        }
+        let rows: Vec<rows::ConnectionDb> = q
             .order((cn::credentials_expires_at.asc(), cn::id.asc()))
             .limit(i64::try_from(limit).unwrap_or(i64::MAX))
             .select(rows::ConnectionDb::as_select())

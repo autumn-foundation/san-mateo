@@ -231,7 +231,10 @@ impl Store for MemoryStore {
         Ok(Some(next))
     }
 
-    async fn touch_connection(&self, _id: Uuid, _at: DateTime<Utc>) -> Result<()> {
+    async fn touch_connection(&self, id: Uuid, at: DateTime<Utc>) -> Result<()> {
+        if let Some(c) = self.lock().connections.get_mut(&id) {
+            c.last_fetched_at = Some(at);
+        }
         Ok(())
     }
 
@@ -252,7 +255,7 @@ impl Store for MemoryStore {
     async fn connections_expiring_before(
         &self,
         before: DateTime<Utc>,
-        _after: Option<(DateTime<Utc>, Uuid)>,
+        after: Option<(DateTime<Utc>, Uuid)>,
         limit: usize,
     ) -> Result<Vec<ConnectionRow>> {
         let g = self.lock();
@@ -260,7 +263,9 @@ impl Store for MemoryStore {
             .connections
             .values()
             .filter(|c| {
-                !c.refresh_exhausted && c.credentials_expires_at.is_some_and(|t| t < before)
+                !c.refresh_exhausted
+                    && c.credentials_expires_at
+                        .is_some_and(|t| t < before && after.is_none_or(|a| (t, c.id) > a))
             })
             .cloned()
             .collect();

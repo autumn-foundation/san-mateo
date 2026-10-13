@@ -75,7 +75,8 @@ pub struct Config {
     pub connect_session_ttl: Duration,
     /// OAuth session life. Default 15 minutes.
     pub oauth_session_ttl: Duration,
-    /// Refresh lease life. Default 10 seconds.
+    /// Refresh lease life. Default 120 seconds. It must be longer than the
+    /// slowest token call: a token call stops after 3/4 of this time.
     pub refresh_lease_ttl: Duration,
     /// The longest wait for the lease of another process. Default 12 seconds.
     pub refresh_lease_wait: Duration,
@@ -90,7 +91,7 @@ impl Default for Config {
             proxy: ProxySettings::default(),
             connect_session_ttl: Duration::from_secs(30 * 60),
             oauth_session_ttl: Duration::from_secs(15 * 60),
-            refresh_lease_ttl: Duration::from_secs(10),
+            refresh_lease_ttl: Duration::from_secs(120),
             refresh_lease_wait: Duration::from_secs(12),
         }
     }
@@ -586,6 +587,7 @@ impl SanMateoBuilder {
                 env_by_hash,
                 flights: std::sync::Mutex::new(HashMap::new()),
                 running_syncs: std::sync::Mutex::new(HashSet::new()),
+                sweep_after: std::sync::Mutex::new(None),
                 tasks: TaskTracker::new(),
                 owner,
             }),
@@ -609,7 +611,9 @@ pub(crate) struct Inner {
     pub(crate) flights: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Syncs that run now, by (connection, sync name).
     pub(crate) running_syncs: std::sync::Mutex<HashSet<(Uuid, String)>>,
-    /// Background tasks: webhooks and triggered syncs.
+    /// The `(expiry, id)` where the last refresh sweep stopped.
+    pub(crate) sweep_after: std::sync::Mutex<Option<(DateTime<Utc>, Uuid)>>,
+    /// Background tasks: webhooks, refreshes and triggered syncs.
     pub(crate) tasks: TaskTracker,
     /// The lease owner id of this process.
     pub(crate) owner: String,

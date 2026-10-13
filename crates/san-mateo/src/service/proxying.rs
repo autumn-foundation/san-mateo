@@ -108,7 +108,9 @@ impl SanMateo {
                 Ok(reply) => {
                     if reply.status == 401 && !refreshed && Self::can_refresh(&conn) {
                         refreshed = true;
-                        if let Ok((row, creds)) = self.refresh(env, key, RefreshMode::Force).await {
+                        if let Ok((row, creds)) =
+                            self.refresh(env, key, RefreshMode::Rejected).await
+                        {
                             conn = Self::to_connection(row, creds);
                             prepared = self.prepare(&conn, &provider, &request)?;
                             continue;
