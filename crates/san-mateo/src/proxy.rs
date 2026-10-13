@@ -501,7 +501,9 @@ pub fn classify(
         .and_then(|r| r.remaining.as_deref())
         .and_then(|name| header_value(headers, name))
         .is_some_and(|v| v.trim() == "0");
-    let outcome = if status == 429 || none_left {
+    // The quota header counts only for 4xx: after a 5xx, the provider
+    // possibly did the call.
+    let outcome = if status == 429 || (none_left && status < 500) {
         Outcome::RateLimited
     } else if status >= 500 {
         Outcome::ServerError

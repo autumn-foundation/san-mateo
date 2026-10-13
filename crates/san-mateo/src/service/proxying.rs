@@ -108,7 +108,7 @@ impl SanMateo {
         );
         let mut prepared = self.prepare(&conn, &provider, &request, client)?;
         let idempotent = px::is_idempotent(&request.method);
-        let rule = RetryRule {
+        let mut rule = RetryRule {
             max_attempts: request.retries.saturating_add(1),
             initial_backoff_ms: self.inner.config.proxy.initial_backoff_ms,
             max_wait_ms: self.inner.config.proxy.max_wait_ms,
@@ -122,13 +122,21 @@ impl SanMateo {
             let result = self.inner.transport.send(send).await;
             let step = match &result {
                 Ok(reply) => {
-                    if reply.status == 401 && !refreshed && Self::can_refresh(&conn) {
+                    // One refresh and one more send. The send counts as an
+                    // attempt, so all sends stay within `MAX_ATTEMPTS`.
+                    if reply.status == 401
+                        && !refreshed
+                        && attempt < policy::MAX_ATTEMPTS
+                        && Self::can_refresh(&conn)
+                    {
                         refreshed = true;
                         if let Ok((row, creds)) =
                             self.refresh(env, key, RefreshMode::Rejected).await
                         {
                             conn = Self::to_connection(row, creds);
                             prepared = self.prepare(&conn, &provider, &request, client)?;
+                            attempt += 1;
+                            rule.max_attempts = rule.max_attempts.saturating_add(1);
                             continue;
                         }
                     }
