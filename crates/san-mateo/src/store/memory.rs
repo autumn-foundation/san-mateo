@@ -437,14 +437,23 @@ impl Store for MemoryStore {
         Ok(rows)
     }
 
-    async fn put_sync_state(&self, row: SyncStateRow) -> Result<()> {
-        self.lock()
-            .sync_states
-            .insert((row.connection, row.sync_name.clone()), row);
+    async fn put_sync_state(&self, mut row: SyncStateRow) -> Result<()> {
+        let mut g = self.lock();
+        let key = (row.connection, row.sync_name.clone());
+        if let Some(old) = g.sync_states.get(&key) {
+            row.paused = old.paused;
+        }
+        g.sync_states.insert(key, row);
         Ok(())
     }
 
-    async fn set_sync_paused(&self, _row: SyncStateRow) -> Result<()> {
+    async fn set_sync_paused(&self, row: SyncStateRow) -> Result<()> {
+        let mut g = self.lock();
+        let paused = row.paused;
+        g.sync_states
+            .entry((row.connection, row.sync_name.clone()))
+            .and_modify(|s| s.paused = paused)
+            .or_insert(row);
         Ok(())
     }
 

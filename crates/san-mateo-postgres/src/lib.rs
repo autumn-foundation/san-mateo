@@ -173,6 +173,26 @@ impl PgStore {
     }
 }
 
+impl PgStore {
+    /// Adds a sync state, or sets the stored data to `update` (SQL over
+    /// `sm_sync_states.data` and `EXCLUDED.data`). `update` is fixed text.
+    async fn write_sync_state(&self, row: &SyncStateRow, update: &str) -> Result<()> {
+        let data = rows::sync_data(row)?;
+        let mut c = self.conn().await?;
+        diesel::sql_query(format!(
+            "INSERT INTO sm_sync_states (connection, sync_name, data) VALUES ($1, $2, $3) \
+             ON CONFLICT (connection, sync_name) DO UPDATE SET data = {update}"
+        ))
+        .bind::<diesel::sql_types::Uuid, _>(row.connection)
+        .bind::<Text, _>(&row.sync_name)
+        .bind::<diesel::sql_types::Jsonb, _>(&data)
+        .execute(&mut c)
+        .await
+        .map_err(db)?;
+        Ok(())
+    }
+}
+
 /// Deletes connections and their records and sync states, in one transaction.
 async fn delete_connections(c: &mut AsyncPgConnection, ids: &[Uuid]) -> diesel::QueryResult<()> {
     use schema::{sm_connections, sm_records, sm_sync_states};
@@ -797,26 +817,21 @@ impl Store for PgStore {
     }
 
     async fn put_sync_state(&self, row: SyncStateRow) -> Result<()> {
-        use schema::sm_sync_states::dsl as s;
-        let data = rows::sync_data(&row)?;
-        let mut c = self.conn().await?;
-        diesel::insert_into(s::sm_sync_states)
-            .values((
-                s::connection.eq(row.connection),
-                s::sync_name.eq(&row.sync_name),
-                s::data.eq(&data),
-            ))
-            .on_conflict((s::connection, s::sync_name))
-            .do_update()
-            .set(s::data.eq(&data))
-            .execute(&mut c)
-            .await
-            .map_err(db)?;
-        Ok(())
+        // `paused` belongs to `set_sync_paused`: keep the stored value.
+        self.write_sync_state(
+            &row,
+            "EXCLUDED.data || jsonb_build_object('paused', \
+             COALESCE(sm_sync_states.data -> 'paused', 'false'::jsonb))",
+        )
+        .await
     }
 
-    async fn set_sync_paused(&self, _row: SyncStateRow) -> Result<()> {
-        Ok(())
+    async fn set_sync_paused(&self, row: SyncStateRow) -> Result<()> {
+        self.write_sync_state(
+            &row,
+            "jsonb_set(sm_sync_states.data, '{paused}', EXCLUDED.data -> 'paused')",
+        )
+        .await
     }
 
     async fn get_sync_state(

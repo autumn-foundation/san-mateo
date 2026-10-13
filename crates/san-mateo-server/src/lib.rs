@@ -38,6 +38,9 @@ use san_mateo_postgres::PgStore;
 /// The largest request body: 25 MiB.
 pub const MAX_BODY_BYTES: usize = 25 * 1024 * 1024;
 
+/// The longest wait at shutdown for webhooks, refreshes and syncs.
+pub const SHUTDOWN_DRAIN: Duration = Duration::from_secs(30);
+
 /// A key id and its base64 value.
 pub type NamedKey = (String, Secret);
 
@@ -279,7 +282,8 @@ pub async fn serve(
 }
 
 /// Builds the service, starts the background loops, and serves until
-/// `shutdown` ends. Then it stops the loops and waits for webhooks.
+/// `shutdown` ends. Then it stops the loops and waits for webhooks,
+/// refreshes and syncs, for [`SHUTDOWN_DRAIN`] at most.
 ///
 /// # Errors
 ///
@@ -303,7 +307,9 @@ pub async fn run(
     if let Some(bg) = background {
         bg.stop().await;
     }
-    san.flush().await;
+    if !san.flush_within(SHUTDOWN_DRAIN).await {
+        tracing::warn!("webhooks, refreshes or syncs still ran at the drain time");
+    }
     tracing::info!("san-mateo stopped");
     served
 }

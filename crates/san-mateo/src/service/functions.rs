@@ -1,6 +1,9 @@
 //! Sync and action runs, the in-process scheduler and the background loops.
 //!
 //! In-process runs are not durable. Use `san-mateo-harvest` for durable syncs.
+//!
+//! A run holds the store lease `sync:<connection uuid>:<sync name>`, so two
+//! processes on one store do not run the same sync at the same time.
 
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
@@ -18,6 +21,16 @@ use crate::policy;
 use crate::records::BatchOutcome;
 use crate::store::{ConnectionFilter, ConnectionRow, SyncCounts, SyncStateRow, SyncStatus};
 use crate::webhook::{ErrorPayload, SyncEvent, WebhookEvent};
+
+/// The life of a sync lease.
+const SYNC_LEASE_TTL_MS: u64 = 60_000;
+/// The time between renewals of a sync lease.
+const SYNC_LEASE_RENEW: Duration = Duration::from_secs(20);
+/// The longest wait of [`Background::stop`] for the loop task.
+const STOP_WAIT: Duration = Duration::from_secs(10);
+
+/// A sync that is due: (environment, connection, sync).
+type Due = (String, ConnectionRow, Arc<dyn SyncFunction>);
 
 /// Removes a running sync from the set when the run ends, also on a panic.
 struct Running<'a> {
@@ -121,6 +134,36 @@ impl SanMateo {
             set: &self.inner.running_syncs,
             key: run_key,
         };
+        // Other processes: a store lease while the run lasts.
+        let lease = format!("sync:{}:{}", conn.id, spec.name);
+        if !self
+            .inner
+            .store
+            .try_lease(&lease, &self.inner.owner, self.now(), SYNC_LEASE_TTL_MS)
+            .await?
+        {
+            return Err(Error::Conflict(format!("sync {} runs already", spec.name)));
+        }
+        let report = self.run_leased(env, conn, sync, &lease).await;
+        if let Err(e) = self
+            .inner
+            .store
+            .release_lease(&lease, &self.inner.owner)
+            .await
+        {
+            tracing::warn!(code = e.code(), "the sync lease was not given back");
+        }
+        report
+    }
+
+    async fn run_leased(
+        &self,
+        env: &str,
+        conn: &ConnectionRow,
+        sync: Arc<dyn SyncFunction>,
+        lease: &str,
+    ) -> Result<SyncRunReport> {
+        let spec = sync.spec();
         let mut state = self.state_of(conn.id, sync.as_ref()).await?;
         let started = self.now();
         state.status = SyncStatus::Running;
@@ -137,10 +180,7 @@ impl SanMateo {
             last_success_at: state.last_success_at,
             outcome: Mutex::new(BatchOutcome::default()),
         };
-        let result = AssertUnwindSafe(sync.run(&ctx))
-            .catch_unwind()
-            .await
-            .unwrap_or_else(|_| Err(panic_text()));
+        let result = self.run_with_lease(&ctx, sync.as_ref(), lease).await;
         let run_counts = counts(
             &ctx.outcome
                 .lock()
@@ -154,14 +194,13 @@ impl SanMateo {
         };
         state.last_finished_at = Some(finished);
         if result.is_ok() {
-            state.last_success_at = Some(finished);
+            // The next run reads changes since this start, also changes
+            // that came during this run.
+            state.last_success_at = Some(started);
         }
         state.last_error = result.as_ref().err().map(ToString::to_string);
         state.last_counts = run_counts;
-        // Keep a pause that a caller set during the run.
-        if let Some(current) = self.inner.store.get_sync_state(conn.id, &spec.name).await? {
-            state.paused = current.paused;
-        }
+        // The store keeps a pause that a caller set during the run.
         self.inner.store.put_sync_state(state).await?;
         self.spawn_webhook(
             env,
@@ -187,6 +226,48 @@ impl SanMateo {
             counts: run_counts,
             error: result.err().map(|e| e.to_string()),
         })
+    }
+
+    /// Runs a sync function. It renews the lease while the run lasts.
+    async fn run_with_lease(
+        &self,
+        ctx: &SyncContext,
+        sync: &dyn SyncFunction,
+        lease: &str,
+    ) -> Result<()> {
+        let run = AssertUnwindSafe(sync.run(ctx)).catch_unwind();
+        tokio::pin!(run);
+        let mut renew = tokio::time::interval_at(
+            tokio::time::Instant::now() + SYNC_LEASE_RENEW,
+            SYNC_LEASE_RENEW,
+        );
+        loop {
+            tokio::select! {
+                r = &mut run => return r.unwrap_or_else(|_| Err(panic_text())),
+                _ = renew.tick() => self.renew_sync_lease(lease).await,
+            }
+        }
+    }
+
+    async fn renew_sync_lease(&self, lease: &str) {
+        match self
+            .inner
+            .store
+            .try_lease(lease, &self.inner.owner, self.now(), SYNC_LEASE_TTL_MS)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!("another process took the sync lease"),
+            Err(e) => tracing::warn!(code = e.code(), "the sync lease was not renewed"),
+        }
+    }
+
+    fn is_running(&self, conn: Uuid, sync_name: &str) -> bool {
+        self.inner
+            .running_syncs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&(conn, sync_name.to_owned()))
     }
 
     /// Returns the syncs by name, or all syncs of the integration.
@@ -276,9 +357,10 @@ impl SanMateo {
             .await?
         {
             for sync in &picked {
-                let mut state = self.state_of(conn.id, sync.as_ref()).await?;
+                let mut state = Self::default_state(conn.id, sync.as_ref());
                 state.paused = paused;
-                self.inner.store.put_sync_state(state).await?;
+                // This write changes only `paused` of a stored state.
+                self.inner.store.set_sync_paused(state).await?;
             }
         }
         Ok(())
@@ -332,12 +414,41 @@ impl SanMateo {
         Ok(out)
     }
 
-    /// Runs the auto-start syncs that are due, in all environments.
+    /// Runs the auto-start syncs that are due, in all environments, and
+    /// waits for them.
     ///
     /// # Errors
     ///
     /// Store errors.
     pub async fn run_due_syncs(&self) -> Result<Vec<SyncRunReport>> {
+        let runs = self
+            .due_syncs()
+            .await?
+            .into_iter()
+            .map(|(env, conn, sync)| async move { self.run_sync_row(&env, &conn, sync).await });
+        Ok(futures::future::join_all(runs)
+            .await
+            .into_iter()
+            .filter_map(Result::ok)
+            .collect())
+    }
+
+    /// Starts the due syncs as tracked tasks. It does not wait for them.
+    async fn start_due_syncs(&self) -> Result<()> {
+        for (env, conn, sync) in self.due_syncs().await? {
+            let san = self.clone();
+            self.inner.tasks.spawn(async move {
+                match san.run_sync_row(&env, &conn, sync).await {
+                    Ok(_) | Err(Error::Conflict(_)) => {}
+                    Err(e) => tracing::warn!(code = e.code(), "a scheduled sync did not run"),
+                }
+            });
+        }
+        Ok(())
+    }
+
+    /// Returns the auto-start syncs that are due and do not run now.
+    async fn due_syncs(&self) -> Result<Vec<Due>> {
         let now_ms = self.now_ms();
         let mut due = Vec::new();
         for env in &self.inner.config.environments {
@@ -361,20 +472,13 @@ impl SanMateo {
                     let next = state.last_started_at.map_or(0, |t| {
                         crate::clock::to_ms(t).saturating_add(frequency_ms(sync.as_ref()))
                     });
-                    if !state.paused && now_ms >= next {
+                    if !state.paused && now_ms >= next && !self.is_running(conn.id, &spec.name) {
                         due.push((env.id.clone(), conn, sync.clone()));
                     }
                 }
             }
         }
-        let runs = due
-            .into_iter()
-            .map(|(env, conn, sync)| async move { self.run_sync_row(&env, &conn, sync).await });
-        Ok(futures::future::join_all(runs)
-            .await
-            .into_iter()
-            .filter_map(Result::ok)
-            .collect())
+        Ok(due)
     }
 
     /// Runs an action and returns its output.
@@ -421,7 +525,13 @@ impl SanMateo {
             loop {
                 tokio::select! {
                     () = token.cancelled() => break,
-                    _ = ticker.tick() => san.tick(settings).await,
+                    _ = ticker.tick() => {}
+                }
+                // A stop also ends a tick. Refreshes and syncs that started
+                // go on as tracked tasks.
+                tokio::select! {
+                    () = token.cancelled() => break,
+                    () = san.tick(settings) => {}
                 }
             }
         });
@@ -431,7 +541,8 @@ impl SanMateo {
         }
     }
 
-    /// One tick of the background loops. Errors go to the log.
+    /// One tick of the background loops. Errors go to the log. Syncs run as
+    /// tracked tasks, so a slow sync does not stop the next tick.
     async fn tick(&self, settings: BackgroundSettings) {
         if let Err(e) = self
             .refresh_due(settings.refresh_within, settings.refresh_batch)
@@ -440,12 +551,26 @@ impl SanMateo {
             tracing::warn!(code = e.code(), "the refresh sweep failed");
         }
         if settings.run_syncs
-            && let Err(e) = self.run_due_syncs().await
+            && let Err(e) = self.start_due_syncs().await
         {
             tracing::warn!(code = e.code(), "the sync scheduler failed");
         }
         if let Err(e) = self.inner.store.purge_expired(self.now()).await {
             tracing::warn!(code = e.code(), "the session purge failed");
+        }
+    }
+}
+
+impl Background {
+    /// Stops the loops. A tick that runs now stops too. Refreshes and syncs
+    /// that started go on: [`SanMateo::flush_within`] waits for them.
+    pub async fn stop(mut self) {
+        self.stop.cancel();
+        if let Some(task) = self.task.take() {
+            let abort = task.abort_handle();
+            if tokio::time::timeout(STOP_WAIT, task).await.is_err() {
+                abort.abort();
+            }
         }
     }
 }

@@ -718,19 +718,24 @@ impl SanMateo {
     }
 
     /// Waits for background tasks to end, at most `limit`. Returns `true`
-    /// when all tasks ended.
+    /// when all tasks ended. Use it at shutdown.
     pub async fn flush_within(&self, limit: Duration) -> bool {
-        let _ = limit;
-        tokio::task::yield_now().await;
-        false
+        tokio::time::timeout(limit, self.flush()).await.is_ok()
     }
 
-    /// Waits for background tasks (webhooks and triggered syncs) to end.
+    /// Waits for background tasks (webhooks, refreshes and syncs) to end.
     pub async fn flush(&self) {
+        /// Opens the tracker again, also when the wait stops early.
+        struct Reopen<'a>(&'a TaskTracker);
+        impl Drop for Reopen<'_> {
+            fn drop(&mut self) {
+                self.0.reopen();
+            }
+        }
         let tasks = &self.inner.tasks;
         tasks.close();
+        let _reopen = Reopen(tasks);
         tasks.wait().await;
-        tasks.reopen();
     }
 
     // -------------------------------------------------------------- helpers
@@ -809,16 +814,6 @@ impl Default for BackgroundSettings {
 pub struct Background {
     stop: tokio_util::sync::CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl Background {
-    /// Stops the loops and waits for the current tick to end.
-    pub async fn stop(mut self) {
-        self.stop.cancel();
-        if let Some(task) = self.task.take() {
-            let _ = task.await;
-        }
-    }
 }
 
 pub(crate) fn invalid(msg: impl Into<String>) -> Error {

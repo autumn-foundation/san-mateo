@@ -264,7 +264,7 @@ pub struct SyncStateRow {
     pub last_started_at: Option<DateTime<Utc>>,
     /// End of the last run.
     pub last_finished_at: Option<DateTime<Utc>>,
-    /// End of the last successful run.
+    /// Start of the last successful run.
     pub last_success_at: Option<DateTime<Utc>>,
     /// The error of the last failed run.
     pub last_error: Option<String>,
