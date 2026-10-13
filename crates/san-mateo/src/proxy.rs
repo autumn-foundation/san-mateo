@@ -761,6 +761,23 @@ mod tests {
     }
 
     #[test]
+    fn provider_query_names_keep_their_case() {
+        let mut p = provider(&[("X-Version", "2024")]);
+        if let Some(proxy) = p.proxy.as_mut() {
+            proxy.query.insert("apiKey".into(), "${apiKey}".into());
+        }
+        let vars = json!({"apiKey": "k1"});
+        assert_eq!(
+            provider_query(&p, &vars).unwrap(),
+            h(&[("apiKey", "k1"), ("key", "k1")])
+        );
+        assert_eq!(
+            provider_headers(&p, &vars).unwrap(),
+            h(&[("x-version", "2024")])
+        );
+    }
+
+    #[test]
     fn provider_templates_skip_entries_with_missing_values() {
         let mut p = provider(&[
             (
