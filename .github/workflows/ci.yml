@@ -93,12 +93,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
         with:
-          path: verus-src/source/target-verus
+          path: ~/verus-src/source/target-verus
           key: verus-${{ env.VERUS_REV }}
+      # Build Verus outside the repo: in the repo, cargo takes it as a
+      # member of the San Mateo workspace.
       - name: Build Verus
         run: |
           set -eu
-          mkdir -p verus-src && cd verus-src
+          mkdir -p "$HOME/verus-src" && cd "$HOME/verus-src"
           git init -q
           git fetch -q --depth 1 https://github.com/verus-lang/verus "$VERUS_REV"
           git checkout -q FETCH_HEAD
@@ -111,5 +113,5 @@ jobs:
           bash -c 'source ../tools/activate && vargo build --release'
       - name: Verify the policy spec
         run: |
-          VERUS_Z3_PATH="$PWD/verus-src/source/z3" \
-            verus-src/source/target-verus/release/verus verus/policy.rs
+          VERUS_Z3_PATH="$HOME/verus-src/source/z3" \
+            "$HOME/verus-src/source/target-verus/release/verus" verus/policy.rs
