@@ -533,10 +533,9 @@ async fn optional_template_values_are_left_out() {
     assert_eq!(sent.header_value("x-login-customer-id"), Some("123"));
 }
 
-/// Waits for `service/proxying.rs`: `prepare` must call
-/// `credentials::add_client_vars` with the integration client.
+/// Nango OAuth2 templates such as `${clientId}:${clientSecret}` read the
+/// integration client.
 #[tokio::test]
-#[ignore = "needs the integration client in the vars of SanMateo::prepare"]
 async fn oauth_templates_see_the_integration_client() {
     let h = shop_harness().await;
     let url = "https://api.shop.example.com/v1/orders";

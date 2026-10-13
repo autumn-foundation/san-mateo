@@ -102,6 +102,11 @@ notoken:
     display_name: No Token
     auth_mode: OAUTH2
     authorization_url: https://login.notoken.example.com/authorize
+ccdef:
+    display_name: CC Default
+    auth_mode: OAUTH2_CC
+    token_url: https://auth.ccdef.example.com/token
+    default_scopes: [api]
 ";
 
 struct H {
@@ -148,6 +153,7 @@ async fn ready_h(allowed_hosts: Vec<String>) -> H {
         ("slack", vec!["chat:write"]),
         ("algo", vec![]),
         ("notoken", vec![]),
+        ("ccdef", vec![]),
     ] {
         h.san
             .create_integration(
@@ -557,4 +563,51 @@ async fn the_connect_page_never_puts_secrets_in_a_url() {
         html.contains("form.sm-oauth"),
         "the script handles OAuth forms"
     );
+}
+
+#[tokio::test]
+async fn a_client_credentials_refresh_asks_for_the_same_scopes() {
+    let h = ready_h(vec![]).await;
+    let url = "https://auth.ccdef.example.com/token";
+    h.http.reply(
+        "POST",
+        url,
+        HttpResponse::json(200, &json!({"access_token": "cc-1", "expires_in": 600})),
+    );
+    let t = token(&h, ConnectSessionInput::default()).await;
+    let conn = h
+        .san
+        .connect_client_credentials(
+            &t,
+            "ccdef",
+            "id".into(),
+            "secret".into(),
+            ConnectOptions::default(),
+        )
+        .await
+        .unwrap();
+    h.clock.advance(chrono::Duration::minutes(9));
+    h.http.reply(
+        "POST",
+        url,
+        HttpResponse::json(200, &json!({"access_token": "cc-2", "expires_in": 600})),
+    );
+    let got = h
+        .san
+        .get_connection("dev", &conn.key(), san_mateo::GetOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(got.credentials.bearer_token(), Some("cc-2"));
+    let scopes: Vec<String> = h
+        .http
+        .requests_to(url)
+        .iter()
+        .map(|r| {
+            url::form_urlencoded::parse(&r.body)
+                .find(|(k, _)| k == "scope")
+                .map(|(_, v)| v.into_owned())
+                .unwrap_or_default()
+        })
+        .collect();
+    assert_eq!(scopes, vec!["api", "api"]);
 }
