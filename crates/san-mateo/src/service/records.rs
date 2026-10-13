@@ -45,7 +45,7 @@ impl SanMateo {
     ///
     /// # Errors
     ///
-    /// [`Error::UnknownConnection`], [`Error::Invalid`].
+    /// [`crate::Error::UnknownConnection`], [`crate::Error::Invalid`].
     pub async fn save_records(
         &self,
         env: &str,
@@ -84,7 +84,7 @@ impl SanMateo {
     ///
     /// # Errors
     ///
-    /// [`Error::UnknownConnection`], [`Error::Invalid`].
+    /// [`crate::Error::UnknownConnection`], [`crate::Error::Invalid`].
     pub async fn delete_records(
         &self,
         env: &str,
@@ -142,7 +142,7 @@ impl SanMateo {
     ///
     /// # Errors
     ///
-    /// [`Error::UnknownConnection`], [`Error::Invalid`].
+    /// [`crate::Error::UnknownConnection`], [`crate::Error::Invalid`].
     pub async fn list_records(
         &self,
         env: &str,

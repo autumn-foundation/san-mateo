@@ -13,6 +13,8 @@ categories = ["web-programming::http-server", "authentication"]
 [[bin]]
 name = "san-mateo"
 path = "src/main.rs"
+# The lib `san_mateo` has the same doc path.
+doc = false
 
 [dependencies]
 san-mateo.workspace = true
