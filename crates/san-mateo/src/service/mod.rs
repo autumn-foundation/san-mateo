@@ -288,6 +288,7 @@ pub struct GetOptions {
     /// Refresh when the token expires soon. Default `true`.
     pub refresh_if_needed: bool,
     /// Refresh now, also when the token is fresh, in cooldown or exhausted.
+    /// Calls at the same time share one refresh.
     pub force_refresh: bool,
 }
 
@@ -340,7 +341,8 @@ pub struct RefreshReport {
     pub refreshed: usize,
     /// Connections with a failed refresh.
     pub failed: usize,
-    /// Connections that another process refreshed, or that are in cooldown.
+    /// Connections with no refresh now: no refresh token, a token in the
+    /// first half of its life, a cooldown or an exhausted refresh.
     pub skipped: usize,
 }
 

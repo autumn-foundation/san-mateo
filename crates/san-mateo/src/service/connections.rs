@@ -433,7 +433,6 @@ impl SanMateo {
             return Ok((row, creds));
         }
         let provider = self.provider_of(&row)?;
-        let called = self.now();
         let reply = tokio::time::timeout(
             self.token_call_limit(),
             self.new_credentials(&row, &provider, &creds),
@@ -458,7 +457,8 @@ impl SanMateo {
                     .write_refresh(env, key, &row.credentials, |r| {
                         r.credentials.clone_from(&sealed);
                         r.credentials_expires_at = expires_at;
-                        r.last_refresh_success = Some(called);
+                        // Calls that started before this time share this result.
+                        r.last_refresh_success = Some(now);
                         r.last_refresh_failure = None;
                         r.refresh_attempts = 0;
                         r.refresh_exhausted = false;
