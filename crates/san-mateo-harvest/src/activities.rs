@@ -17,8 +17,7 @@ use autumn_harvest::prelude::activity;
 use san_mateo::store::SyncCounts;
 use san_mateo::transport::is_secret_header;
 use san_mateo::{
-    ConnectionKey, GetOptions, ProxyRequest, ProxyResponse, RefreshReport, SanMateo,
-    SyncRunReport,
+    ConnectionKey, GetOptions, ProxyRequest, ProxyResponse, RefreshReport, SanMateo, SyncRunReport,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -261,10 +260,7 @@ impl ConnectionInput {
             .await
             .map_err(|e| failure_for_error(&e))?;
         Ok(RefreshOutput {
-            expires_at: connection
-                .credentials
-                .expires_at()
-                .map(|t| t.to_rfc3339()),
+            expires_at: connection.credentials.expires_at().map(|t| t.to_rfc3339()),
         })
     }
 }
@@ -638,7 +634,12 @@ mod tests {
 
     #[test]
     fn proxy_input_rejects_secret_headers() {
-        for name in ["Authorization", "proxy-authorization", "Cookie", "X-Api-Key"] {
+        for name in [
+            "Authorization",
+            "proxy-authorization",
+            "Cookie",
+            "X-Api-Key",
+        ] {
             let input = ProxyInput::new("dev", &key(), "GET", "/x").header(name, "secret-1");
             let f = input.to_request().unwrap_err();
             assert_eq!(f.error_type, crate::INVALID_INPUT_ERROR, "{name}");

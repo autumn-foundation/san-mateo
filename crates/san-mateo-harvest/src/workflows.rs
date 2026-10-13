@@ -134,7 +134,7 @@ impl SyncLoopInput {
         RunSyncInput::new(&self.environment, &self.key(), &self.sync_name)
     }
 
-    fn output(&self, stopped_by: Option<String>) -> SyncLoopOutput {
+    const fn output(&self, stopped_by: Option<String>) -> SyncLoopOutput {
         SyncLoopOutput {
             total_runs: self.total_runs,
             total_failures: self.total_failures,
@@ -189,6 +189,19 @@ pub fn stops_sync_loop(error_type: &str) -> bool {
     STOPPING_ERRORS.contains(&error_type)
 }
 
+/// The error type of a sync run that did not end in time.
+pub const RUN_TIMEOUT_ERROR: &str = "san_mateo.run_timeout";
+
+/// Returns the error type of a failed sync run, or `None` for a harvest
+/// error that is not a run failure, for example a cancel.
+const fn run_failure_type(error: &HarvestError) -> Option<&str> {
+    match error {
+        // A long run can pass the next time, so a timeout does not end the loop.
+        HarvestError::Timeout { .. } => Some(RUN_TIMEOUT_ERROR),
+        other => other.activity_error_type(),
+    }
+}
+
 /// Returns the workflow failure for a harvest error. An activity failure
 /// keeps its error type.
 fn harvest_failure(error: &HarvestError) -> WorkflowFailure {
@@ -205,8 +218,8 @@ fn harvest_failure(error: &HarvestError) -> WorkflowFailure {
 /// Runs one sync for one connection in a durable loop.
 ///
 /// Each iteration runs `san_mateo_run_sync`, then waits for the frequency
-/// with a durable timer. A failed run does not stop the loop, except for the
-/// failures of [`stops_sync_loop`]. After
+/// with a durable timer. A failed or timed-out run does not stop the loop,
+/// except for the failures of [`stops_sync_loop`]. After
 /// [`SyncLoopInput::iterations_before_continue`] runs, or when harvest asks
 /// for it, the loop calls `continue_as_new` with the totals. The harvest
 /// concurrency limit on `sync_key` lets one task run at a time for each
@@ -234,14 +247,13 @@ pub async fn san_mateo_sync_loop(
         .max(1);
     let run = state.run_input();
     for i in 0..iterations {
-        ctx.check_cancellation()
-            .map_err(|e| harvest_failure(&e))?;
+        ctx.check_cancellation().map_err(|e| harvest_failure(&e))?;
         let result: HarvestResult<SyncRunOutput> =
             ctx.execute_activity(&san_mateo_run_sync_info(), &run).await;
         match result {
             Ok(_) => state.total_runs = state.total_runs.saturating_add(1),
             Err(e) => {
-                let Some(error_type) = e.activity_error_type() else {
+                let Some(error_type) = run_failure_type(&e) else {
                     return Err(harvest_failure(&e));
                 };
                 state.total_failures = state.total_failures.saturating_add(1);
@@ -384,12 +396,35 @@ mod tests {
     }
 
     #[test]
+    fn run_failure_types() {
+        use autumn_harvest::TimeoutType;
+        use autumn_harvest::failure::{ActivityFailure, IntoActivityErrorString};
+
+        let timeout = HarvestError::Timeout {
+            timeout_type: TimeoutType::StartToClose,
+            task_name: "san_mateo_run_sync".into(),
+        };
+        assert_eq!(run_failure_type(&timeout), Some(RUN_TIMEOUT_ERROR));
+        let payload = ActivityFailure::retryable("san_mateo.sync_failed", "x").into_error_payload();
+        let failed = HarvestError::activity_failed("san_mateo_run_sync", 3, &payload);
+        assert_eq!(run_failure_type(&failed), Some("san_mateo.sync_failed"));
+        assert_eq!(
+            run_failure_type(&HarvestError::Cancelled("stop".into())),
+            None
+        );
+        assert!(!stops_sync_loop(RUN_TIMEOUT_ERROR));
+    }
+
+    #[test]
     fn workflow_infos() {
         let info = san_mateo_sync_loop_info();
         assert_eq!(info.name, "san_mateo_sync_loop");
         let c = info.concurrency.unwrap();
         assert_eq!(c.key_expr, "input.sync_key");
         assert_eq!(c.limit, 1);
-        assert_eq!(san_mateo_refresh_sweep_info().name, "san_mateo_refresh_sweep");
+        assert_eq!(
+            san_mateo_refresh_sweep_info().name,
+            "san_mateo_refresh_sweep"
+        );
     }
 }

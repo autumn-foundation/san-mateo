@@ -144,7 +144,9 @@ mod tests {
 
     #[test]
     fn other_client_errors_are_not_retryable() {
-        for status in [400, 401, 402, 403, 404, 405, 409, 410, 413, 415, 422, 451, 499] {
+        for status in [
+            400, 401, 402, 403, 404, 405, 409, 410, 413, 415, 422, 451, 499,
+        ] {
             assert!(!is_retryable_status(status), "{status}");
             let f = failure_for_status(status, b"nope").unwrap();
             assert!(f.non_retryable, "{status}");
@@ -181,7 +183,11 @@ mod tests {
     #[test]
     fn errors_map_to_codes_and_retry_classes() {
         let cases: Vec<(Error, &str, bool)> = vec![
-            (Error::Upstream("reset".into()), "san_mateo.upstream_error", true),
+            (
+                Error::Upstream("reset".into()),
+                "san_mateo.upstream_error",
+                true,
+            ),
             (Error::Store("busy".into()), "san_mateo.store_error", true),
             (
                 Error::RefreshCooldown,
@@ -221,8 +227,16 @@ mod tests {
                 "san_mateo.connection_refresh_exhausted",
                 false,
             ),
-            (Error::Invalid("bad".into()), "san_mateo.invalid_body", false),
-            (Error::Function("boom".into()), "san_mateo.function_failed", false),
+            (
+                Error::Invalid("bad".into()),
+                "san_mateo.invalid_body",
+                false,
+            ),
+            (
+                Error::Function("boom".into()),
+                "san_mateo.function_failed",
+                false,
+            ),
             (Error::Crypto, "san_mateo.decryption_failed", false),
         ];
         for (error, error_type, retryable) in cases {

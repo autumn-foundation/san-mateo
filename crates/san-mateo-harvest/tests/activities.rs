@@ -80,7 +80,10 @@ async fn proxy_forwards_the_idempotency_key_when_asked() {
         .unwrap();
     assert_eq!(out.status, 201);
     let sent = h.http.requests_to(&format!("{CRM}/v3/contacts"));
-    assert_eq!(sent[0].header_value("idempotency-key"), Some(expected.as_str()));
+    assert_eq!(
+        sent[0].header_value("idempotency-key"),
+        Some(expected.as_str())
+    );
     let body: Value = serde_json::from_slice(&sent[0].body).unwrap();
     assert_eq!(body, json!({"name": "Ada"}));
 
@@ -296,9 +299,10 @@ async fn refresh_forces_a_new_token_and_returns_only_the_expiry() {
         .await
         .unwrap();
     let expected = (start() + autumn_harvest::chrono::Duration::seconds(7_200)).to_rfc3339();
-    let got = autumn_harvest::chrono::DateTime::parse_from_rfc3339(out.expires_at.as_deref().unwrap())
-        .unwrap()
-        .to_rfc3339();
+    let got =
+        autumn_harvest::chrono::DateTime::parse_from_rfc3339(out.expires_at.as_deref().unwrap())
+            .unwrap()
+            .to_rfc3339();
     assert_eq!(
         got,
         autumn_harvest::chrono::DateTime::parse_from_rfc3339(&expected)
@@ -371,7 +375,10 @@ async fn run_sync_saves_records_and_returns_the_report() {
     h.http.reply(
         "GET",
         &format!("{CRM}/v3/contacts"),
-        HttpResponse::json(200, &json!([{"id": "1", "name": "Ada"}, {"id": "2", "name": "Bob"}])),
+        HttpResponse::json(
+            200,
+            &json!([{"id": "1", "name": "Ada"}, {"id": "2", "name": "Bob"}]),
+        ),
     );
     let out = RunSyncInput::new(ENV, &crm(), "contacts")
         .run(&h.san)
@@ -509,7 +516,8 @@ async fn refresh_due_returns_counts() {
     .unwrap();
     assert_eq!((out.refreshed, out.failed), (0, 0));
     // The default sweep window is 30 minutes. Move the clock by 45 minutes.
-    h.clock.advance(autumn_harvest::chrono::Duration::minutes(45));
+    h.clock
+        .advance(autumn_harvest::chrono::Duration::minutes(45));
     let out = RefreshDueInput::default().run(&h.san).await.unwrap();
     assert_eq!(out.refreshed, 1);
     assert_eq!(out.failed, 0);
@@ -594,7 +602,7 @@ async fn registration_in_one_call() {
     let built = HarvestBuilder::new()
         .workflows(san_mateo_harvest::workflows())
         .activities(san_mateo_harvest::activities())
-        .state(h.san.clone())
+        .state(h.san)
         .try_build()
         .unwrap();
     assert!(built.state::<SanMateo>().is_some());

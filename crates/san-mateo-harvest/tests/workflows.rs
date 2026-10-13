@@ -10,14 +10,14 @@ use std::time::Duration;
 
 use autumn_harvest::WorkflowEvent;
 use autumn_harvest::failure::{ActivityFailure, IntoActivityErrorString};
-use autumn_harvest::testing::{ReplayStatus, TestRunOutcome, WorkflowTestEnv};
+use autumn_harvest::testing::{ReplayStatus, TestRunOutcome, WorkflowReplayer, WorkflowTestEnv};
 use autumn_harvest::{SimulatorResult, WorkflowSimulator};
 use common::*;
 use san_mateo::transport::HttpResponse;
 use san_mateo::{RecordsRequest, SanMateo};
 use san_mateo_harvest::{
-    RefreshDueInput, RefreshDueOutput, RunSyncInput, SyncLoopInput, SyncLoopOutput,
-    SyncRunOutput, san_mateo_refresh_sweep_info, san_mateo_sync_loop_info,
+    RefreshDueInput, RefreshDueOutput, RunSyncInput, SyncLoopInput, SyncLoopOutput, SyncRunOutput,
+    san_mateo_refresh_sweep_info, san_mateo_sync_loop_info,
 };
 use serde_json::{Value, json};
 
@@ -25,13 +25,8 @@ const RUN_SYNC: &str = "san_mateo_run_sync";
 const REFRESH_DUE: &str = "san_mateo_refresh_due";
 
 fn loop_input(frequency_secs: u64, iterations: u32) -> SyncLoopInput {
-    SyncLoopInput::new(
-        ENV,
-        &crm(),
-        "contacts",
-        Duration::from_secs(frequency_secs),
-    )
-    .iterations_before_continue(iterations)
+    SyncLoopInput::new(ENV, &crm(), "contacts", Duration::from_secs(frequency_secs))
+        .iterations_before_continue(iterations)
 }
 
 fn ok_run(added: u64) -> Value {
@@ -225,6 +220,38 @@ async fn a_gone_connection_stops_the_loop() {
 }
 
 #[tokio::test]
+async fn a_timed_out_run_does_not_stop_the_loop() {
+    // Record one iteration. Then change the run result to a timeout, and the
+    // totals of the next run to match. The replay must give the same history.
+    let handler = san_mateo_sync_loop_info().handler;
+    let outcome = WorkflowTestEnv::new()
+        .mock_activity(RUN_SYNC, |_| Ok(ok_run(0)))
+        .run(handler, serde_json::to_value(loop_input(60, 1)).unwrap())
+        .await;
+    let mut events = outcome.events().to_vec();
+    for event in &mut events {
+        if let WorkflowEvent::ActivityCompleted { activity_id, .. } = event {
+            let activity_id = *activity_id;
+            *event = WorkflowEvent::ActivityTimedOut {
+                activity_id,
+                timeout_type: autumn_harvest::TimeoutType::StartToClose,
+            };
+        } else if let WorkflowEvent::WorkflowContinuedAsNew { input, .. } = event {
+            input["total_runs"] = json!(0);
+            input["total_failures"] = json!(1);
+        }
+    }
+    let report = WorkflowReplayer::new()
+        .register_fn("san_mateo_sync_loop", handler)
+        .replay_from_events(events)
+        .await;
+    assert!(
+        matches!(report.status, ReplayStatus::ReplaySucceeded),
+        "{report}"
+    );
+}
+
+#[tokio::test]
 async fn an_input_with_no_sync_key_gets_one() {
     let mut input = serde_json::to_value(loop_input(60, 1)).unwrap();
     input.as_object_mut().unwrap().remove("sync_key");
@@ -238,7 +265,12 @@ async fn an_input_with_no_sync_key_gets_one() {
 
 #[tokio::test]
 async fn an_input_with_an_empty_id_fails_with_no_run() {
-    for field in ["environment", "provider_config_key", "connection_id", "sync_name"] {
+    for field in [
+        "environment",
+        "provider_config_key",
+        "connection_id",
+        "sync_name",
+    ] {
         let mut input = serde_json::to_value(loop_input(60, 1)).unwrap();
         input[field] = json!("");
         let outcome = WorkflowTestEnv::new()
@@ -332,7 +364,10 @@ async fn refresh_sweep_runs_one_sweep_with_defaults() {
 #[tokio::test]
 async fn a_failed_sweep_fails_the_workflow_with_the_activity_error_type() {
     let outcome = WorkflowTestEnv::new()
-        .mock_activity_retries(REFRESH_DUE, vec![Err(failed("san_mateo.store_error", true))])
+        .mock_activity_retries(
+            REFRESH_DUE,
+            vec![Err(failed("san_mateo.store_error", true))],
+        )
         .run(san_mateo_refresh_sweep_info().handler, json!({}))
         .await;
     assert!(outcome.result.is_err());
@@ -453,7 +488,10 @@ async fn the_sync_loop_stops_end_to_end_when_the_connection_is_gone() {
         .run(serde_json::to_value(loop_input(600, 2)).unwrap())
         .await;
     let out: SyncLoopOutput = serde_json::from_value(result.final_output.unwrap()).unwrap();
-    assert_eq!(out.stopped_by.as_deref(), Some("san_mateo.unknown_connection"));
+    assert_eq!(
+        out.stopped_by.as_deref(),
+        Some("san_mateo.unknown_connection")
+    );
     assert_eq!(out.total_runs, 0);
     assert_eq!(out.total_failures, 1);
     // A non-retryable failure gets one attempt only.
