@@ -724,12 +724,45 @@ mod tests {
             h(&[("authorization", "Bearer k1"), ("x-version", "2024")])
         );
         assert_eq!(provider_query(&p, &vars).unwrap(), h(&[("key", "k1")]));
-        assert!(provider_headers(&p, &json!({})).is_err());
         assert!(
             provider_headers(&Provider::default(), &vars)
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn provider_templates_skip_entries_with_missing_values() {
+        let mut p = provider(&[
+            (
+                "x-login-customer-id",
+                "${connectionConfig.login_customer_id}",
+            ),
+            ("x-either", "${connectionConfig.a} || ${connectionConfig.b}"),
+            ("x-empty", "${connectionConfig.empty}"),
+            ("x-version", "2024"),
+        ]);
+        if let Some(proxy) = p.proxy.as_mut() {
+            proxy
+                .query
+                .insert("account".into(), "${connectionConfig.account}".into());
+            proxy.query.insert("fixed".into(), "1".into());
+        }
+        let vars = json!({"connectionConfig": {"b": "B", "empty": ""}});
+        assert_eq!(
+            provider_headers(&p, &vars).unwrap(),
+            h(&[("x-either", "B"), ("x-version", "2024")])
+        );
+        assert_eq!(provider_query(&p, &vars).unwrap(), h(&[("fixed", "1")]));
+        // A syntax error or a value that is not text still fails.
+        for bad in [
+            "${connectionConfig.b",
+            "${nope(${connectionConfig.b})}",
+            "${connectionConfig}",
+        ] {
+            let p = provider(&[("x-bad", bad)]);
+            assert!(provider_headers(&p, &vars).is_err(), "{bad}");
+        }
     }
 
     #[test]

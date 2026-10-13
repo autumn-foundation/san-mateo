@@ -8,13 +8,15 @@ use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
 use san_mateo::clock::{Clock, ManualClock, SeqEntropy};
+use san_mateo::credentials::OAuth2Credentials;
 use san_mateo::transport::HttpResponse;
 use san_mateo::webhook::WebhookSettings;
 use san_mateo::{
-    Catalog, ConnectOptions, ConnectSessionInput, Connection, EndUser, EnvironmentConfig, KeyRing,
-    MemoryStore, MemoryTransport, NewIntegration, ProxySettings, Registry, SanMateo, Secret,
+    Catalog, ConnectOptions, ConnectSessionInput, Connection, ConnectionKey, Credentials, EndUser,
+    EnvironmentConfig, ImportConnection, KeyRing, MemoryStore, MemoryTransport, NewIntegration,
+    ProxySettings, Registry, SanMateo, Secret,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 pub const SECRET: &str = "sk_test_dev_0123456789";
 pub const PROD_SECRET: &str = "sk_test_prod_0123456789";
@@ -129,6 +131,11 @@ pub fn start() -> chrono::DateTime<Utc> {
 }
 
 pub fn harness_with(registry: Registry) -> Harness {
+    harness_with_catalog(registry, CATALOG)
+}
+
+/// A harness with the catalog `yaml`.
+pub fn harness_with_catalog(registry: Registry, yaml: &str) -> Harness {
     let http = MemoryTransport::new();
     http.reply("POST", HOOK, HttpResponse::new(200, ""));
     let clock = Arc::new(ManualClock::new(start()));
@@ -139,7 +146,7 @@ pub fn harness_with(registry: Registry) -> Harness {
         .server_url(SERVER)
         .environment(dev)
         .environment(EnvironmentConfig::new("prod", PROD_SECRET))
-        .catalog(Catalog::from_yaml_str(CATALOG).unwrap())
+        .catalog(Catalog::from_yaml_str(yaml).unwrap())
         .store(store.clone())
         .key_ring(keys())
         .transport(Arc::new(http.clone()))
@@ -291,4 +298,75 @@ pub fn webhooks_sent(h: &Harness) -> Vec<Value> {
 
 pub fn now(h: &Harness) -> chrono::DateTime<Utc> {
     h.clock.now()
+}
+
+/// A provider with `authorization_method: header` and optional template values.
+pub const SHOP: &str = r"
+shop:
+    display_name: Shop
+    auth_mode: OAUTH2
+    authorization_url: https://auth.shop.example.com/authorize
+    token_url: https://auth.shop.example.com/token
+    authorization_method: header
+    proxy:
+        base_url: https://api.shop.example.com
+        headers:
+            x-api-key: ${clientId}:${clientSecret}
+            x-login-customer-id: ${connectionConfig.login_customer_id}
+        query:
+            account: ${connectionConfig.account}
+    docs: https://shop.example.com/docs
+";
+
+/// A harness with the `shop` catalog and a `shop` integration.
+pub async fn shop_harness() -> Harness {
+    let h = harness_with_catalog(Registry::new(), SHOP);
+    h.san
+        .create_integration(
+            "dev",
+            NewIntegration {
+                unique_key: "shop".to_owned(),
+                provider: "shop".to_owned(),
+                client_id: Some("shop-client".to_owned()),
+                client_secret: Some(Secret::new("shop-secret")),
+                ..NewIntegration::default()
+            },
+        )
+        .await
+        .unwrap();
+    h
+}
+
+/// Imports a `shop` connection with the access token `at-1`.
+pub async fn shop_connection(
+    h: &Harness,
+    id: &str,
+    connection_config: Value,
+    refresh: Option<&str>,
+) -> ConnectionKey {
+    let Value::Object(connection_config) = connection_config else {
+        panic!("the connection config must be an object");
+    };
+    h.san
+        .import_connection(
+            "dev",
+            ImportConnection {
+                connection_id: Some(id.to_owned()),
+                provider_config_key: "shop".to_owned(),
+                credentials: Credentials::OAuth2(OAuth2Credentials {
+                    access_token: "at-1".into(),
+                    refresh_token: refresh.map(Into::into),
+                    expires_at: None,
+                    raw: json!({}),
+                }),
+                connection_config,
+                metadata: Map::new(),
+                tags: BTreeMap::new(),
+                end_user: None,
+                webhook_url_override: None,
+            },
+        )
+        .await
+        .unwrap()
+        .key()
 }

@@ -442,4 +442,37 @@ mod tests {
         );
         assert_eq!(parse_link_header("garbage", "next"), None);
     }
+
+    #[test]
+    fn link_header_keeps_commas_and_semicolons_in_targets() {
+        let v = r#"<https://x/a?fields=id,name&page=2>; rel="next", <https://x/a?fields=id,name&page=1>; rel="prev""#;
+        assert_eq!(
+            parse_link_header(v, "next").as_deref(),
+            Some("https://x/a?fields=id,name&page=2")
+        );
+        assert_eq!(
+            parse_link_header(v, "prev").as_deref(),
+            Some("https://x/a?fields=id,name&page=1")
+        );
+        let v = r#"<https://x/a;v=1>; title="a, b"; rel=next, <https://x/b>; rel=last"#;
+        assert_eq!(
+            parse_link_header(v, "next").as_deref(),
+            Some("https://x/a;v=1")
+        );
+        assert_eq!(parse_link_header(v, "last").as_deref(), Some("https://x/b"));
+    }
+
+    #[test]
+    fn a_repeated_cursor_ends_the_loop() {
+        let mut p = Paginator::new(cursor(), None);
+        let page = json!({"results": [{"id": 1}], "paging": {"next": {"after": "c2"}}});
+        assert!(p.advance(&[], &page).is_some());
+        assert_eq!(p.advance(&[], &page), None);
+        // A new cursor after a repeat starts again.
+        let mut p = Paginator::new(cursor(), None);
+        let page3 = json!({"results": [{"id": 3}], "paging": {"next": {"after": "c3"}}});
+        assert!(p.advance(&[], &page).is_some());
+        assert!(p.advance(&[], &page3).is_some());
+        assert!(p.advance(&[], &page).is_some());
+    }
 }

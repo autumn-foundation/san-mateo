@@ -92,6 +92,38 @@ async fn refresh_inside_the_buffer_keeps_the_old_refresh_token() {
 }
 
 #[tokio::test]
+async fn header_authorization_method_refreshes_with_basic_auth() {
+    let h = shop_harness().await;
+    let key = shop_connection(&h, "s1", json!({}), Some("rt-1")).await;
+    let url = "https://auth.shop.example.com/token";
+    h.http
+        .reply("POST", url, token_reply("at-2", None, Some(3_600)));
+    let got = h
+        .san
+        .get_connection(
+            "dev",
+            &key,
+            GetOptions {
+                force_refresh: true,
+                ..GetOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(got.credentials.bearer_token(), Some("at-2"));
+    let sent = &h.http.requests_to(url)[0];
+    assert_eq!(
+        sent.header_value("authorization"),
+        Some("Basic c2hvcC1jbGllbnQ6c2hvcC1zZWNyZXQ=")
+    );
+    let form: BTreeMap<String, String> = url::form_urlencoded::parse(&sent.body)
+        .into_owned()
+        .collect();
+    assert_eq!(form["refresh_token"], "rt-1");
+    assert!(!form.contains_key("client_id") && !form.contains_key("client_secret"));
+}
+
+#[tokio::test]
 async fn force_refresh_and_no_refresh_token() {
     let h = ready().await;
     let conn = connect_crm(&h, "at-1", Some("rt-1"), Some(3_600)).await;

@@ -560,6 +560,106 @@ mod tests {
     }
 
     #[test]
+    fn header_authorization_method_uses_basic_auth() {
+        let c = crate::provider::Catalog::from_yaml_str(
+            "h:\n    auth_mode: OAUTH2\n    authorization_method: header\nb:\n    auth_mode: OAUTH2\n    authorization_method: body\n",
+        )
+        .unwrap();
+        let p = c.get("h").unwrap();
+        let none = BTreeMap::new();
+        for params in [
+            code_exchange_params("c1", "https://cb", None, &none),
+            refresh_params("rt", &none, &none),
+            client_credentials_params(&[], " ", &none),
+        ] {
+            let r = token_request(&p, "https://t/token", "id", "sec", params);
+            assert_eq!(r.header_value("authorization"), Some("Basic aWQ6c2Vj"));
+            let body = String::from_utf8(r.body).unwrap();
+            assert!(!body.contains("client_"), "{body}");
+        }
+        let b = c.get("b").unwrap();
+        let r = token_request(&b, "https://t/token", "id", "sec", Vec::new());
+        assert_eq!(r.header_value("authorization"), None);
+        assert_eq!(
+            String::from_utf8(r.body).unwrap(),
+            "client_id=id&client_secret=sec"
+        );
+    }
+
+    #[test]
+    fn zero_expiry_means_no_expiry() {
+        for body in [
+            r#"{"access_token":"at","expires_in":0}"#,
+            r#"{"access_token":"at","expires_in":"0"}"#,
+            r#"{"access_token":"at","expires_at":0}"#,
+            r#"{"access_token":"at","expires_at":"0"}"#,
+            r#"{"access_token":"at","expires_at":0,"expires_in":0}"#,
+        ] {
+            let r = parse_token_reply(body.as_bytes(), None, false, now(), "x").unwrap();
+            assert_eq!(r.expires_at, None, "{body}");
+        }
+        // A zero `expires_at` gives way to `expires_in`.
+        let r = parse_token_reply(
+            br#"{"access_token":"at","expires_at":0,"expires_in":60}"#,
+            None,
+            false,
+            now(),
+            "x",
+        )
+        .unwrap();
+        assert_eq!(r.expires_at, Some(now() + chrono::Duration::seconds(60)));
+    }
+
+    #[test]
+    fn decimal_expires_in_strings() {
+        for (v, secs) in [
+            (r#""3599.0""#, 3599),
+            (r#""3599.9""#, 3599),
+            (r#"" 60 ""#, 60),
+            ("3599.5", 3599),
+        ] {
+            let body = format!(r#"{{"access_token":"at","expires_in":{v}}}"#);
+            let r = parse_token_reply(body.as_bytes(), None, false, now(), "x").unwrap();
+            assert_eq!(
+                r.expires_at,
+                Some(now() + chrono::Duration::seconds(secs)),
+                "{v}"
+            );
+        }
+        let r = parse_token_reply(
+            br#"{"access_token":"at","expires_in":"-5"}"#,
+            None,
+            false,
+            now(),
+            "x",
+        )
+        .unwrap();
+        assert_eq!(r.expires_at, None);
+    }
+
+    #[test]
+    fn only_a_real_error_field_fails() {
+        for body in [
+            r#"{"access_token":"at","error":null}"#,
+            r#"{"access_token":"at","error":""}"#,
+            r#"{"access_token":"at","error":false}"#,
+        ] {
+            let r = parse_token_reply(body.as_bytes(), None, false, now(), "x").unwrap();
+            assert_eq!(r.access_token.expose(), "at", "{body}");
+        }
+        for body in [
+            r#"{"access_token":"at","error":"invalid_grant"}"#,
+            r#"{"access_token":"at","error":{"code":"E1"}}"#,
+            r#"{"access_token":"at","error":{}}"#,
+        ] {
+            assert!(
+                parse_token_reply(body.as_bytes(), None, false, now(), "x").is_err(),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
     fn parse_standard_reply() {
         let body = br#"{"access_token":"at","refresh_token":"rt","expires_in":3600,"token_type":"bearer"}"#;
         let r = parse_token_reply(body, None, false, now(), "token_exchange_failed").unwrap();
