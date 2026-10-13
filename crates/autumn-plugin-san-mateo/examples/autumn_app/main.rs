@@ -24,16 +24,18 @@
 //! `Authorization: Bearer $SAN_MATEO_DEV_SECRET_KEY`. The prod profile of
 //! autumn-web also needs `AUTUMN_SECURITY__SIGNING_SECRET` and
 //! `AUTUMN_SECURITY__TRUSTED_HOSTS__HOSTS`.
+//! A release build starts in the prod profile, a debug build in the dev
+//! profile. `AUTUMN_ENV` selects a different profile.
+//!
 //! `scripts/smoke-autumn-example.sh` boots this app in the dev and prod
-//! profiles and checks it. The test below runs the same routes and the same
-//! config file in `TestApp`, with a fake provider.
+//! profiles and checks it. The test below runs the same routes and the
+//! `[san_mateo]` section of the same `autumn.toml` in `TestApp`, with a fake
+//! provider.
 
-use autumn_plugin_san_mateo::san_mateo::{Catalog, ConnectionKey, ProxyRequest};
+use autumn_plugin_san_mateo::san_mateo::{Catalog, ConnectionKey, Error, ProxyRequest};
 use autumn_plugin_san_mateo::{SanMateoPlugin, SanMateoService, autumn_error};
 use autumn_web::{AutumnResult, Json, Path};
 use serde_json::Value;
-
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 const ENV: &str = "dev";
 const INTEGRATION: &str = "acme-crm";
@@ -69,6 +71,14 @@ async fn contacts(
         .proxy(ENV, &key, ProxyRequest::get("/v1/contacts"))
         .await
         .map_err(autumn_error)?;
+    // San Mateo gives back each provider reply, also a 4xx or a 5xx. The
+    // route answers 502 and does not send the provider body on.
+    if !reply.is_success() {
+        let status = reply.status;
+        return Err(autumn_error(Error::Upstream(format!(
+            "the provider gave HTTP {status}"
+        ))));
+    }
     Ok(Json(reply.json().map_err(autumn_error)?))
 }
 
@@ -77,16 +87,24 @@ fn catalog() -> autumn_plugin_san_mateo::san_mateo::Result<Catalog> {
     Catalog::from_yaml_str(CATALOG)
 }
 
-#[tokio::main]
-async fn main() -> Result<(), BoxError> {
+// `autumn_web::main` gives autumn the build mode, so a release build starts
+// in the prod profile.
+#[autumn_web::main]
+async fn main() {
+    let catalog = match catalog() {
+        Ok(catalog) => catalog,
+        Err(e) => {
+            eprintln!("the provider catalog is not valid: {e}");
+            std::process::exit(1);
+        }
+    };
     // `run` reads `[san_mateo]` from autumn.toml. It stops on SIGTERM or
     // Ctrl-C, after the plugin stops its loops and sends its webhooks.
     autumn_web::app()
         .routes(autumn_web::routes![index, contacts])
-        .plugin(SanMateoPlugin::new().catalog(catalog()?))
+        .plugin(SanMateoPlugin::new().catalog(catalog))
         .run()
         .await;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -103,6 +121,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+
+    type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
     /// The longest time for the test scenario.
     const RUN_TIMEOUT: Duration = Duration::from_secs(60);
@@ -127,8 +147,8 @@ mod tests {
         api_key: String,
     }
 
-    /// Runs the app in `TestApp` with the same routes and config file as
-    /// `main`, drives it over HTTP and checks the result.
+    /// Runs the app in `TestApp` with the same routes and `[san_mateo]`
+    /// config as `main`, drives it over HTTP and checks the result.
     async fn run(fake: MemoryTransport) -> Result<Value, BoxError> {
         let mut key = [0_u8; 32];
         OsEntropy.fill(&mut key);
@@ -254,6 +274,8 @@ mod tests {
         Ok(serde_json::from_slice(&r.body)?)
     }
 
+    /// Compares the summary with the expected values. The error starts with
+    /// `check failed:`.
     fn check(summary: &Value) -> Result<(), String> {
         let expected = json!({
             "session_status": 201,
@@ -266,7 +288,9 @@ mod tests {
         if *summary == expected {
             Ok(())
         } else {
-            Err(format!("the summary {summary} is not {expected}"))
+            Err(format!(
+                "check failed: the summary {summary} is not {expected}"
+            ))
         }
     }
 
@@ -277,10 +301,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_wrong_reply_fails_the_check() {
+    async fn an_upstream_error_gives_a_502() {
         let fake = MemoryTransport::new();
-        fake.reply("GET", CONTACTS_URL, HttpResponse::new(500, "down"));
+        fake.reply(
+            "GET",
+            CONTACTS_URL,
+            HttpResponse::json(500, &json!({"error": "down"})),
+        );
         let err = run(fake).await.expect_err("the check finds the error");
-        assert!(err.to_string().contains("is not"), "{err}");
+        let err = err.to_string();
+        assert!(err.starts_with("check failed:"), "{err}");
+        assert!(err.contains(r#""status":502"#), "{err}");
     }
 }

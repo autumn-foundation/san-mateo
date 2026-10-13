@@ -1,5 +1,6 @@
-//! The runnable examples stay wired (EX11): each one has a test, a CI step
-//! and a README row. See `docs/adr/0006-runnable-examples.md`.
+//! The runnable examples stay wired (EX11). For each example, this test
+//! checks the Cargo target, a self-check and a failure test in the source,
+//! the CI commands and the README row. See `docs/adr/0006-runnable-examples.md`.
 //!
 //! The test reads files of the repository, so `Cargo.toml` leaves it out
 //! of the published crate. It uses text search: keep the fixed formats below.
@@ -15,9 +16,9 @@ struct Example {
     /// The target header: `[[example]]` or `[[bin]]`.
     target: &'static str,
     source: &'static str,
-    /// Text that the CI workflow must run.
-    ci: &'static str,
-    /// Text that the README must show.
+    /// Commands that the CI workflow must run.
+    ci: &'static [&'static str],
+    /// The command that the README must show.
     readme: &'static str,
 }
 
@@ -27,7 +28,7 @@ const EXAMPLES: &[Example] = &[
         manifest: "crates/san-mateo/Cargo.toml",
         target: "[[example]]",
         source: "crates/san-mateo/examples/embedded.rs",
-        ci: "cargo run --locked -p san-mateo --example embedded",
+        ci: &["cargo run --locked -p san-mateo --example embedded"],
         readme: "cargo run --locked -p san-mateo --example embedded",
     },
     Example {
@@ -35,7 +36,7 @@ const EXAMPLES: &[Example] = &[
         manifest: "crates/autumn-plugin-san-mateo/Cargo.toml",
         target: "[[example]]",
         source: "crates/autumn-plugin-san-mateo/examples/autumn_app/main.rs",
-        ci: "bash scripts/smoke-autumn-example.sh",
+        ci: &["bash scripts/smoke-autumn-example.sh"],
         readme: "cargo run --locked -p autumn-plugin-san-mateo --example autumn_app",
     },
     Example {
@@ -43,7 +44,7 @@ const EXAMPLES: &[Example] = &[
         manifest: "crates/san-mateo-harvest/Cargo.toml",
         target: "[[example]]",
         source: "crates/san-mateo-harvest/examples/harvest_workflow.rs",
-        ci: "cargo run --locked -p san-mateo-harvest --example harvest_workflow",
+        ci: &["cargo run --locked -p san-mateo-harvest --example harvest_workflow"],
         readme: "cargo run --locked -p san-mateo-harvest --example harvest_workflow",
     },
     Example {
@@ -51,9 +52,19 @@ const EXAMPLES: &[Example] = &[
         manifest: "examples/harvest-camel/Cargo.toml",
         target: "[[bin]]",
         source: "examples/harvest-camel/src/main.rs",
-        ci: "cargo run --locked --manifest-path examples/harvest-camel/Cargo.toml",
+        // The root jobs do not see this workspace, so CI must run its tests.
+        ci: &[
+            "cargo test --locked --manifest-path examples/harvest-camel/Cargo.toml",
+            "cargo run --locked --manifest-path examples/harvest-camel/Cargo.toml",
+        ],
         readme: "cargo run --locked --manifest-path examples/harvest-camel/Cargo.toml",
     },
+];
+
+/// Files that users copy. They must not turn on the dev-only proxy flags.
+const COPIED_FILES: &[&str] = &[
+    "crates/autumn-plugin-san-mateo/examples/autumn_app/autumn.toml",
+    "scripts/smoke-autumn-example.sh",
 ];
 
 fn root() -> PathBuf {
@@ -98,43 +109,61 @@ fn each_example_has_a_test_a_ci_step_and_a_readme_row() {
         let manifest = read(ex.manifest);
         let section = target_section(&manifest, ex.target, ex.name)
             .unwrap_or_else(|| panic!("{}: no {} target in {}", ex.name, ex.target, ex.manifest));
+        let has = |line: &str| section.lines().any(|l| l.trim() == line);
         if ex.target == "[[example]]" {
             assert!(
-                section.lines().any(|l| l.trim() == "test = true"),
+                has("test = true"),
                 "{}: the target needs `test = true`",
+                ex.name
+            );
+        } else {
+            assert!(
+                !has("test = false"),
+                "{}: the target must keep its tests",
                 ex.name
             );
         }
         let source = read(ex.source);
-        for must in ["const RUN_TIMEOUT", "#[cfg(test)]"] {
+        for must in [
+            "const RUN_TIMEOUT",
+            "#[cfg(test)]",
+            "fn check(",
+            "expect_err(",
+        ] {
             assert!(
                 source.contains(must),
                 "{}: the source needs {must}",
                 ex.name
             );
         }
-        for never in [
-            "allow_private_hosts",
-            "allow_plain_http",
-            "full_migrations_sql",
-        ] {
+        assert!(
+            !source.contains("full_migrations_sql"),
+            "{}: use `migrate::apply`",
+            ex.name
+        );
+        for command in ex.ci {
+            let lines: Vec<&String> = ci.iter().filter(|l| l.contains(command)).collect();
             assert!(
-                !source.contains(never),
-                "{}: the source has {never}",
+                !lines.is_empty(),
+                "{}: CI does not run `{command}`",
+                ex.name
+            );
+            assert!(
+                lines.iter().all(|l| !l.contains("||")),
+                "{}: CI must not hide a failure of `{command}`",
                 ex.name
             );
         }
-        assert!(
-            ci.iter().any(|l| l.contains(ex.ci)),
-            "{}: CI does not run `{}`",
-            ex.name,
-            ex.ci
-        );
         assert!(
             readme.contains(ex.readme),
             "{}: the README does not show `{}`",
             ex.name,
             ex.readme
+        );
+        assert!(
+            readme.contains(&format!("| [`{}`](", ex.name)),
+            "{}: the README Examples table has no row",
+            ex.name
         );
     }
     assert!(
@@ -144,8 +173,22 @@ fn each_example_has_a_test_a_ci_step_and_a_readme_row() {
 }
 
 #[test]
+fn no_example_turns_on_the_dev_only_proxy_flags() {
+    let files = EXAMPLES
+        .iter()
+        .map(|ex| ex.source)
+        .chain(COPIED_FILES.iter().copied());
+    for path in files {
+        let text = read(path).to_ascii_lowercase();
+        for flag in ["allow_private_hosts", "allow_plain_http"] {
+            assert!(!text.contains(flag), "{path} has {flag}");
+        }
+    }
+}
+
+#[test]
 fn each_example_file_is_in_the_list() {
-    let mut found = Vec::new();
+    let listed = |name: &str| EXAMPLES.iter().any(|ex| ex.name == name);
     for krate in std::fs::read_dir(root().join("crates")).unwrap() {
         let dir = krate.unwrap().path().join("examples");
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -153,15 +196,29 @@ fn each_example_file_is_in_the_list() {
         };
         for entry in entries {
             let path = entry.unwrap().path();
-            let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
-            found.push(stem);
+            let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            // A cargo example is a `.rs` file or a folder with `main.rs`.
+            let is_example =
+                path.extension().is_some_and(|e| e == "rs") || path.join("main.rs").exists();
+            if is_example && !name.starts_with('.') {
+                assert!(listed(&name), "the example {name} is not in EXAMPLES");
+            }
         }
     }
-    for name in found {
-        assert!(
-            EXAMPLES.iter().any(|ex| ex.name == name),
-            "the example {name} is not in EXAMPLES"
-        );
+    // An example with its own workspace is a folder of `examples/`.
+    for entry in std::fs::read_dir(root().join("examples")).unwrap() {
+        let dir = entry.unwrap().path();
+        let manifest = dir.join("Cargo.toml");
+        if manifest.exists() {
+            let relative = format!(
+                "examples/{}/Cargo.toml",
+                dir.file_name().unwrap().to_string_lossy()
+            );
+            assert!(
+                EXAMPLES.iter().any(|ex| ex.manifest == relative),
+                "the workspace {relative} is not in EXAMPLES"
+            );
+        }
     }
 }
 
@@ -186,12 +243,14 @@ fn the_harvest_camel_workspace_stays_apart() {
             "the root Cargo.lock has {name}"
         );
     }
-    // The example uses the same lints as the main workspace.
+    // The example uses the same lints as the main workspace. Compare the
+    // lint sections only, up to the next other section.
     let lints = |text: &str, from: &str| -> String {
         let start = text.find(from).unwrap_or_else(|| panic!("no {from}"));
         text[start..]
             .lines()
             .map(|l| l.replace("[workspace.lints.", "[lints."))
+            .take_while(|l| !l.starts_with('[') || l.starts_with("[lints."))
             .filter(|l| !l.trim().is_empty())
             .collect::<Vec<_>>()
             .join("\n")

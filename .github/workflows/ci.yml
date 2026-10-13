@@ -4,11 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Each week, the examples run with the newest compatible dependencies.
-  # That finds rot from new upstream releases.
+  # Each week (and on a manual run), the examples run with the newest
+  # compatible dependencies. That finds rot from new upstream releases.
   schedule:
     - cron: "17 4 * * 1"
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -114,14 +117,12 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
-      - name: Newest compatible dependencies (weekly run only)
-        if: github.event_name == 'schedule'
+        with:
+          # Keep the cache of the locked dependencies.
+          save-if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+      - name: Newest compatible dependencies (weekly and manual runs)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: cargo update
-      - name: Build the examples
-        run: |
-          cargo build --locked -p san-mateo --example embedded \
-            -p autumn-plugin-san-mateo --example autumn_app \
-            -p san-mateo-harvest --example harvest_workflow
       - name: "example: embedded"
         run: cargo run --locked -p san-mateo --example embedded
       - name: "example: autumn_app (boot, dev and prod, SIGTERM)"
@@ -177,18 +178,23 @@ jobs:
         with:
           workspaces: examples/harvest-camel -> target
           key: harvest-camel
-      - name: Newest compatible dependencies (weekly run only)
-        if: github.event_name == 'schedule'
+          # Keep the cache of the locked dependencies.
+          save-if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+      - name: Newest compatible dependencies (weekly and manual runs)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: cargo update --manifest-path "$MANIFEST"
       - name: The lock file is up to date
         run: |
-          if ! cargo metadata --locked --format-version 1 --manifest-path "$MANIFEST" > /dev/null; then
-            echo "::error::examples/harvest-camel/Cargo.lock is out of date. Run: cargo update --manifest-path $MANIFEST -p san-mateo -p san-mateo-camel"
+          if ! err=$(cargo metadata --locked --format-version 1 --manifest-path "$MANIFEST" 2>&1 > /dev/null); then
+            printf '%s\n' "$err" >&2
+            if printf '%s' "$err" | grep -q "needs to be updated"; then
+              echo "::error::examples/harvest-camel/Cargo.lock is out of date. Run: cargo update --manifest-path $MANIFEST -p san-mateo -p san-mateo-camel"
+            fi
             exit 1
           fi
       - run: cargo fmt --manifest-path "$MANIFEST" --check
       - run: cargo clippy --locked --manifest-path "$MANIFEST" --all-targets -- -D warnings
-      - run: cargo test --locked --manifest-path "$MANIFEST"
+      - run: cargo test --locked --manifest-path examples/harvest-camel/Cargo.toml
       - name: "example: harvest_camel"
         run: cargo run --locked --manifest-path examples/harvest-camel/Cargo.toml
       - name: One version each of camel and autumn-harvest

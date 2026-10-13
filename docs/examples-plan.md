@@ -17,9 +17,9 @@ and CI runs each one.
 | harvest-camel `examples/order_flow.rs` | A cargo example with `test = true`. `main` reads `DATABASE_URL`. It checks its result and fails when it is wrong. A run timeout. CI does `cargo run --example`. | The house style for all four examples. |
 | `MemoryTransport` | Replies come in order, and the last reply repeats. It logs each request. | The fake provider. No port, no dev-only proxy flags. |
 | autumn-web 0.8 `run()` | No stop from code. It calls `process::exit(1)` when the boot fails. It sets a global tracing subscriber. | The test uses `TestApp`. A script boots the real binary and stops it with SIGTERM. |
-| autumn-harvest 0.7 | Postgres only for async activities. `migrate::apply` is safe in parallel. An activity with no queue goes to `"default"`. | A real worker on a queue for each run. Activities go to `ctx.queue_name()`. |
+| autumn-harvest 0.7 | Postgres only for async activities. `migrate::apply` is safe in parallel when the role can lock the ledger. An activity with no queue goes to `"default"`. | A real worker on a queue for each run. Activities go to `ctx.queue_name()`. |
 | autumn-harvest-sqlite 0.7 | Activities are sync closures with no `ActivityContext`. | Not usable for the San Mateo activities. |
-| harvest-camel main | camel 0.55. San Mateo uses camel 0.57. | Bump harvest-camel to 0.57 (approved). Pin the commit. |
+| harvest-camel main (at the start) | camel 0.55. San Mateo uses camel 0.57. | Bump harvest-camel to 0.57 (approved; PRs 5 and 6 merged). Pin a commit of `main`. |
 | harvest-camel deps | `autumn-harvest-plugin` turns on the autumn-web default features (`db`, C builds of libpq and SQLite). | Put the harvest-camel example in its own cargo workspace. |
 
 ## 3. Brainstorming
@@ -55,7 +55,7 @@ Ideas for each example. The chosen ideas are in bold.
 | A database test skips in CI and stays green. | When `CI` is set and the URL is not set, the test fails and names the variable. |
 | Two runs on one database take the tasks of each other. | A unique queue and workflow id for each run. A CI step runs two copies at the same time. |
 | An example teaches an unsafe setting. | No `allow_private_hosts`, no `allow_plain_http`, no fixed key. Keys are random at run time. Config holds env var names only. |
-| An example leaks a secret. | The checks scan the printed summary for each fake secret. The smoke script scans the app log for the keys. |
+| An example leaks a secret. | The embedded and autumn checks scan the summary (and the webhook and health replies) for each secret. The smoke script scans the app log for the keys. Failure messages hide the keys. |
 | A copied route trusts an id from the URL (IDOR). | A comment says: in production, get the connection id from the signed-in user. |
 | The harvest-camel pin moves or a second camel version comes in. | A full 40-hex `rev`. A CI step fails on two versions of camel or autumn-harvest. |
 | The heavy harvest-camel dependencies enter the main workspace. | A separate workspace. The guard test checks the root `Cargo.lock`. |
@@ -115,15 +115,17 @@ Rules for each example:
   REST API: a 302 that the client does not follow, `state`, PKCE S256, then
   the callback. The first token expires soon, so San Mateo refreshes before
   the proxy call. The app handler returns the exact contacts JSON. The
-  upstream call has `Bearer` with the new token. The `auth` webhook has a
-  valid signature. The server, the loops and the webhooks stop cleanly.
-- **EX2 autumn plugin.** The test builds the same routes and config file as
-  `main` with `TestApp`. It connects an API key over the REST API. The app
-  route with `SanMateoService` returns the contacts, and the API key goes
-  upstream. The smoke script boots the real binary in the dev and prod
-  profiles, checks the routes, stops it with SIGTERM (exit code 0), checks
-  that a missing key stops the boot with the variable name, and finds no
-  key in the log.
+  upstream call has `Bearer` with the new token. An upstream error gives
+  502. The `auth` webhook has a valid signature and no secret. The server,
+  the loops and the webhooks stop cleanly.
+- **EX2 autumn plugin.** The test builds the same routes and the
+  `[san_mateo]` section of the same `autumn.toml` as `main`, in `TestApp`.
+  It connects an API key over the REST API. The app route with
+  `SanMateoService` returns the contacts, and the API key goes upstream. An
+  upstream error gives 502. The smoke script boots the real binary in the
+  dev and prod profiles and checks the routes and the connect page. It
+  stops the app with SIGTERM (exit code 0). It checks that a missing key
+  stops the boot with the variable name. It finds no key in the log.
 - **EX3 harvest workflow.** A real harvest worker on Postgres runs a
   workflow that calls `san_mateo_proxy`. A `POST` that forwards the
   idempotency key gets a 503, harvest retries it, and both sends have the
@@ -131,12 +133,14 @@ Rules for each example:
   runs at the same time on one database pass.
 - **EX4 harvest-camel.** A harvest activity calls a camel route with
   `call_route_from_activity`. The route calls `san-mateo:` and copies
-  `HarvestIdempotencyKey` upstream. harvest retries the 503 with one key. It
-  does not retry the 404. The result is exact. A test shows that the San
-  Mateo error map agrees with the real harvest-camel `is_retryable`.
-- **EX5 Self-check.** For each example, a test removes one fake reply and
-  expects an error, and the stop still runs. A wrong result gives a non-zero
-  exit code.
+  `HarvestIdempotencyKey` upstream. With no key, the route sends no `POST`.
+  harvest retries the 503 with one key. It does not retry the 404. The
+  result is exact. A test shows that the San Mateo error map agrees with
+  the real harvest-camel `is_retryable`.
+- **EX5 Self-check.** For each example, failure tests change one fake
+  reply. They expect an error that starts with `check failed:`, or a failed
+  workflow with no retry. The stop still runs. A wrong result gives a
+  non-zero exit code.
 - **EX6 No hang.** `RUN_TIMEOUT` of 120 s or less in each example. The new
   CI jobs have `timeout-minutes`.
 - **EX7 No secret leaks.** The summaries and the autumn log hold no token
@@ -145,22 +149,25 @@ Rules for each example:
   set and no URL they fail and name the variable.
 - **EX9 CI.** The `examples` job runs each main-workspace example as a user
   does. The `example-harvest-camel` job gates the separate workspace. A
-  weekly run (and a manual run) updates the dependencies and runs the
+  weekly run and a manual run update the dependencies and run the
   examples.
 - **EX10 Gates.** fmt, clippy `-D warnings` on all targets, `cargo doc -D
   warnings` with the examples, MSRV 1.89 `--locked`, coverage 85% or more.
-- **EX11 Guard.** A test fails when an example loses `test = true`, its CI
-  command or its README row, or when the root `Cargo.lock` gets the
+- **EX11 Guard.** A test fails when an example loses `test = true`, its
+  `check` function, its failure test, its run timeout, its CI commands or
+  its README row, when an example turns on a dev-only proxy flag, when an
+  example is not in the list, or when the root `Cargo.lock` gets the
   harvest-camel dependencies.
 - **EX12 Docs.** A README table with the commands that CI runs. No stale
   "camel 0.55" text. CLAUDE.md lists the paths, the commands and the rule
-  for new examples. A doc test compiles the README Rust blocks. ADR 0006.
-  The queue limit of the library workflows is written down. ASD-STE100.
+  for new examples. The `rust` and `rust,no_run` blocks of the README
+  compile as doc tests. ADR 0006.
+  The docs give the queue limit of the library workflows. ASD-STE100.
 - **EX13 TDD.** For each example, the test failed before the code (RED
   commit) and passed after it (GREEN commit).
-- **EX14 harvest-camel pin.** harvest-camel on camel 0.57 is in a PR with
-  green CI. The example pins a full 40-hex `rev`. The example lock has one
-  version each of camel and autumn-harvest.
+- **EX14 harvest-camel pin.** harvest-camel `main` is on camel 0.57 (PRs 5
+  and 6). The example pins a full 40-hex `rev` of `main`. The example lock
+  has one version each of camel and autumn-harvest.
 
 ## 8. Out of scope
 

@@ -6,11 +6,17 @@
 //!   2. activity san_mateo_proxy: GET  /v3/contacts/{id}
 //! ```
 //!
-//! The workflow input holds ids only. San Mateo adds the auth, so no token
-//! goes into the harvest history. The `POST` sends the harvest idempotency
-//! key to the provider, so a retry after a 503 is safe. Without the key, San
-//! Mateo makes a `POST` after a 503 non-retryable. The example checks the
-//! result. It returns an error when the result is wrong.
+//! The workflow and activity inputs hold ids and the contact, never a token.
+//! San Mateo adds the auth, so no token goes into the harvest history.
+//!
+//! The `POST` sends the harvest idempotency key to the provider as
+//! `Idempotency-Key`. Then harvest can retry it after a 503. Without the key,
+//! San Mateo makes a `POST` after a 503 non-retryable. A retry is safe only
+//! when the provider supports `Idempotency-Key`. If it does not, do not
+//! forward the key.
+//!
+//! The example checks the result. It returns an error when the result is
+//! wrong.
 //!
 //! `MemoryTransport` is the fake provider. For production: remove
 //! `.transport(..)`, use `PgStore` (all workers must share one store), and
@@ -73,12 +79,18 @@ async fn add_contact(ctx: &WorkflowContext, contact: Value) -> HarvestResult<Val
     let key = ConnectionKey::new(INTEGRATION, CONNECTION);
 
     let mut create = ProxyInput::new(ENV, &key, "POST", "/v3/contacts").json(contact);
-    // The provider gets the harvest idempotency key, so a retry is safe.
+    // The provider gets the harvest idempotency key. harvest can then retry
+    // the call after a 503, and the provider finds the duplicate.
     create.forward_idempotency_key = true;
     let created: ProxyOutput = ctx
         .execute_activity_with_opts(&san_mateo_proxy_info(), &create, Some(&queue), None, None)
         .await?;
-    let id = created.body["id"].as_str().unwrap_or_default().to_owned();
+    let Some(id) = created.body["id"].as_str().filter(|id| !id.is_empty()) else {
+        return Err(HarvestError::workflow_failed_untyped(
+            "add_contact",
+            "the create reply has no id",
+        ));
+    };
 
     let find = ProxyInput::new(ENV, &key, "GET", format!("/v3/contacts/{id}"));
     let found: ProxyOutput = ctx
@@ -247,6 +259,8 @@ fn summarize(output: &Value, fake: &MemoryTransport) -> Value {
     })
 }
 
+/// Compares the summary with the expected values. The error starts with
+/// `check failed:`.
 fn check(summary: &Value) -> Result<(), String> {
     let expected = json!({
         "workflow": {
@@ -262,7 +276,9 @@ fn check(summary: &Value) -> Result<(), String> {
     if *summary == expected {
         Ok(())
     } else {
-        Err(format!("the summary {summary} is not {expected}"))
+        Err(format!(
+            "check failed: the summary {summary} is not {expected}"
+        ))
     }
 }
 
@@ -308,12 +324,34 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_client_error_fails_the_run() {
+    async fn a_client_error_fails_the_workflow_with_no_retry() {
         let Some(url) = database_url() else { return };
-        // A 400 is not retryable, so the workflow fails at once.
         let fake = MemoryTransport::new();
         fake.reply("POST", CONTACTS_URL, HttpResponse::new(400, "bad contact"));
-        let err = run(&url, fake).await.expect_err("the workflow fails");
-        assert!(err.to_string().contains("workflow"), "{err}");
+        let err = run(&url, fake.clone())
+            .await
+            .expect_err("the workflow fails");
+        let err = err.to_string();
+        assert!(err.starts_with("workflow add-contact-"), "{err}");
+        // A 400 is not retryable: one POST, and no wait for the timeout.
+        assert_eq!(fake.requests_to(CONTACTS_URL).len(), 1, "{err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_wrong_reply_fails_the_check() {
+        let Some(url) = database_url() else { return };
+        // The same replies as `fake_provider`, but the found contact differs.
+        let fake = MemoryTransport::new();
+        fake.reply("POST", CONTACTS_URL, HttpResponse::new(503, "busy"));
+        let created = json!({"id": "c-1", "name": "Ada"});
+        fake.reply("POST", CONTACTS_URL, HttpResponse::json(201, &created));
+        let wrong = json!({"id": "c-1", "name": "Bob"});
+        fake.reply("GET", CONTACT_URL, HttpResponse::json(200, &wrong));
+        let err = run(&url, fake)
+            .await
+            .expect_err("the check finds the reply");
+        let err = err.to_string();
+        assert!(err.starts_with("check failed:"), "{err}");
+        assert!(err.contains("Bob"), "{err}");
     }
 }

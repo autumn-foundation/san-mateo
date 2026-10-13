@@ -39,6 +39,10 @@ cargo run --locked -p san-mateo --example embedded
 bash scripts/smoke-autumn-example.sh
 DATABASE_URL=postgres://sm:sm@localhost/sm_test cargo run --locked -p san-mateo-harvest --example harvest_workflow
 DATABASE_URL=postgres://sm:sm@localhost/sm_test cargo run --locked --manifest-path examples/harvest-camel/Cargo.toml
+# The separate workspace: the root commands do not see it.
+cargo fmt --manifest-path examples/harvest-camel/Cargo.toml --check
+cargo clippy --locked --manifest-path examples/harvest-camel/Cargo.toml --all-targets -- -D warnings
+SAN_MATEO_TEST_DATABASE_URL=postgres://sm:sm@localhost/sm_test cargo test --locked --manifest-path examples/harvest-camel/Cargo.toml
 ```
 
 ## Rules
@@ -65,7 +69,8 @@ DATABASE_URL=postgres://sm:sm@localhost/sm_test cargo run --locked --manifest-pa
 - Do mutation tests on a `git clone` in the scratchpad. Never in the repo.
 - Webhooks are at least once. Do not claim exactly once.
 - A new example needs `test = true`, a CI step, a README row, a
-  `RUN_TIMEOUT` and a self-check. The test `examples_wired` checks it.
+  `RUN_TIMEOUT`, a `check` function and a failure test. The test
+  `examples_wired` checks these items by text.
 - After a dependency change in `san-mateo` or `san-mateo-camel`, update
   `examples/harvest-camel/Cargo.lock`:
   `cargo update --manifest-path examples/harvest-camel/Cargo.toml -p san-mateo -p san-mateo-camel`.

@@ -60,7 +60,7 @@ acme-crm:
     docs: https://acme-crm.example.com/docs
 ";
 
-/// Fake tokens. The checks make sure that no output shows them.
+/// Fake tokens. The check makes sure that the summary does not show them.
 const FAKE_SECRETS: [&str; 4] = ["at-1", "at-2", "rt-1", "rt-2"];
 
 /// The fake provider and the fake backend that gets the webhooks.
@@ -88,10 +88,15 @@ fn fake_network() -> MemoryTransport {
     fake.reply(
         "GET",
         CONTACTS_URL,
-        HttpResponse::json(200, &json!({"results": [{"id": "c-1", "name": "Ada"}]})),
+        HttpResponse::json(200, &contacts_json()),
     );
     fake.reply("POST", HOOK_URL, HttpResponse::new(200, ""));
     fake
+}
+
+/// The contacts of the fake provider.
+fn contacts_json() -> Value {
+    json!({"results": [{"id": "c-1", "name": "Ada"}]})
 }
 
 /// Your handler. San Mateo adds the auth and refreshes the token.
@@ -105,14 +110,20 @@ async fn contacts(
     let key = ConnectionKey::new(INTEGRATION, connection_id);
     let reply = san
         .proxy(ENV, &key, ProxyRequest::get("/v3/contacts"))
-        .await;
-    match reply.and_then(|r| r.json::<Value>()) {
-        Ok(body) => Ok(Json(body)),
-        Err(e) => {
-            let status = StatusCode::from_u16(e.status()).unwrap_or(StatusCode::BAD_GATEWAY);
-            Err((status, Json(json!({"error": {"code": e.code()}}))))
-        }
+        .await
+        .map_err(|e| api_error(&e))?;
+    // San Mateo gives back each provider reply, also a 4xx or a 5xx.
+    if !reply.is_success() {
+        let error = json!({"error": {"code": "upstream_status", "status": reply.status}});
+        return Err((StatusCode::BAD_GATEWAY, Json(error)));
     }
+    reply.json().map(Json).map_err(|e| api_error(&e))
+}
+
+/// An error reply with the status and the code of a San Mateo error.
+fn api_error(e: &san_mateo::Error) -> (StatusCode, Json<Value>) {
+    let status = StatusCode::from_u16(e.status()).unwrap_or(StatusCode::BAD_GATEWAY);
+    (status, Json(json!({"error": {"code": e.code()}})))
 }
 
 /// The secrets of one run. In production, read them from a secret store.
@@ -123,6 +134,17 @@ struct Secrets {
 }
 
 impl Secrets {
+    /// The secrets of the run and the fake tokens.
+    fn all(&self) -> Vec<String> {
+        let mut all = vec![
+            self.secret_key.clone(),
+            self.client_secret.clone(),
+            self.webhook_secret.clone(),
+        ];
+        all.extend(FAKE_SECRETS.iter().map(|s| (*s).to_owned()));
+        all
+    }
+
     fn random() -> Self {
         Self {
             secret_key: format!("sk_example_{}", OsEntropy.hex(16)),
@@ -341,11 +363,13 @@ fn summarize(
     let webhook = hooks.first().map_or(Value::Null, |hook| {
         let body: Value = serde_json::from_slice(&hook.body).unwrap_or(Value::Null);
         let signature = hook.header_value("x-san-mateo-hmac-sha256").unwrap_or_default();
+        let text = String::from_utf8_lossy(&hook.body);
         json!({
             "type": body["type"],
             "operation": body["operation"],
             "success": body["success"],
             "signature_valid": san_mateo::webhook::verify(&secrets.webhook_secret, &hook.body, signature),
+            "shows_no_secret": !secrets.all().iter().any(|s| text.contains(s.as_str())),
         })
     });
     let redirect_uri = query(&seen.authorize, "redirect_uri").unwrap_or_default();
@@ -366,8 +390,14 @@ fn summarize(
     })
 }
 
-/// Compares the summary with the expected values.
+/// Compares the summary with the expected values. The error starts with
+/// `check failed:`.
 fn check(summary: &Value) -> Result<(), String> {
+    // Look for a secret first. Then the error message does not show it.
+    let text = summary.to_string();
+    if FAKE_SECRETS.iter().any(|s| text.contains(s)) {
+        return Err("check failed: the summary shows a fake token".to_owned());
+    }
     let expected = json!({
         "authorize": {
             "host": "auth.acme-crm.example.com",
@@ -380,15 +410,19 @@ fn check(summary: &Value) -> Result<(), String> {
         "upstream_calls": 1,
         "upstream_used_new_token": true,
         "app_reply": {"status": 200, "body": {"results": [{"id": "c-1", "name": "Ada"}]}},
-        "webhook": {"type": "auth", "operation": "creation", "success": true, "signature_valid": true},
+        "webhook": {
+            "type": "auth",
+            "operation": "creation",
+            "success": true,
+            "signature_valid": true,
+            "shows_no_secret": true,
+        },
         "stopped_cleanly": true,
     });
     if *summary != expected {
-        return Err(format!("the summary {summary} is not {expected}"));
-    }
-    let text = summary.to_string();
-    if let Some(secret) = FAKE_SECRETS.iter().find(|s| text.contains(*s)) {
-        return Err(format!("the summary shows the secret {secret}"));
+        return Err(format!(
+            "check failed: the summary {summary} is not {expected}"
+        ));
     }
     Ok(())
 }
@@ -411,9 +445,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_wrong_reply_fails_the_check() {
-        // With no refresh reply, the fake repeats the first token reply. So
-        // the upstream call gets the old token, and the check must fail.
+    async fn a_missing_refresh_fails_the_check() {
+        // The fake has no refresh reply, so it repeats the first token reply.
+        // The upstream call then gets the old token.
         let fake = MemoryTransport::new();
         fake.reply(
             "POST",
@@ -426,10 +460,32 @@ mod tests {
         fake.reply(
             "GET",
             CONTACTS_URL,
-            HttpResponse::json(200, &json!({"results": []})),
+            HttpResponse::json(200, &contacts_json()),
         );
         fake.reply("POST", HOOK_URL, HttpResponse::new(200, ""));
         let err = run(fake).await.expect_err("the check finds the old token");
-        assert!(err.to_string().contains("is not"), "{err}");
+        let err = err.to_string();
+        assert!(err.starts_with("check failed:"), "{err}");
+        assert!(err.contains(r#""upstream_used_new_token":false"#), "{err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_upstream_error_gives_a_502() {
+        let fake = MemoryTransport::new();
+        for (access, expires_in) in [("at-1", 60), ("at-2", 3600)] {
+            let reply =
+                json!({"access_token": access, "refresh_token": "rt-x", "expires_in": expires_in});
+            fake.reply("POST", TOKEN_URL, HttpResponse::json(200, &reply));
+        }
+        fake.reply(
+            "GET",
+            CONTACTS_URL,
+            HttpResponse::json(500, &json!({"error": "down"})),
+        );
+        fake.reply("POST", HOOK_URL, HttpResponse::new(200, ""));
+        let err = run(fake).await.expect_err("the handler gives a 502");
+        let err = err.to_string();
+        assert!(err.starts_with("check failed:"), "{err}");
+        assert!(err.contains(r#""status":502"#), "{err}");
     }
 }

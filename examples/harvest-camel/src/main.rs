@@ -8,11 +8,17 @@
 //! ```
 //!
 //! harvest-camel calls the routes from activities. It changes a camel error
-//! into a harvest failure. A 503 is retryable, so harvest retries the
-//! create. The create route sends the harvest idempotency key to the
-//! provider, so the retry is safe. A 404 is not retryable, so harvest does
-//! not retry the find. The workflow reads the 404 as "no duplicate". The
-//! example checks the result. It returns an error when the result is wrong.
+//! into a harvest failure. A 404 is not retryable, so harvest does not retry
+//! the find. The workflow reads the 404 as "no duplicate".
+//!
+//! A 503 is retryable, so harvest retries the create. harvest-camel retries a
+//! `POST` after a 5xx or a network error for each method, and San Mateo cannot
+//! see that retry. So the create route sends the harvest idempotency key to
+//! the provider as `Idempotency-Key`. With no key, the route sends no `POST`.
+//! A retry is safe only when the provider supports `Idempotency-Key`.
+//!
+//! The example checks the result. It returns an error when the result is
+//! wrong.
 //!
 //! The harvest-camel example `order_flow` shows the other direction: a camel
 //! route starts a harvest workflow.
@@ -126,13 +132,18 @@ async fn find_duplicate(ctx: &ActivityContext, input: Value) -> Result<Value, Ac
 fn routes() -> Result<Vec<RouteDefinition>, CamelError> {
     let create = RouteBuilder::from(CREATE)
         .route_id("crm-create")
-        // harvest-camel sets `HarvestIdempotencyKey`. It is the same for each
-        // retry. The provider gets it, so it can find a duplicate.
-        .set_header_fn("SanMateoProxy-Idempotency-Key", |ex: &Exchange| {
-            ex.input
-                .header(HEADER_IDEMPOTENCY_KEY)
-                .cloned()
-                .unwrap_or(Value::Null)
+        // harvest-camel retries a `POST` after a 5xx or a network error, and
+        // San Mateo cannot see that retry. So this step is the only guard: the
+        // provider gets `HarvestIdempotencyKey` (the same for each retry) and
+        // can find a duplicate. With no key, the route sends no `POST`.
+        .process(|mut ex: Exchange| async move {
+            let Some(key) = ex.input.header(HEADER_IDEMPOTENCY_KEY).cloned() else {
+                return Err(CamelError::ValidationError(
+                    "no HarvestIdempotencyKey: call this route from a harvest activity".into(),
+                ));
+            };
+            ex.input.set_header("SanMateoProxy-Idempotency-Key", key);
+            Ok(ex)
         })
         // The URI fixes the tenant. `allowHeaderOverrides` stays `false`, so
         // a header cannot change the connection.
@@ -218,22 +229,28 @@ async fn run(url: &str, fake: MemoryTransport) -> Result<Value, BoxError> {
     migrate::apply(url, &migrate::embedded()).await?;
     let pool = engine_pool(url, 8, DbRole::Hot, &EngineDbTimeouts::default())?;
 
-    // camel: the San Mateo component and the routes.
+    let mut camel = start_camel(&fake).await?;
+    let output = with_worker(&camel, &pool, url).await;
+
+    // Stop camel in all cases. An error of the run comes first.
+    let stopped = camel.stop().await;
+    let output = output?;
+    stopped?;
+    let summary = summarize(&output, &fake);
+    check(&summary)?;
+    Ok(summary)
+}
+
+/// Starts camel with the San Mateo component and the routes.
+async fn start_camel(fake: &MemoryTransport) -> Result<CamelContext, BoxError> {
     let mut camel = CamelContext::builder().build().await?;
     camel.register_component(DirectComponent::new());
-    camel.register_component(SanMateoComponent::new(san_mateo(&fake).await?).environment(ENV));
+    camel.register_component(SanMateoComponent::new(san_mateo(fake).await?).environment(ENV));
     for route in routes()? {
         camel.add_route_definition(route).await?;
     }
     camel.start().await?;
-
-    let output = with_worker(&camel, &pool, url).await;
-
-    // Stop camel in all cases.
-    camel.stop().await?;
-    let summary = summarize(&output?, &fake);
-    check(&summary)?;
-    Ok(summary)
+    Ok(camel)
 }
 
 /// Starts a harvest worker, runs one workflow, and stops the worker.
@@ -328,6 +345,8 @@ fn summarize(output: &Value, fake: &MemoryTransport) -> Value {
     })
 }
 
+/// Compares the summary with the expected values. The error starts with
+/// `check failed:`.
 fn check(summary: &Value) -> Result<(), String> {
     let expected = json!({
         "workflow": {"created": "c-1", "duplicate": false},
@@ -339,7 +358,9 @@ fn check(summary: &Value) -> Result<(), String> {
     if *summary == expected {
         Ok(())
     } else {
-        Err(format!("the summary {summary} is not {expected}"))
+        Err(format!(
+            "check failed: the summary {summary} is not {expected}"
+        ))
     }
 }
 
@@ -387,13 +408,51 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_client_error_fails_the_run() {
+    async fn a_client_error_fails_the_workflow_with_no_retry() {
         let Some(url) = database_url() else { return };
-        // A 400 is not retryable, so the workflow fails at once.
         let fake = MemoryTransport::new();
         fake.reply("POST", CONTACTS_URL, HttpResponse::new(400, "bad contact"));
-        let err = run(&url, fake).await.expect_err("the workflow fails");
-        assert!(err.to_string().contains("workflow"), "{err}");
+        let err = run(&url, fake.clone())
+            .await
+            .expect_err("the workflow fails");
+        let err = err.to_string();
+        assert!(err.starts_with("workflow sync-contact-"), "{err}");
+        // A 400 is not retryable: one POST, and no wait for the timeout.
+        assert_eq!(fake.requests_to(CONTACTS_URL).len(), 1, "{err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_wrong_reply_fails_the_check() {
+        let Some(url) = database_url() else { return };
+        // The same replies as `fake_provider`, but the duplicate exists.
+        let fake = MemoryTransport::new();
+        fake.reply("POST", CONTACTS_URL, HttpResponse::new(503, "busy"));
+        let created = json!({"id": "c-1", "name": "Ada"});
+        fake.reply("POST", CONTACTS_URL, HttpResponse::json(201, &created));
+        let duplicate = json!({"id": "c-2", "name": "Ada"});
+        fake.reply("GET", DUPLICATE_URL, HttpResponse::json(200, &duplicate));
+        let err = run(&url, fake)
+            .await
+            .expect_err("the check finds the duplicate");
+        let err = err.to_string();
+        assert!(err.starts_with("check failed:"), "{err}");
+        assert!(err.contains(r#""duplicate":true"#), "{err}");
+    }
+
+    /// A caller with no harvest idempotency key gets an error, and the route
+    /// sends no `POST`. Else harvest could retry it with no key.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_create_without_a_key_sends_no_post() {
+        let fake = fake_provider();
+        let mut camel = start_camel(&fake).await.expect("camel starts");
+        let handle = CamelHandle::new();
+        handle.resolve(&camel, CREATE).expect("the route resolves");
+        let result = harvest_camel::call_route(&handle, CREATE, json!({"name": "Ada"}), []).await;
+        camel.stop().await.expect("camel stops");
+        let err = result.expect_err("the route refuses the call");
+        assert!(matches!(err, CamelError::ValidationError(_)), "{err:?}");
+        assert!(!harvest_camel::is_retryable(&err), "{err:?}");
+        assert_eq!(fake.requests_to(CONTACTS_URL).len(), 0);
     }
 
     /// `san-mateo-camel` keeps a copy of the harvest-camel retry rule. Here,

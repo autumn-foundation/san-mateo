@@ -11,11 +11,13 @@ harvest-camel route. Example code that no job runs can rot.
 
 ## Decision
 
-- Each example is a cargo example with `test = true`, as in harvest-camel
-  `order_flow`. `cargo test` runs its test. The `examples` CI job runs it
-  with `cargo run`, as a user does.
-- Each example checks exact values and returns an error when they are
-  wrong. A failure test removes one fake reply and expects that error.
+- Three examples are cargo examples with `test = true`, as in harvest-camel
+  `order_flow`. `cargo test` runs their tests. The harvest-camel example is
+  a binary in its own workspace, and its own CI job runs its tests. CI runs
+  each example with `cargo run`, as a user does.
+- Each example checks exact values and returns an error that starts with
+  `check failed:` when they are wrong. Failure tests change one fake reply
+  and expect that error, or expect a failed workflow with no retry.
 - The fake provider is `MemoryTransport`. The examples need no port for the
   provider and no dev-only proxy flags.
 - The autumn example test uses `TestApp`, because `run()` cannot stop from

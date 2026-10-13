@@ -379,8 +379,9 @@ pub fn init_tracing() {
         .try_init();
 }
 
-// The Rust blocks of the README compile as doc tests of this crate, so they
-// do not rot. This crate has the dependencies that they use.
+// The `rust` and `rust,no_run` blocks of the README compile as doc tests of
+// this crate, so they do not rot. This crate has the dependencies that they
+// use. The doc tests do not check `ignore` blocks.
 #[cfg(doctest)]
 #[doc = include_str!("../../../README.md")]
 struct ReadmeDoctests;

@@ -87,6 +87,12 @@
 //! from harvest activities, and its test checks this rule with the real
 //! harvest-camel.
 //!
+//! harvest-camel retries a failed activity after a 5xx or a network error,
+//! also for a `POST`. This component cannot see that retry. So a route that
+//! sends a `POST` must copy `HarvestIdempotencyKey` to
+//! `SanMateoProxy-Idempotency-Key`, and the provider must support
+//! `Idempotency-Key`.
+//!
 //! [`SanMateo`]: san_mateo::SanMateo
 //! [`CamelError::StreamLimitExceeded`]: camel_api::CamelError::StreamLimitExceeded
 //! [`CamelError::HttpOperationFailed`]: camel_api::CamelError::HttpOperationFailed

@@ -7,6 +7,7 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
 app_dir="$root/crates/autumn-plugin-san-mateo/examples/autumn_app"
 work=$(mktemp -d)
 pid=""
@@ -19,25 +20,35 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Random secrets for this run. The checks make sure that the log does not
+# show them. The prod profile of autumn-web also needs a signing secret and
+# trusted hosts.
+key=$(openssl rand -base64 32)
+secret="sk_example_$(openssl rand -hex 16)"
+signing=$(openssl rand -hex 32)
+
+# mask TEXT: TEXT with each secret of this run replaced by ***.
+mask() {
+  local text=$1
+  text=${text//"$key"/***}
+  text=${text//"$secret"/***}
+  text=${text//"$signing"/***}
+  printf '%s\n' "$text"
+}
+
 fail() {
-  echo "FAIL: $*" >&2
+  mask "FAIL: $*" >&2
   if [ -f "$work/app.log" ]; then
     echo "--- app log ---" >&2
-    cat "$work/app.log" >&2
+    mask "$(cat "$work/app.log")" >&2
   fi
   exit 1
 }
 
 cargo build --locked --quiet -p autumn-plugin-san-mateo --example autumn_app
-bin="${CARGO_TARGET_DIR:-$root/target}/debug/examples/autumn_app"
-
-# Random secrets for this run. The checks make sure that the log does not
-# show them.
-key=$(openssl rand -base64 32)
-secret="sk_example_$(openssl rand -hex 16)"
-# The prod profile of autumn-web also needs a signing secret and trusted
-# hosts.
-signing=$(openssl rand -hex 32)
+target=$(cargo metadata --format-version 1 --no-deps \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
+bin="$target/debug/examples/autumn_app"
 
 free_port() {
   python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
@@ -50,7 +61,7 @@ start() {
   port=$(free_port)
   base="http://127.0.0.1:$port"
   env -i PATH="$PATH" HOME="$HOME" \
-    AUTUMN_PROFILE="$profile" \
+    AUTUMN_ENV="$profile" \
     AUTUMN_MANIFEST_DIR="$app_dir" \
     AUTUMN_SERVER__PORT="$port" \
     AUTUMN_SERVER__PRESTOP_GRACE_SECS=0 \
@@ -61,11 +72,12 @@ start() {
   pid=$!
 }
 
-# wait_healthy: waits up to 60 s for the San Mateo health route.
-wait_healthy() {
+# healthy: waits up to 60 s for the San Mateo health route. Returns 1 when
+# the app stops.
+healthy() {
   for _ in $(seq 1 600); do
-    kill -0 "$pid" 2>/dev/null || fail "the app stopped at boot"
-    if curl -fsS --noproxy '*' "$base/san-mateo/health" >/dev/null 2>&1; then
+    kill -0 "$pid" 2>/dev/null || return 1
+    if curl -fsS --max-time 2 --noproxy '*' "$base/san-mateo/health" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.1
@@ -73,18 +85,35 @@ wait_healthy() {
   fail "no health reply in 60 s"
 }
 
-# expect STATUS CURL_ARGS...: sends one request and checks the status.
+# boot PROFILE [VAR=VALUE...]: starts the app and waits for health. Another
+# process can take the free port first, so it tries up to 3 ports.
+boot() {
+  for _ in 1 2 3; do
+    start "$@"
+    if healthy; then
+      return 0
+    fi
+    pid=""
+    grep -q "Address already in use" "$work/app.log" || fail "the app stopped at boot"
+  done
+  fail "no free port in 3 tries"
+}
+
+# expect STATUS CURL_ARGS... URL: sends one request and checks the status.
+# The message shows only the URL, because the headers hold the secret key.
 expect() {
   local want=$1
   shift
+  local url=${*: -1}
   local got
-  got=$(curl -s -o "$work/body" -w '%{http_code}' --noproxy '*' "$@")
-  [ "$got" = "$want" ] || fail "want $want, got $got for $* : $(cat "$work/body")"
+  got=$(curl -s --max-time 10 -o "$work/body" -w '%{http_code}' --noproxy '*' "$@") \
+    || fail "curl error for $url"
+  [ "$got" = "$want" ] || fail "want $want, got $got for $url: $(cat "$work/body")"
 }
 
 # stop_cleanly: sends SIGTERM and wants exit code 0 within 15 s.
 stop_cleanly() {
-  kill -TERM "$pid"
+  kill -TERM "$pid" 2>/dev/null || fail "the app stopped before SIGTERM"
   for _ in $(seq 1 150); do
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.1
@@ -104,10 +133,9 @@ no_secrets_in_log() {
 
 for profile in dev prod; do
   echo "autumn_app: profile $profile"
-  start "$profile" SAN_MATEO_ENCRYPTION_KEY="$key" \
+  boot "$profile" SAN_MATEO_ENCRYPTION_KEY="$key" \
     AUTUMN_SECURITY__SIGNING_SECRET="$signing" \
     AUTUMN_SECURITY__TRUSTED_HOSTS__HOSTS=127.0.0.1
-  wait_healthy
   auth="authorization: Bearer $secret"
   expect 200 "$base/"
   grep -q "autumn_app" "$work/body" || fail "GET / does not name the app"
