@@ -360,15 +360,17 @@ fn lacks_value(template: &str, vars: &Value) -> Result<bool> {
 }
 
 /// Renders each template of `map`. An entry with a missing value is left
-/// out, as in Nango.
+/// out, as in Nango. `lower` makes the names lower case.
 fn render_map(
     map: &std::collections::BTreeMap<String, String>,
     vars: &Value,
+    lower: bool,
 ) -> Result<Vec<(String, String)>> {
     let mut out = Vec::with_capacity(map.len());
     for (k, v) in map {
         match crate::template::render(v, vars) {
-            Ok(value) => out.push((k.to_ascii_lowercase(), value)),
+            Ok(value) if lower => out.push((k.to_ascii_lowercase(), value)),
+            Ok(value) => out.push((k.clone(), value)),
             Err(e) => {
                 if !lacks_value(v, vars)? {
                     return Err(e);
@@ -389,11 +391,11 @@ pub fn provider_headers(provider: &Provider, vars: &Value) -> Result<Vec<(String
     provider
         .proxy
         .as_ref()
-        .map_or_else(|| Ok(Vec::new()), |p| render_map(&p.headers, vars))
+        .map_or_else(|| Ok(Vec::new()), |p| render_map(&p.headers, vars, true))
 }
 
 /// Renders the provider `proxy.query` with `vars`. A parameter with a
-/// missing value is left out.
+/// missing value is left out. Names keep their case.
 ///
 /// # Errors
 ///
@@ -402,7 +404,7 @@ pub fn provider_query(provider: &Provider, vars: &Value) -> Result<Vec<(String, 
     provider
         .proxy
         .as_ref()
-        .map_or_else(|| Ok(Vec::new()), |p| render_map(&p.query, vars))
+        .map_or_else(|| Ok(Vec::new()), |p| render_map(&p.query, vars, false))
 }
 
 fn is_hop_by_hop(name: &str) -> bool {
