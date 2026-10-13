@@ -3,15 +3,16 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use camel_api::{BoxProcessor, CamelError};
+use camel_api::{BoxProcessor, BoxProcessorExt, CamelError};
 use camel_component_api::{
-    Component, ComponentContext, ComponentMetadata, Consumer, Endpoint, ProducerContext,
-    RuntimeObservability,
+    Component, ComponentCapabilities, ComponentContext, ComponentMetadata, Consumer, Endpoint,
+    ProducerContext, RuntimeObservability,
 };
 use san_mateo::SanMateo;
 
-use crate::options::EndpointOptions;
+use crate::options::{EndpointOptions, uri_options};
 use crate::producer::Producer;
+use crate::{DEFAULT_MAX_BODY_SIZE, SCHEME};
 
 /// The `san-mateo:` camel component. It is producer-only.
 ///
@@ -32,24 +33,27 @@ impl SanMateoComponent {
     /// Makes a component for a San Mateo service. It has no default
     /// environment, so each URI must set `environment`.
     #[must_use]
-    pub fn new(san: SanMateo) -> Self {
-        let _ = san;
-        todo!()
+    pub const fn new(san: SanMateo) -> Self {
+        Self {
+            san,
+            environment: None,
+            max_body_size: DEFAULT_MAX_BODY_SIZE,
+        }
     }
 
     /// Sets the environment for URIs with no `environment` option.
     #[must_use]
-    pub fn environment(self, environment: impl Into<String>) -> Self {
-        let _ = (self, environment.into());
-        todo!()
+    pub fn environment(mut self, environment: impl Into<String>) -> Self {
+        self.environment = Some(environment.into());
+        self
     }
 
     /// Sets the largest request body for URIs with no `maxBodySize` option.
     /// The default is [`crate::DEFAULT_MAX_BODY_SIZE`].
     #[must_use]
-    pub fn max_body_size(self, bytes: usize) -> Self {
-        let _ = (self, bytes);
-        todo!()
+    pub const fn max_body_size(mut self, bytes: usize) -> Self {
+        self.max_body_size = bytes;
+        self
     }
 
     /// Parses and checks the options of a `san-mateo:` URI.
@@ -59,19 +63,38 @@ impl SanMateoComponent {
     /// [`CamelError::InvalidUri`] for a URI problem. [`CamelError::Config`]
     /// when no environment is set or the environment does not exist.
     pub fn endpoint_options(&self, uri: &str) -> Result<EndpointOptions, CamelError> {
-        let _ = (&self.san, &self.environment, self.max_body_size, uri);
-        todo!()
+        let options =
+            EndpointOptions::parse(uri, self.environment.as_deref(), self.max_body_size)?;
+        // Fail at route start, not at the first message.
+        self.san.environment(&options.environment).map_err(|_| {
+            CamelError::Config(format!(
+                "the San Mateo environment '{}' does not exist",
+                options.environment
+            ))
+        })?;
+        Ok(options)
     }
 }
 
 #[async_trait]
 impl Component for SanMateoComponent {
     fn scheme(&self) -> &str {
-        todo!()
+        SCHEME
     }
 
     fn metadata(&self) -> ComponentMetadata {
-        todo!()
+        let mut metadata = ComponentMetadata::minimal(SCHEME)
+            .with_description(
+                "Calls provider APIs through the San Mateo proxy with stored, refreshed auth.",
+            )
+            .with_capabilities(ComponentCapabilities {
+                supports_producer: true,
+                ..ComponentCapabilities::default()
+            })
+            .with_uri_options(uri_options());
+        env!("CARGO_PKG_VERSION").clone_into(&mut metadata.version);
+        "san-mateo:integration".clone_into(&mut metadata.uri_syntax);
+        metadata
     }
 
     fn create_endpoint(
@@ -79,8 +102,11 @@ impl Component for SanMateoComponent {
         uri: &str,
         _ctx: &dyn ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
-        let _ = uri;
-        todo!()
+        let options = self.endpoint_options(uri)?;
+        Ok(Box::new(SanMateoEndpoint {
+            uri: uri.to_owned(),
+            producer: Producer::new(self.san.clone(), Arc::new(options)),
+        }))
     }
 }
 
@@ -99,7 +125,9 @@ impl Endpoint for SanMateoEndpoint {
         &self,
         _rt: Arc<dyn RuntimeObservability>,
     ) -> Result<Box<dyn Consumer>, CamelError> {
-        todo!()
+        Err(CamelError::EndpointCreationFailed(format!(
+            "{SCHEME}: is producer-only; use it in to(...), not in from(...)"
+        )))
     }
 
     fn create_producer(
@@ -107,7 +135,10 @@ impl Endpoint for SanMateoEndpoint {
         _rt: Arc<dyn RuntimeObservability>,
         _ctx: &ProducerContext,
     ) -> Result<BoxProcessor, CamelError> {
-        let _ = &self.producer;
-        todo!()
+        let producer = self.producer.clone();
+        Ok(BoxProcessor::from_fn(move |exchange| {
+            let producer = producer.clone();
+            async move { producer.send(exchange).await }
+        }))
     }
 }

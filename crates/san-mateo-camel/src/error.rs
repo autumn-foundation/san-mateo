@@ -26,21 +26,90 @@ use san_mateo::Error;
 /// stable San Mateo code. It never has a token or a body.
 #[must_use]
 pub fn to_camel_error(err: &Error, method: &str, url: &str) -> CamelError {
-    let _ = (err, method, url);
-    todo!()
+    let message = format!("san-mateo {}: {err}", err.code());
+    match err {
+        Error::Invalid(_)
+        | Error::MissingField(_)
+        | Error::Template(_)
+        | Error::Conflict(_)
+        | Error::UpstreamTooLarge => CamelError::ValidationError(message),
+        Error::ForbiddenHost(_) | Error::IntegrationNotAllowed(_) => {
+            CamelError::Unauthorized(message)
+        }
+        Error::Unauthorized(_)
+        | Error::InvalidConnectSession
+        | Error::InvalidOAuthState
+        | Error::RefreshExhausted => CamelError::Unauthenticated(message),
+        Error::Provider {
+            code,
+            status: Some(status @ 400..=599),
+            ..
+        } => CamelError::HttpOperationFailed {
+            method: method.to_owned(),
+            url: url.to_owned(),
+            status_code: *status,
+            status_text: format!("{} (san-mateo {code})", reason(*status)),
+            response_body: None,
+        },
+        // The auth provider failed with no usable status, or a refresh
+        // failed a short time ago. A later attempt can succeed.
+        Error::Provider { .. } | Error::RefreshCooldown if err.is_retryable() => {
+            CamelError::AuthProviderUnavailable(message)
+        }
+        Error::Provider { .. } => CamelError::Unauthenticated(message),
+        _ if err.is_retryable() => CamelError::Io(message),
+        // Unknown items, bad keys and internal faults: the same call fails
+        // again, so harvest must not retry.
+        _ => CamelError::Config(message),
+    }
 }
 
 /// Makes the camel HTTP error for a non-2xx reply. It has no reply body.
 pub(crate) fn status_error(method: &str, url: &str, status: u16) -> CamelError {
-    let _ = (method, url, status);
-    todo!()
+    CamelError::HttpOperationFailed {
+        method: method.to_owned(),
+        url: url.to_owned(),
+        status_code: status,
+        status_text: reason(status).to_owned(),
+        response_body: None,
+    }
 }
 
 /// Returns the reason phrase for a status, or `HTTP error` for a status
 /// with no phrase here.
 pub(crate) const fn reason(status: u16) -> &'static str {
-    let _ = status;
-    todo!()
+    match status {
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        304 => "Not Modified",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        402 => "Payment Required",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        406 => "Not Acceptable",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        410 => "Gone",
+        412 => "Precondition Failed",
+        413 => "Content Too Large",
+        415 => "Unsupported Media Type",
+        422 => "Unprocessable Content",
+        423 => "Locked",
+        425 => "Too Early",
+        428 => "Precondition Required",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => "HTTP error",
+    }
 }
 
 #[cfg(test)]

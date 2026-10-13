@@ -1,7 +1,10 @@
 //! Endpoint URI options: parse and metadata.
 
 use camel_api::CamelError;
-use camel_component_api::{OptionKind, UriOption};
+use camel_component_api::uri::parse_bool_param;
+use camel_component_api::{OptionKind, UriOption, parse_uri};
+
+use crate::{DEFAULT_MAX_BODY_SIZE, SCHEME};
 
 /// The HTTP methods that the `method` option and the `SanMateoMethod` header
 /// accept.
@@ -52,30 +55,216 @@ impl EndpointOptions {
         default_environment: Option<&str>,
         default_max_body_size: usize,
     ) -> Result<Self, CamelError> {
-        let _ = (uri, default_environment, default_max_body_size);
-        todo!()
+        let parts = parse_uri(uri)?;
+        if parts.scheme != SCHEME {
+            return Err(bad_uri(format!(
+                "expected the scheme {SCHEME}, got {}",
+                parts.scheme
+            )));
+        }
+        let integration = parts.path.trim_matches('/');
+        if integration.is_empty() {
+            return Err(bad_uri(format!(
+                "the integration key is missing: use {SCHEME}:<integration>"
+            )));
+        }
+        let mut options = Self {
+            integration: integration.to_owned(),
+            connection_id: None,
+            environment: String::new(),
+            method: "GET".to_owned(),
+            path: None,
+            retries: 0,
+            retry_on: Vec::new(),
+            base_url_override: None,
+            throw_exception_on_failure: true,
+            max_body_size: default_max_body_size,
+        };
+        let mut environment = None;
+        // Sort the keys, so that the first error is the same on each run.
+        let mut params: Vec<(&String, &String)> = parts.params.iter().collect();
+        params.sort();
+        for (key, value) in params {
+            match key.as_str() {
+                "connectionId" => options.connection_id = Some(non_empty(key, value)?),
+                "environment" => environment = Some(non_empty(key, value)?),
+                "method" => {
+                    options.method = normalize_method(value)
+                        .ok_or_else(|| {
+                            bad_uri(format!(
+                                "method must be one of {}, got '{value}'",
+                                METHODS.join(", ")
+                            ))
+                        })?
+                        .to_owned();
+                }
+                "path" => {
+                    check_path(value).map_err(|m| bad_uri(format!("path {m}")))?;
+                    options.path = Some(value.clone());
+                }
+                "retries" => options.retries = parse_retries(value)?,
+                "retryOn" => options.retry_on = parse_retry_on(value)?,
+                "baseUrlOverride" => options.base_url_override = Some(non_empty(key, value)?),
+                "throwExceptionOnFailure" => {
+                    options.throw_exception_on_failure =
+                        parse_bool_param(value).map_err(|e| bad_uri(format!("{key}: {e}")))?;
+                }
+                "maxBodySize" => options.max_body_size = parse_max_body_size(value)?,
+                other => {
+                    return Err(bad_uri(format!(
+                        "unknown {SCHEME}: option '{other}'; the options are {}",
+                        option_names().join(", ")
+                    )));
+                }
+            }
+        }
+        options.environment = environment
+            .or_else(|| default_environment.map(str::to_owned))
+            .ok_or_else(|| {
+                CamelError::Config(format!(
+                    "no San Mateo environment for {SCHEME}:{integration}: set the environment \
+                     option or SanMateoComponent::environment"
+                ))
+            })?;
+        Ok(options)
     }
+}
+
+fn bad_uri(message: String) -> CamelError {
+    CamelError::InvalidUri(message)
+}
+
+fn non_empty(key: &str, value: &str) -> Result<String, CamelError> {
+    if value.trim().is_empty() {
+        return Err(bad_uri(format!("{key} must not be empty")));
+    }
+    Ok(value.to_owned())
+}
+
+fn parse_retries(value: &str) -> Result<u32, CamelError> {
+    value
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|n| *n <= MAX_RETRIES)
+        .ok_or_else(|| {
+            bad_uri(format!(
+                "retries must be a whole number from 0 to {MAX_RETRIES}, got '{value}'"
+            ))
+        })
+}
+
+fn parse_retry_on(value: &str) -> Result<Vec<u16>, CamelError> {
+    value
+        .split(',')
+        .map(|code| {
+            code.trim()
+                .parse::<u16>()
+                .ok()
+                .filter(|c| (100..=599).contains(c))
+                .ok_or_else(|| {
+                    bad_uri(format!(
+                        "retryOn must be a list of HTTP status codes, got '{value}'"
+                    ))
+                })
+        })
+        .collect()
+}
+
+fn parse_max_body_size(value: &str) -> Result<usize, CamelError> {
+    value
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| {
+            bad_uri(format!(
+                "maxBodySize must be a number of bytes above 0, got '{value}'"
+            ))
+        })
 }
 
 /// Returns the upper-case method, or `None` when the method is not in
 /// [`METHODS`].
 pub(crate) fn normalize_method(method: &str) -> Option<&'static str> {
-    let _ = method;
-    todo!()
+    let method = method.trim();
+    METHODS
+        .iter()
+        .find(|m| m.eq_ignore_ascii_case(method))
+        .copied()
 }
 
 /// Checks an upstream path. It must start with `/` and have no white space
 /// or control characters.
 pub(crate) fn check_path(path: &str) -> Result<(), String> {
-    let _ = path;
-    todo!()
+    if !path.starts_with('/') {
+        return Err("must start with '/'".to_owned());
+    }
+    if path.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("must not have white space or control characters".to_owned());
+    }
+    Ok(())
+}
+
+fn option_names() -> Vec<String> {
+    uri_options().into_iter().map(|o| o.name).collect()
 }
 
 /// Returns the URI options for the component metadata.
 #[must_use]
 pub fn uri_options() -> Vec<UriOption> {
-    let _ = (OptionKind::String, UriOption::new("", "", OptionKind::Bool));
-    todo!()
+    let max = DEFAULT_MAX_BODY_SIZE.to_string();
+    vec![
+        UriOption::new(
+            "connectionId",
+            "The connection id. The SanMateoConnectionId header replaces it.",
+            OptionKind::String,
+        ),
+        UriOption::new(
+            "environment",
+            "The San Mateo environment. The default comes from the component.",
+            OptionKind::String,
+        ),
+        UriOption::new(
+            "method",
+            "The HTTP method. The SanMateoMethod header replaces it.",
+            OptionKind::Enum(METHODS.iter().map(|m| (*m).to_owned()).collect()),
+        )
+        .with_default("GET"),
+        UriOption::new(
+            "path",
+            "The upstream path and query, percent-encoded. The SanMateoPath header replaces it.",
+            OptionKind::String,
+        ),
+        UriOption::new(
+            "retries",
+            "Retries after the first attempt, from 0 to 9.",
+            OptionKind::Int,
+        )
+        .with_default("0"),
+        UriOption::new(
+            "retryOn",
+            "Status codes to retry also for non-idempotent methods, for example 500,502.",
+            OptionKind::List(Box::new(OptionKind::Int)),
+        ),
+        UriOption::new(
+            "baseUrlOverride",
+            "A base URL in place of the provider base URL. San Mateo checks the host.",
+            OptionKind::String,
+        ),
+        UriOption::new(
+            "throwExceptionOnFailure",
+            "Fail the exchange on a non-2xx reply.",
+            OptionKind::Bool,
+        )
+        .with_default("true"),
+        UriOption::new(
+            "maxBodySize",
+            "The largest request body in bytes.",
+            OptionKind::Int,
+        )
+        .with_default(&max),
+    ]
 }
 
 #[cfg(test)]

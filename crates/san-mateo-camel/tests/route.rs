@@ -376,13 +376,23 @@ async fn a_missing_connection_id_or_path_fails_validation() {
 async fn bad_uris_fail_when_the_route_is_added() {
     let h = harness().await;
     let fails = |component: SanMateoComponent, uri: &'static str, needle: &'static str| async move {
+        // harvest-camel `CamelHandle::resolve` calls `create_endpoint` directly.
+        let err = component
+            .create_endpoint(uri, &NoOpComponentContext)
+            .err()
+            .unwrap_or_else(|| panic!("{uri} must fail"));
+        assert!(
+            matches!(err, CamelError::InvalidUri(_) | CamelError::Config(_)),
+            "{uri}: {err:?}"
+        );
+        assert!(err.to_string().contains(needle), "{uri}: {err}");
+        assert!(!harvest_retryable(&err), "{uri}: {err:?}");
+        // camel-core wraps the error when it adds the route.
         let err = start_with(component, uri)
             .await
             .err()
             .unwrap_or_else(|| panic!("{uri} must fail"));
-        let text = err.to_string();
-        assert!(text.contains(needle), "{uri}: {text}");
-        assert!(!harvest_retryable(&err), "{uri}: {err:?}");
+        assert!(err.to_string().contains(needle), "{uri}: {err}");
     };
     let dev = || SanMateoComponent::new(h.san.clone()).environment("dev");
     fails(dev(), "san-mateo:crm?connectionId=c1&colour=red", "colour").await;
