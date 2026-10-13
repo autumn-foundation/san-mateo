@@ -490,6 +490,10 @@ impl Store for PgStore {
         .transpose()
     }
 
+    async fn touch_connection(&self, _id: Uuid, _at: DateTime<Utc>) -> Result<()> {
+        Ok(())
+    }
+
     async fn delete_connection(
         &self,
         env: &str,
@@ -523,6 +527,7 @@ impl Store for PgStore {
     async fn connections_expiring_before(
         &self,
         before: DateTime<Utc>,
+        _after: Option<(DateTime<Utc>, Uuid)>,
         limit: usize,
     ) -> Result<Vec<ConnectionRow>> {
         use schema::sm_connections::dsl as cn;

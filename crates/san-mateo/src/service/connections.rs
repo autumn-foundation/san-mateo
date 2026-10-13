@@ -567,7 +567,7 @@ impl SanMateo {
         let rows = self
             .inner
             .store
-            .connections_expiring_before(before, limit)
+            .connections_expiring_before(before, None, limit)
             .await?;
         let mut report = RefreshReport::default();
         for row in rows {

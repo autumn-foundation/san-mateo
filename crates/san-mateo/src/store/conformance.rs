@@ -38,10 +38,12 @@ where
     integration_conflict(make().await).await;
     connection_upsert_and_get(make().await).await;
     connection_compare_and_set(make().await).await;
+    connection_touch_keeps_the_version(make().await).await;
     connection_list_filters(make().await).await;
     connection_delete_cascades(make().await).await;
     integration_delete_cascades(make().await).await;
     expiring_connections(make().await).await;
+    expiring_connections_page_with_a_cursor(make().await).await;
     leases(make().await).await;
     connect_sessions(make().await).await;
     oauth_sessions_are_single_use(make().await).await;
@@ -209,6 +211,25 @@ pub async fn connection_compare_and_set(s: Arc<dyn Store>) {
     assert_eq!(s.update_connection(&gone).await.unwrap(), None);
 }
 
+pub async fn connection_touch_keeps_the_version(s: Arc<dyn Store>) {
+    let e = env();
+    let row = s
+        .upsert_connection(connection(&e, "gh", "c1"))
+        .await
+        .unwrap()
+        .row;
+    s.touch_connection(row.id, t(50)).await.unwrap();
+    let touched = s.get_connection(&e, "gh", "c1").await.unwrap().unwrap();
+    assert_eq!(touched.last_fetched_at, Some(t(50)));
+    assert_eq!(touched.version, row.version);
+    // A writer that read the row before the touch still wins.
+    let mut w = row.clone();
+    "sm1.k.w".clone_into(&mut w.credentials);
+    assert!(s.update_connection(&w).await.unwrap().is_some());
+    // A touch of a missing row is not an error.
+    s.touch_connection(Uuid::new_v4(), t(51)).await.unwrap();
+}
+
 pub async fn connection_list_filters(s: Arc<dyn Store>) {
     let e = env();
     let mut a = connection(&e, "gh", "c1");
@@ -355,7 +376,7 @@ pub async fn expiring_connections(s: Arc<dyn Store>) {
         s.upsert_connection(r).await.unwrap();
     }
     let got: Vec<String> = s
-        .connections_expiring_before(base + Duration::seconds(60), 1_000)
+        .connections_expiring_before(base + Duration::seconds(60), None, 1_000)
         .await
         .unwrap()
         .into_iter()
@@ -364,10 +385,54 @@ pub async fn expiring_connections(s: Arc<dyn Store>) {
         .collect();
     assert_eq!(got, vec!["sooner", "soon"]);
     let limited = s
-        .connections_expiring_before(base + Duration::seconds(60), 1)
+        .connections_expiring_before(base + Duration::seconds(60), None, 1)
         .await
         .unwrap();
     assert_eq!(limited.len(), 1);
+}
+
+pub async fn expiring_connections_page_with_a_cursor(s: Arc<dyn Store>) {
+    let e = env();
+    // Far-future instants, so rows of other tests do not interfere.
+    let base = Utc.timestamp_opt(4_010_000_000, 0).unwrap();
+    let mut ids = Vec::new();
+    for (i, secs) in [5, 5, 7, 9].into_iter().enumerate() {
+        let mut r = connection(&e, "gh", &format!("c{i}"));
+        r.credentials_expires_at = Some(base + Duration::seconds(secs));
+        s.upsert_connection(r).await.unwrap();
+    }
+    let before = base + Duration::seconds(60);
+    let mine = |rows: Vec<ConnectionRow>| {
+        rows.into_iter()
+            .filter(|r| r.environment == e)
+            .collect::<Vec<_>>()
+    };
+    let start = Some((base, Uuid::nil()));
+    let all = mine(
+        s.connections_expiring_before(before, start, 1_000)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(all.len(), 4);
+    for w in all.windows(2) {
+        assert!((w[0].credentials_expires_at, w[0].id) < (w[1].credentials_expires_at, w[1].id));
+    }
+    // Pages of one row reach each row once, also two rows with one expiry.
+    // Start at `base`: the rows of other tests come before it.
+    let mut after = start;
+    loop {
+        let page = s
+            .connections_expiring_before(before, after, 1)
+            .await
+            .unwrap();
+        let Some(r) = page.first() else { break };
+        assert_eq!(page.len(), 1);
+        after = Some((r.credentials_expires_at.unwrap(), r.id));
+        if r.environment == e {
+            ids.push(r.id);
+        }
+    }
+    assert_eq!(ids, all.iter().map(|r| r.id).collect::<Vec<_>>());
 }
 
 pub async fn leases(s: Arc<dyn Store>) {

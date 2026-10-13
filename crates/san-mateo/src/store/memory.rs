@@ -231,6 +231,10 @@ impl Store for MemoryStore {
         Ok(Some(next))
     }
 
+    async fn touch_connection(&self, _id: Uuid, _at: DateTime<Utc>) -> Result<()> {
+        Ok(())
+    }
+
     async fn delete_connection(
         &self,
         env: &str,
@@ -248,6 +252,7 @@ impl Store for MemoryStore {
     async fn connections_expiring_before(
         &self,
         before: DateTime<Utc>,
+        _after: Option<(DateTime<Utc>, Uuid)>,
         limit: usize,
     ) -> Result<Vec<ConnectionRow>> {
         let g = self.lock();

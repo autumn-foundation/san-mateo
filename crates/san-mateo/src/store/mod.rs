@@ -307,6 +307,10 @@ pub trait Store: Send + Sync + 'static {
     /// the stored row (with `version + 1`), or `None` when the version is
     /// stale or the row is gone.
     async fn update_connection(&self, row: &ConnectionRow) -> Result<Option<ConnectionRow>>;
+    /// Sets `last_fetched_at` of a connection. It does not change `version`,
+    /// so a read does not make a compare-and-set write fail. A missing row
+    /// is not an error.
+    async fn touch_connection(&self, id: Uuid, at: DateTime<Utc>) -> Result<()>;
     /// Deletes a connection, its records and its sync states.
     async fn delete_connection(
         &self,
@@ -315,10 +319,12 @@ pub trait Store: Send + Sync + 'static {
         connection_id: &str,
     ) -> Result<Option<ConnectionRow>>;
     /// Lists connections, in all environments, that are not exhausted and
-    /// expire before `before`. Sorted by expiry.
+    /// expire before `before`. Sorted by `(credentials_expires_at, id)`. With
+    /// `after`, only rows after that `(expiry, id)` come back, for paging.
     async fn connections_expiring_before(
         &self,
         before: DateTime<Utc>,
+        after: Option<(DateTime<Utc>, Uuid)>,
         limit: usize,
     ) -> Result<Vec<ConnectionRow>>;
 
