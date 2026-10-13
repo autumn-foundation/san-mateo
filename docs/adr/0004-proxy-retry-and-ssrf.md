@@ -13,10 +13,16 @@ did the call. A `POST` can then occur two times. Nango also accepts any
 ## Decision
 
 - 429: retry for all methods. A 429 means the provider did not do the call.
-- 5xx and network errors: retry only for `GET`, `HEAD`, `OPTIONS`, `PUT` and
-  `DELETE`. A caller can opt in for other methods with `Retry-On`. The
-  provider can opt in with `retry.error_code`.
+  A provider quota header (`retry.remaining`) at `0` makes a 4xx a rate
+  limit too. It never makes a 5xx a rate limit: after a 5xx, the provider
+  possibly did the call.
+- 5xx: retry only for `GET`, `HEAD`, `OPTIONS`, `PUT` and `DELETE`. A
+  caller can opt in for other methods with `Retry-On`, which lists status
+  values. The provider can opt in with `retry.error_code`.
+- Network errors: retry only for those idempotent methods. A network error
+  has no status, so `Retry-On` cannot opt in to it.
 - 401 on an OAuth2 connection: refresh one time and send one more time.
+  That send counts as an attempt, so all sends stay within the bound.
 - The wait comes from `Retry-After`, or from the provider `retry.at` and
   `retry.after` headers. Else it is exponential backoff with a cap. A wait above
   the cap gives up.

@@ -158,15 +158,18 @@ pub fn refresh_gate(
     cooldown_ms: u64,
 ) -> (g: Gate)
     ensures
-        force ==> g is Proceed,
-        (!force && exhausted) ==> g is Exhausted,
-        (!force && !exhausted && spec_in_cooldown(last_failure_ms, now_ms as int, cooldown_ms as int))
-            ==> g is Cooldown,
-        g is Proceed ==> (force || (!exhausted && !spec_in_cooldown(
+        // Each gate value holds exactly in its case.
+        g is Proceed <==> (force || (!exhausted && !spec_in_cooldown(
             last_failure_ms,
             now_ms as int,
             cooldown_ms as int,
         ))),
+        g is Exhausted <==> (!force && exhausted),
+        g is Cooldown <==> (!force && !exhausted && spec_in_cooldown(
+            last_failure_ms,
+            now_ms as int,
+            cooldown_ms as int,
+        )),
 {
     if force {
         return Gate::Proceed;
@@ -226,6 +229,61 @@ pub fn record_failure(attempts: u32, last_failure_day: Option<u64>, today: u64, 
 proof fn lemma_exhausted_after_max_days(max_days: u32)
     ensures
         spec_failure_count(max_days as int - 1, None, 0) >= max_days as int || max_days == 0,
+{
+}
+
+/// Spec: the failure count after one failure on each day in `days`, in order.
+pub open spec fn spec_count_over(days: Seq<u64>) -> int
+    decreases days.len(),
+{
+    if days.len() == 0 {
+        0
+    } else {
+        let before = days.drop_last();
+        let last_day = if before.len() == 0 {
+            None
+        } else {
+            Some(before.last())
+        };
+        spec_failure_count(spec_count_over(before), last_day, days.last() as int)
+    }
+}
+
+/// Failures on days that go up count one each. So failures on
+/// `MAX_FAILED_REFRESH_DAYS` different days give an exhausted connection.
+proof fn lemma_failures_on_rising_days(days: Seq<u64>)
+    requires
+        days.len() <= u32::MAX,
+        forall|i: int| 0 < i < days.len() ==> days[i - 1] < #[trigger] days[i],
+    ensures
+        spec_count_over(days) == days.len(),
+        days.len() >= MAX_FAILED_REFRESH_DAYS ==> spec_count_over(days) >= MAX_FAILED_REFRESH_DAYS,
+    decreases days.len(),
+{
+    if days.len() > 0 {
+        let before = days.drop_last();
+        assert forall|i: int| 0 < i < before.len() implies before[i - 1] < #[trigger] before[i] by {
+            assert(before[i - 1] == days[i - 1]);
+            assert(before[i] == days[i]);
+        }
+        lemma_failures_on_rising_days(before);
+        let n = before.len() as int;
+        assert(spec_count_over(before) == n);
+        if before.len() > 0 {
+            let prev = before.last();
+            assert(prev == days[days.len() - 2]);
+            assert(prev < days.last());
+            assert(spec_failure_count(n, Some(prev), days.last() as int) == n + 1);
+        } else {
+            assert(spec_failure_count(0, None, days.last() as int) == 1);
+        }
+    }
+}
+
+/// More failures on one day do not change the count.
+proof fn lemma_same_day_counts_once(attempts: int, day: u64)
+    ensures
+        spec_failure_count(attempts, Some(day), day as int) == attempts,
 {
 }
 

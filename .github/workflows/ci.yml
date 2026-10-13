@@ -56,6 +56,9 @@ jobs:
     env:
       # The Postgres tests run only when this is set.
       SAN_MATEO_TEST_DATABASE_URL: postgres://sm:sm@127.0.0.1:5432/sm_test
+      # The full Nango catalog at a fixed commit, for the AC1 parse test. CI
+      # reads it. The repo does not hold a copy (ADR 0001).
+      NANGO_REV: bd2d9111d640c799cce54e2768dc3b1ef14a00a9
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -64,6 +67,11 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Get the Nango catalog
+        run: |
+          curl -fsSL --retry 4 -o "$RUNNER_TEMP/nango-providers.yaml" \
+            "https://raw.githubusercontent.com/NangoHQ/nango/$NANGO_REV/packages/providers/providers.yaml"
+          echo "SAN_MATEO_NANGO_PROVIDERS=$RUNNER_TEMP/nango-providers.yaml" >> "$GITHUB_ENV"
       - name: Test with coverage (fail under 85% lines)
         run: cargo llvm-cov --workspace --all-targets --fail-under-lines 85 --lcov --output-path lcov.info
       - name: Doc tests

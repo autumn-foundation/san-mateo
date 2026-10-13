@@ -244,6 +244,35 @@ mod tests {
 
     /// Returns the body of `pub fn name` with no comments and no white space.
     /// In the spec, the body starts at a line with only `{` (after `ensures`).
+    /// Removes `/* ... */` comments.
+    fn strip_block_comments(text: &str) -> String {
+        let mut out = String::new();
+        let mut rest = text;
+        while let Some(at) = rest.find("/*") {
+            out.push_str(&rest[..at]);
+            rest = rest[at..]
+                .find("*/")
+                .map_or("", |end| &rest[at + end + 2..]);
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// Returns each `pub const NAME: T = V;` line, with no spaces.
+    fn constants(text: &str) -> std::collections::BTreeMap<String, String> {
+        text.lines()
+            .filter_map(|l| l.trim().strip_prefix("pub const "))
+            .filter(|l| !l.contains("fn "))
+            .filter_map(|l| {
+                let (name, rest) = l.split_once(':')?;
+                Some((
+                    name.trim().to_owned(),
+                    rest.chars().filter(|c| !c.is_whitespace()).collect(),
+                ))
+            })
+            .collect()
+    }
+
     fn body(text: &str, name: &str, spec: bool) -> String {
         let at = text
             .find(&format!("pub fn {name}("))
@@ -270,7 +299,7 @@ mod tests {
                 _ => {}
             }
         }
-        text[start..end]
+        strip_block_comments(&text[start..end])
             .lines()
             .map(|l| l.split("//").next().unwrap_or(""))
             .collect::<String>()
@@ -297,6 +326,49 @@ mod tests {
         ] {
             assert_eq!(body(spec, name, true), body(code, name, false), "{name}");
         }
+        // The constants that the proofs use must have the same values.
+        let spec_consts = constants(spec);
+        let code_consts = constants(code);
+        assert!(spec_consts.len() >= 5, "{spec_consts:?}");
+        for (name, value) in &spec_consts {
+            assert_eq!(code_consts.get(name), Some(value), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_drift_check_sees_changes() {
+        let code =
+            "pub const A: u64 = 1;\npub fn f(x: u64) -> u64 {\n    x /* note */ + 1 // tail\n}\n";
+        assert_eq!(body(code, "f", false), "x+1");
+        assert_eq!(constants(code).get("A").map(String::as_str), Some("u64=1;"));
+        assert_eq!(strip_block_comments("a/*b*/c/*d"), "ac");
+    }
+
+    #[test]
+    fn constants_match_the_plan() {
+        // docs/plan.md AC9, AC11 and AC15 give these values.
+        assert_eq!(DEFAULT_REFRESH_BUFFER_MS, 15 * 60 * 1000);
+        assert_eq!(REFRESH_COOLDOWN_MS, 30 * 1000);
+        assert_eq!(MAX_FAILED_REFRESH_DAYS, 4);
+        assert_eq!(MAX_ATTEMPTS, 10);
+        assert_eq!(MIN_SYNC_FREQUENCY_MS, 30 * 1000);
+        assert_eq!(MS_PER_DAY, 24 * 60 * 60 * 1000);
+    }
+
+    #[test]
+    fn expiry_at_a_real_time() {
+        // 2023-11-14T22:13:20Z in ms. Tests with small times miss overflow
+        // and operator mistakes.
+        let now = 1_700_000_000_000_u64;
+        assert_eq!(expires_at_ms(now, 4 * 3_600, false), now + 14_400_000);
+        assert_eq!(expires_at_ms(now, 30 * 86_400, false), now + 2_592_000_000);
+        assert_eq!(expires_at_ms(now, 14_400_000, true), now + 14_400_000);
+        assert!(!token_expired(
+            now,
+            now + 14_400_000,
+            DEFAULT_REFRESH_BUFFER_MS
+        ));
+        assert!(token_expired(now, now + 600_000, DEFAULT_REFRESH_BUFFER_MS));
     }
 
     #[test]
