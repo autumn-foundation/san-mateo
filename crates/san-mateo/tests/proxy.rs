@@ -332,6 +332,53 @@ async fn network_errors_retry_then_fail() {
 }
 
 #[tokio::test]
+async fn a_5xx_with_no_quota_left_is_not_a_rate_limit() {
+    // The quota header says nothing about a 5xx: the provider possibly did
+    // the call. A POST must not go again with no opt-in.
+    let h = ready().await;
+    let key = crm(&h).await;
+    let url = format!("{API}/v3/notes");
+    h.http.reply(
+        "POST",
+        &url,
+        HttpResponse::new(503, "").header("x-remaining", "0"),
+    );
+    h.http.reply("POST", &url, HttpResponse::new(201, "{}"));
+    let res = h
+        .san
+        .proxy(
+            "dev",
+            &key,
+            ProxyRequest::new("POST", "/v3/notes").retries(3),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status, 503);
+    assert_eq!(h.http.requests_to(&url).len(), 1);
+}
+
+#[tokio::test]
+async fn a_refresh_send_counts_toward_the_hard_limit() {
+    let h = ready().await;
+    let key = crm(&h).await;
+    let url = format!("{API}/v3/limited");
+    h.http.reply("GET", &url, HttpResponse::new(401, "expired"));
+    h.http.reply("GET", &url, HttpResponse::new(429, ""));
+    h.http.reply(
+        "POST",
+        "https://auth.crm.example.com/token",
+        token_reply("at-2", Some("rt-2"), Some(3_600)),
+    );
+    let res = h
+        .san
+        .proxy("dev", &key, ProxyRequest::get("/v3/limited").retries(50))
+        .await
+        .unwrap();
+    assert_eq!(res.status, 429);
+    assert_eq!(h.http.requests_to(&url).len(), 10);
+}
+
+#[tokio::test]
 async fn attempts_have_a_hard_limit() {
     let h = ready().await;
     let key = crm(&h).await;
@@ -456,19 +503,29 @@ async fn pagination_has_a_page_limit_and_checks_replies() {
         .await
         .unwrap();
     assert_eq!(all.len(), 3);
-    let url = format!("{API}/v3/broken");
-    h.http.reply("GET", &url, HttpResponse::new(500, "oops"));
-    assert!(
-        h.san
+    // A page with a non-2xx status fails on the status, not on its body.
+    for (status, body) in [(500, "oops"), (404, "[]"), (199, "[]"), (300, "[]")] {
+        let path = format!("/v3/broken{status}");
+        h.http.reply(
+            "GET",
+            &format!("{API}{path}"),
+            HttpResponse::new(status, body),
+        );
+        let err = h
+            .san
             .paginate(
                 "dev",
                 &key,
-                ProxyRequest::get("/v3/broken"),
-                PaginateOptions::default()
+                ProxyRequest::get(&path),
+                PaginateOptions::default(),
             )
             .await
-            .is_err()
-    );
+            .unwrap_err();
+        assert!(
+            matches!(&err, Error::Upstream(m) if m.contains(&format!("status {status}"))),
+            "{status}: {err:?}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -671,13 +671,36 @@ mod tests {
             "https://[2002:7f00:1::]/x",
             "https://[ff02::1]/x",
             "https://[fec0::1]/x",
+            "https://100.64.0.1/x",
+            "https://100.127.255.254/x",
+            "https://198.19.255.1/x",
         ] {
             assert!(check_upstream(bad, None, false, &s).is_err(), "{bad}");
         }
+        for internal in [
+            "https://10.0.0.5/x",
+            "https://[::1]/x",
+            "https://localhost./x",
+        ] {
+            assert!(
+                matches!(
+                    check_upstream(internal, None, false, &s),
+                    Err(Error::ForbiddenHost(_))
+                ),
+                "{internal}"
+            );
+        }
+        // Public neighbours of the internal ranges stay open.
         for good in [
             "https://8.8.8.8/x",
             "https://[2001:4860:4860::8888]/x",
             "https://[64:ff9b::808:808]/x",
+            "https://100.63.255.255/x",
+            "https://100.128.0.1/x",
+            "https://198.17.255.255/x",
+            "https://198.20.0.1/x",
+            "https://223.255.255.255/x",
+            "https://1.0.0.1/x",
         ] {
             assert!(check_upstream(good, None, false, &s).is_ok(), "{good}");
         }
@@ -745,6 +768,20 @@ mod tests {
             Some("api.example.com")
         );
         assert_eq!(host_of("nope"), None);
+        // A wildcard matches only hosts under its suffix, whatever the length.
+        for foreign in [
+            "https://attacker.example.org/x",
+            "https://cdn.example.net.attacker.org/x",
+            "https://xcdn.example.net/x",
+        ] {
+            assert!(
+                matches!(
+                    check_upstream(foreign, Some("api.example.com"), true, &s),
+                    Err(Error::ForbiddenHost(_))
+                ),
+                "{foreign}"
+            );
+        }
     }
 
     fn provider(headers: &[(&str, &str)]) -> Provider {
@@ -906,6 +943,20 @@ mod tests {
         assert_eq!(
             classify(500, none, None, &[500]),
             (Outcome::ServerError, true)
+        );
+        // A quota header with no quota left does not make a 5xx a rate limit.
+        let quota = RetryHeaders {
+            remaining: Some("x-ratelimit-remaining".into()),
+            ..RetryHeaders::default()
+        };
+        assert_eq!(
+            classify(
+                503,
+                &h(&[("x-ratelimit-remaining", "0")]),
+                Some(&quota),
+                &[]
+            ),
+            (Outcome::ServerError, false)
         );
         let gh = RetryHeaders {
             remaining: Some("x-ratelimit-remaining".into()),
