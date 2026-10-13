@@ -471,7 +471,7 @@ pub fn decide(
 }
 
 /// One step of the proxy loop: a retry at `attempt < max` gives a next
-/// attempt that is still `<= max`. The loop is in `src/proxy.rs`. Tests check it.
+/// attempt that is still `<= max`. The loop is in `src/service/proxying.rs`. Tests check it.
 proof fn lemma_attempts_bounded(attempt: u32, max_attempts: u32)
     requires
         attempt < spec_cap_attempts(max_attempts),

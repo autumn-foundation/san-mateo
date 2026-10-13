@@ -21,6 +21,14 @@
 //!   the error gives the fix.
 //! - The hosted connect page needs `[security.headers.csp_nonce]
 //!   enabled = true`. The plugin then puts the autumn nonce in the page.
+//! - At the root prefix (`"/"`), the plugin merges its router. `autumn routes
+//!   audit` cannot prove a merged router, so the audit reports it.
+//! - The background loops start in the startup hook, in roles that run
+//!   workers. When `san-mateo-harvest` runs the syncs, set
+//!   `[san_mateo.background] run_syncs = false`. Else each sync runs two
+//!   times.
+//! - With `.service(san)`, the `server_url` of `san` must end with the
+//!   prefix. Else OAuth callbacks give 404. The plugin logs a warning.
 //!
 //! ```rust,no_run
 //! use autumn_plugin_san_mateo::SanMateoPlugin;

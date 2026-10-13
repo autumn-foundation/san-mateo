@@ -79,7 +79,9 @@
 //! reason phrase. It has no reply body, because a body can hold secrets.
 //! [`to_camel_error`] maps a [`san_mateo::Error`] to a camel error. The
 //! harvest-camel `is_retryable` function gives the same answer as
-//! [`san_mateo::Error::is_retryable`] for each mapped error.
+//! [`san_mateo::Error::is_retryable`] for each mapped error. harvest-camel
+//! 0.1 uses camel 0.55, so a harvest-camel context cannot hold this
+//! component yet. The rules are ready for a harvest-camel on camel 0.57.
 //!
 //! [`SanMateo`]: san_mateo::SanMateo
 //! [`CamelError::StreamLimitExceeded`]: camel_api::CamelError::StreamLimitExceeded

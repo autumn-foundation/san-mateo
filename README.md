@@ -16,8 +16,7 @@ San Mateo does these tasks for the users of your product:
 San Mateo is part of the autumn ecosystem. Use it as a standalone server, as
 an [autumn-web](https://github.com/autumn-foundation/autumn) plugin, from
 [autumn-harvest](https://github.com/autumn-foundation/autumn-harvest)
-workflows, or from [rust-camel](https://github.com/autumn-foundation/harvest-camel)
-routes.
+workflows, or from rust-camel routes.
 
 ## Crates
 
@@ -189,11 +188,44 @@ Write syncs and actions as Rust types that implement `SyncFunction` and
 
 ### autumn-web
 
-See [`autumn-plugin-san-mateo`](crates/autumn-plugin-san-mateo).
+```rust,ignore
+autumn_web::app()
+    .plugin(SanMateoPlugin::new().prefix("/san-mateo"))
+    .run()
+    .await;
+```
+
+```toml
+[san_mateo]
+server_url = "https://app.example.com"
+encryption_key_env = "SAN_MATEO_ENCRYPTION_KEY"
+
+[san_mateo.environments.prod]
+secret_key_env = "SM_PROD_SK"
+
+[security.csrf]
+exempt_paths = ["/san-mateo"]
+```
+
+- The config holds env var names, never secrets.
+- Handlers and jobs get the service with `SanMateoService`.
+- The plugin adds a `san_mateo` health indicator. It stops the loops and
+  waits for webhooks at shutdown.
+- See [`autumn-plugin-san-mateo`](crates/autumn-plugin-san-mateo) for the
+  CSRF, CSP and root-prefix notes.
 
 ### autumn-harvest
 
-See [`san-mateo-harvest`](crates/san-mateo-harvest).
+Register `san_mateo_harvest::workflows()`, `san_mateo_harvest::activities()`
+and the `SanMateo` service as harvest state.
+
+- `san_mateo_proxy` sends a proxy call. A `POST` is not retried after a 5xx
+  or a network error, unless you forward the idempotency key.
+- `san_mateo_sync_loop` runs a sync with durable timers. Start it with
+  `SyncLoopInput::new(..)` and its `workflow_id()`.
+- When harvest runs the syncs, set `run_syncs = false` in the plugin. Else
+  each sync runs two times.
+- See [`san-mateo-harvest`](crates/san-mateo-harvest).
 
 ### rust-camel
 
@@ -209,8 +241,9 @@ san-mateo:hubspot?connectionId=acme&path=/crm/v3/objects/contacts&retries=2
 - The reply sets the body, `CamelHttpResponseCode` and
   `SanMateoResponse-<name>` headers. The component does not copy secret
   reply headers.
-- Errors map to camel errors. harvest-camel retries the same errors that
-  San Mateo marks as retryable.
+- Errors map to camel errors with the retry rules of harvest-camel.
+  harvest-camel 0.1 uses camel 0.55, so its contexts cannot hold this
+  component yet.
 - The `SanMateoConnectionId`, `SanMateoMethod` and `SanMateoPath` headers
   replace the URI options only with `allowHeaderOverrides=true`. The
   default is `false`. Do not set it on a route where an outside caller can

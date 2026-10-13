@@ -24,6 +24,17 @@
 //! # }
 //! ```
 //!
+//! Rules:
+//!
+//! - A proxy call with a non-idempotent method (for example `POST`) is not
+//!   retried after a 5xx, 408, 425 or a network error: the provider possibly
+//!   did it. Set `forward_idempotency_key` or `retry_on` to allow a retry.
+//! - An action runs at most once. Its failures are non-retryable.
+//! - A paused sync does not run. The output has `skipped: true`.
+//! - When this crate runs the syncs, turn off the in-process sync scheduler
+//!   (`run_syncs = false` in the autumn plugin). Else each sync runs two
+//!   times.
+//!
 //! With `autumn-harvest-plugin`, the plugin has the same three calls:
 //!
 //! ```ignore
