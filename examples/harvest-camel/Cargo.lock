@@ -2277,7 +2277,7 @@ dependencies = [
 [[package]]
 name = "harvest-camel"
 version = "0.1.0"
-source = "git+https://github.com/autumn-foundation/harvest-camel?rev=1141b3cf0748beedf432e4935ee49be9f5ec29ea#1141b3cf0748beedf432e4935ee49be9f5ec29ea"
+source = "git+https://github.com/autumn-foundation/harvest-camel?rev=29a4783058dbaff4a2e2c3f5d1f959fd77ad6769#29a4783058dbaff4a2e2c3f5d1f959fd77ad6769"
 dependencies = [
  "async-trait",
  "autumn-harvest",

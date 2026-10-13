@@ -23,9 +23,9 @@ path = "src/main.rs"
 [dependencies]
 san-mateo = { path = "../../crates/san-mateo" }
 san-mateo-camel = { path = "../../crates/san-mateo-camel" }
-# Not on crates.io. This rev moves harvest-camel to camel 0.57
-# (autumn-foundation/harvest-camel PR 6). Pin a full commit hash.
-harvest-camel = { git = "https://github.com/autumn-foundation/harvest-camel", rev = "1141b3cf0748beedf432e4935ee49be9f5ec29ea" }
+# Not on crates.io. A commit on harvest-camel `main` with camel 0.57.
+# Pin a full commit hash of `main`.
+harvest-camel = { git = "https://github.com/autumn-foundation/harvest-camel", rev = "29a4783058dbaff4a2e2c3f5d1f959fd77ad6769" }
 autumn-harvest = "0.7.0"
 camel-api = "0.57"
 camel-builder = "0.57"

@@ -123,9 +123,10 @@ sides of an equal value), change only speed, or touch `Debug` and log text.
   network policy for names that resolve to private addresses.
 - The host check compares the last two host labels. A catalog URL such as
   `https://${x}.co.uk` passes. Catalog URLs must use a full domain.
-- harvest-camel is not on crates.io, and its `main` uses camel 0.55. The
-  `harvest_camel` example pins a harvest-camel commit on camel 0.57
-  (harvest-camel PR 6). Move the pin to `main` after the merge.
+- harvest-camel is not on crates.io. The `harvest_camel` example pins a
+  commit of its `main` (camel 0.57) by a full hash. To move the pin, change
+  `rev` and run `cargo update --manifest-path
+  examples/harvest-camel/Cargo.toml -p harvest-camel`.
 - The workflows `san_mateo_sync_loop` and `san_mateo_refresh_sweep` send
   their activities to the queue `default`. A worker on a different queue
   does not get them. A fix changes behaviour, so it needs approval.
