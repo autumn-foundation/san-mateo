@@ -312,7 +312,9 @@ dependencies = [
 name = "autumn-plugin-san-mateo"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "autumn-web",
+ "reqwest 0.12.28",
  "san-mateo",
  "serde",
  "serde_json",
@@ -321,6 +323,7 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "tower",
  "tracing",
+ "url",
 ]
 
 [[package]]
