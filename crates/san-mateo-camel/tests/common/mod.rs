@@ -1,7 +1,13 @@
 //! Test harness: a San Mateo service with a fake network, and a camel
 //! context with a `direct:in` route to a `san-mateo:` endpoint.
 
-#![allow(dead_code, clippy::unwrap_used, clippy::expect_used, missing_docs)]
+#![allow(
+    dead_code,
+    missing_docs,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::result_large_err
+)]
 
 use std::sync::Arc;
 
@@ -167,10 +173,8 @@ pub async fn send(camel: &CamelContext, message: Message) -> Result<Exchange, Ca
     let rt: Arc<dyn RuntimeObservability> = Arc::new(NoOpComponentContext);
     let producer: BoxProcessor = endpoint.create_producer(rt, &camel.producer_context())?;
     let mut exchange = producer.oneshot(Exchange::new(message)).await?;
-    match exchange.error.take() {
-        Some(err) => Err(err),
-        None => Ok(exchange),
-    }
+    let error = exchange.error.take();
+    error.map_or(Ok(exchange), Err)
 }
 
 /// Stops a camel context.

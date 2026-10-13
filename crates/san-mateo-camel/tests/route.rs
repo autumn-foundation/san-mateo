@@ -34,7 +34,11 @@ async fn a_get_adds_the_auth_and_returns_json() {
             .header("x-request-id", "r1")
             .header("set-cookie", "sid=secret-cookie"),
     );
-    let camel = start(&h, "san-mateo:crm?connectionId=c1&path=/v3/contacts%3Flimit%3D10").await;
+    let camel = start(
+        &h,
+        "san-mateo:crm?connectionId=c1&path=/v3/contacts%3Flimit%3D10",
+    )
+    .await;
     let ex = send(&camel, Message::default()).await.unwrap();
     stop(camel).await;
 
@@ -67,7 +71,11 @@ async fn headers_replace_the_options_and_proxy_headers_go_upstream() {
     let url = format!("{KEYED_API}/v1/items");
     h.http
         .reply("POST", &url, json_reply(201, &json!({"id": "i-1"})));
-    let camel = start(&h, "san-mateo:keyed?connectionId=wrong&method=GET&path=/nope").await;
+    let camel = start(
+        &h,
+        "san-mateo:keyed?connectionId=wrong&method=GET&path=/nope",
+    )
+    .await;
     let mut msg = Message::new(Body::Json(json!({"name": "a"})));
     msg.set_header(HEADER_CONNECTION_ID, "k1");
     msg.set_header(HEADER_METHOD, "post");
@@ -105,14 +113,21 @@ async fn text_and_byte_bodies_go_upstream() {
         &url,
         HttpResponse::new(200, "stored").header("content-type", "text/plain"),
     );
-    let camel = start(&h, "san-mateo:keyed?connectionId=k1&method=PUT&path=/v1/upload").await;
+    let camel = start(
+        &h,
+        "san-mateo:keyed?connectionId=k1&method=PUT&path=/v1/upload",
+    )
+    .await;
     let mut msg = Message::new(Body::Text("héllo".to_owned()));
     msg.set_header("SanMateoProxy-Content-Type", "text/csv");
     let ex = send(&camel, msg).await.unwrap();
     assert_eq!(ex.input.body, Body::Text("stored".to_owned()));
-    let ex = send(&camel, Message::new(Body::Bytes(vec![0, 159, 146, 150].into())))
-        .await
-        .unwrap();
+    let ex = send(
+        &camel,
+        Message::new(Body::Bytes(vec![0, 159, 146, 150].into())),
+    )
+    .await
+    .unwrap();
     assert_eq!(ex.input.header(HEADER_RESPONSE_CODE), Some(&json!(200)));
     let mut msg = Message::new(Body::Json(json!([1, 2])));
     msg.set_header("SanMateoProxy-Content-Type", "application/vnd.api+json");
@@ -227,7 +242,8 @@ async fn retries_and_retry_on_reach_the_proxy() {
     let url = format!("{CRM_API}/v3/deals");
     h.http.reply("POST", &url, HttpResponse::new(503, ""));
     h.http.reply("POST", &url, HttpResponse::new(503, ""));
-    h.http.reply("POST", &url, json_reply(201, &json!({"id": 9})));
+    h.http
+        .reply("POST", &url, json_reply(201, &json!({"id": 9})));
     let camel = start(
         &h,
         "san-mateo:crm?connectionId=c1&method=POST&path=/v3/deals&retries=2&retryOn=500,503",
@@ -259,7 +275,8 @@ async fn a_401_refreshes_the_token_and_sends_again() {
     let h = harness().await;
     let url = format!("{CRM_API}/v3/me");
     h.http.reply("GET", &url, HttpResponse::new(401, "expired"));
-    h.http.reply("GET", &url, json_reply(200, &json!({"me": true})));
+    h.http
+        .reply("GET", &url, json_reply(200, &json!({"me": true})));
     h.http.reply(
         "POST",
         TOKEN_URL,
@@ -292,7 +309,10 @@ async fn the_environment_option_selects_the_environment() {
     send(&camel, Message::default()).await.unwrap();
     stop(camel).await;
     let sent = h.http.requests_to(&url);
-    assert_eq!(sent[0].header_value("authorization"), Some("Bearer at-prod"));
+    assert_eq!(
+        sent[0].header_value("authorization"),
+        Some("Bearer at-prod")
+    );
 
     // A component with no default environment uses the URI option.
     let camel = start_with(
@@ -332,7 +352,10 @@ async fn a_forbidden_base_url_override_is_non_retryable() {
     assert!(matches!(err, CamelError::Unauthorized(_)), "{err:?}");
     assert!(err.to_string().contains("forbidden_host"), "{err}");
     assert!(!harvest_retryable(&err));
-    assert!(h.http.requests().is_empty(), "no token goes to the bad host");
+    assert!(
+        h.http.requests().is_empty(),
+        "no token goes to the bad host"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -417,7 +440,7 @@ async fn bad_uris_fail_when_the_route_is_added() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_endpoint_options_are_checked_without_a_route() {
     let h = harness().await;
-    let component = SanMateoComponent::new(h.san.clone()).environment("dev");
+    let component = SanMateoComponent::new(h.san).environment("dev");
     let o = component
         .endpoint_options("san-mateo:crm?connectionId=c1&retries=3")
         .unwrap();
@@ -463,7 +486,7 @@ async fn the_metadata_lists_the_uri_options() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_component_is_producer_only() {
     let h = harness().await;
-    let component = SanMateoComponent::new(h.san.clone()).environment("dev");
+    let component = SanMateoComponent::new(h.san).environment("dev");
     assert_eq!(component.scheme(), SCHEME);
     let endpoint = component
         .create_endpoint("san-mateo:crm?connectionId=c1", &NoOpComponentContext)
@@ -471,7 +494,10 @@ async fn the_component_is_producer_only() {
     assert_eq!(endpoint.uri(), "san-mateo:crm?connectionId=c1");
     let rt: Arc<dyn RuntimeObservability> = Arc::new(NoOpComponentContext);
     let err = endpoint.create_consumer(rt).err().unwrap();
-    assert!(matches!(err, CamelError::EndpointCreationFailed(_)), "{err:?}");
+    assert!(
+        matches!(err, CamelError::EndpointCreationFailed(_)),
+        "{err:?}"
+    );
     assert!(err.to_string().contains("producer"), "{err}");
     let debug = format!("{component:?}");
     assert!(!debug.contains("sk_test"), "{debug}");

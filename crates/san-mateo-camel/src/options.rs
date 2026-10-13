@@ -89,14 +89,14 @@ impl EndpointOptions {
                 "connectionId" => options.connection_id = Some(non_empty(key, value)?),
                 "environment" => environment = Some(non_empty(key, value)?),
                 "method" => {
-                    options.method = normalize_method(value)
+                    normalize_method(value)
                         .ok_or_else(|| {
                             bad_uri(format!(
                                 "method must be one of {}, got '{value}'",
                                 METHODS.join(", ")
                             ))
                         })?
-                        .to_owned();
+                        .clone_into(&mut options.method);
                 }
                 "path" => {
                     check_path(value).map_err(|m| bad_uri(format!("path {m}")))?;
@@ -130,7 +130,7 @@ impl EndpointOptions {
     }
 }
 
-fn bad_uri(message: String) -> CamelError {
+const fn bad_uri(message: String) -> CamelError {
     CamelError::InvalidUri(message)
 }
 
@@ -349,7 +349,10 @@ mod tests {
     fn rejects_bad_uris() {
         let m = invalid_uri("san-mateo:crm?connectionId=c1&pathh=/x");
         assert!(m.contains("unknown") && m.contains("pathh"), "{m}");
-        assert!(m.contains("connectionId"), "the message lists the options: {m}");
+        assert!(
+            m.contains("connectionId"),
+            "the message lists the options: {m}"
+        );
         assert!(invalid_uri("san-mateo:?connectionId=c1").contains("integration"));
         assert!(invalid_uri("san-mateo:/").contains("integration"));
         assert!(invalid_uri("http:crm").contains("san-mateo"));

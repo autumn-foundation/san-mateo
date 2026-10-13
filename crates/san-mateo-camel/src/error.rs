@@ -36,10 +36,6 @@ pub fn to_camel_error(err: &Error, method: &str, url: &str) -> CamelError {
         Error::ForbiddenHost(_) | Error::IntegrationNotAllowed(_) => {
             CamelError::Unauthorized(message)
         }
-        Error::Unauthorized(_)
-        | Error::InvalidConnectSession
-        | Error::InvalidOAuthState
-        | Error::RefreshExhausted => CamelError::Unauthenticated(message),
         Error::Provider {
             code,
             status: Some(status @ 400..=599),
@@ -56,7 +52,13 @@ pub fn to_camel_error(err: &Error, method: &str, url: &str) -> CamelError {
         Error::Provider { .. } | Error::RefreshCooldown if err.is_retryable() => {
             CamelError::AuthProviderUnavailable(message)
         }
-        Error::Provider { .. } => CamelError::Unauthenticated(message),
+        // The provider refused the credentials, or the user must connect
+        // again. The same call fails again.
+        Error::Unauthorized(_)
+        | Error::InvalidConnectSession
+        | Error::InvalidOAuthState
+        | Error::RefreshExhausted
+        | Error::Provider { .. } => CamelError::Unauthenticated(message),
         _ if err.is_retryable() => CamelError::Io(message),
         // Unknown items, bad keys and internal faults: the same call fails
         // again, so harvest must not retry.

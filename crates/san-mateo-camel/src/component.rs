@@ -49,7 +49,8 @@ impl SanMateoComponent {
     }
 
     /// Sets the largest request body for URIs with no `maxBodySize` option.
-    /// The default is [`crate::DEFAULT_MAX_BODY_SIZE`].
+    /// The default is [`crate::DEFAULT_MAX_BODY_SIZE`]. A value of 0 allows
+    /// only an empty body.
     #[must_use]
     pub const fn max_body_size(mut self, bytes: usize) -> Self {
         self.max_body_size = bytes;
@@ -63,8 +64,7 @@ impl SanMateoComponent {
     /// [`CamelError::InvalidUri`] for a URI problem. [`CamelError::Config`]
     /// when no environment is set or the environment does not exist.
     pub fn endpoint_options(&self, uri: &str) -> Result<EndpointOptions, CamelError> {
-        let options =
-            EndpointOptions::parse(uri, self.environment.as_deref(), self.max_body_size)?;
+        let options = EndpointOptions::parse(uri, self.environment.as_deref(), self.max_body_size)?;
         // Fail at route start, not at the first message.
         self.san.environment(&options.environment).map_err(|_| {
             CamelError::Config(format!(

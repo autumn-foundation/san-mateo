@@ -51,7 +51,9 @@ impl Producer {
         request.body = body.into_bytes(options.max_body_size).await?.to_vec();
         request.retries = options.retries;
         request.retry_on.clone_from(&options.retry_on);
-        request.base_url_override.clone_from(&options.base_url_override);
+        request
+            .base_url_override
+            .clone_from(&options.base_url_override);
 
         let url = error_url(&options.integration, &target.path);
         let key = ConnectionKey::new(&options.integration, &target.connection_id);
@@ -93,7 +95,12 @@ pub(crate) fn target(message: &Message, options: &EndpointOptions) -> Result<Tar
     let connection_id = match header(message, HEADER_CONNECTION_ID) {
         Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
         Some(Value::Number(n)) => n.to_string(),
-        Some(_) => return Err(bad_header(HEADER_CONNECTION_ID, "must be a non-empty string")),
+        Some(_) => {
+            return Err(bad_header(
+                HEADER_CONNECTION_ID,
+                "must be a non-empty string",
+            ));
+        }
         None => options.connection_id.clone().ok_or_else(|| {
             CamelError::ValidationError(format!(
                 "no connection id: set the connectionId option or the {HEADER_CONNECTION_ID} header"
@@ -186,6 +193,7 @@ pub(crate) fn forwarded_headers(
 pub(crate) const fn default_content_type(body: &Body) -> Option<&'static str> {
     match body {
         Body::Json(_) => Some("application/json"),
+        Body::Xml(_) => Some("application/xml"),
         _ => None,
     }
 }
@@ -212,10 +220,8 @@ pub(crate) fn reply_body(content_type: Option<&str>, bytes: Vec<u8>) -> Body {
     if json && let Ok(value) = serde_json::from_slice(&bytes) {
         return Body::Json(value);
     }
-    let text = json
-        || media.starts_with("text/")
-        || media == "application/xml"
-        || media.ends_with("+xml");
+    let text =
+        json || media.starts_with("text/") || media == "application/xml" || media.ends_with("+xml");
     if !text {
         return Body::Bytes(bytes.into());
     }
@@ -256,7 +262,10 @@ pub(crate) fn apply_reply(exchange: &mut Exchange, reply: ProxyResponse) {
         }
     }
     for (name, value) in copied {
-        message.set_header(format!("{HEADER_RESPONSE_PREFIX}{name}"), Value::String(value));
+        message.set_header(
+            format!("{HEADER_RESPONSE_PREFIX}{name}"),
+            Value::String(value),
+        );
     }
     message.set_header(HEADER_RESPONSE_CODE, Value::from(reply.status));
     let content_type = reply.header_value("content-type").map(str::to_owned);
@@ -341,8 +350,7 @@ mod tests {
 
     #[test]
     fn bad_target_headers_fail_validation() {
-        let no_defaults =
-            EndpointOptions::parse("san-mateo:crm", Some("dev"), 1024).unwrap();
+        let no_defaults = EndpointOptions::parse("san-mateo:crm", Some("dev"), 1024).unwrap();
         assert!(validation(target(&Message::default(), &no_defaults)).contains("connection"));
         let mut m = Message::default();
         m.set_header(HEADER_CONNECTION_ID, "c1");
@@ -408,6 +416,10 @@ mod tests {
             default_content_type(&Body::Json(json!({}))),
             Some("application/json")
         );
+        assert_eq!(
+            default_content_type(&Body::Xml("<a/>".into())),
+            Some("application/xml")
+        );
         assert_eq!(default_content_type(&Body::Text("t".into())), None);
         assert_eq!(default_content_type(&Body::Bytes(vec![1].into())), None);
         assert_eq!(default_content_type(&Body::Empty), None);
@@ -458,7 +470,10 @@ mod tests {
             reply_body(None, json_body.clone()),
             Body::Bytes(json_body.into())
         );
-        assert_eq!(reply_body(Some("application/json"), Vec::new()), Body::Empty);
+        assert_eq!(
+            reply_body(Some("application/json"), Vec::new()),
+            Body::Empty
+        );
     }
 
     #[test]
@@ -478,7 +493,13 @@ mod tests {
         ] {
             assert!(is_secret_reply_header(name), "{name}");
         }
-        for name in ["content-type", "x-request-id", "link", "retry-after", "etag"] {
+        for name in [
+            "content-type",
+            "x-request-id",
+            "link",
+            "retry-after",
+            "etag",
+        ] {
             assert!(!is_secret_reply_header(name), "{name}");
         }
     }
@@ -534,13 +555,12 @@ mod tests {
             .filter(|v| v.as_str().is_some_and(|s| s.contains("secret")))
             .count();
         assert_eq!(secrets, 0);
-        assert!(
-            m.headers
-                .keys()
-                .filter(|k| k.starts_with(HEADER_RESPONSE_PREFIX))
-                .count()
-                == 3
-        );
+        let copied = m
+            .headers
+            .keys()
+            .filter(|k| k.starts_with(HEADER_RESPONSE_PREFIX))
+            .count();
+        assert_eq!(copied, 3);
     }
 
     #[test]

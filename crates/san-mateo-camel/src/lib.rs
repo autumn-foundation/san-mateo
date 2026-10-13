@@ -62,9 +62,10 @@
 //!
 //! The in body goes upstream. A JSON body becomes JSON bytes with
 //! `content-type: application/json`, unless a `SanMateoProxy-Content-Type`
-//! header sets a different type. A text body becomes UTF-8 bytes. A byte or
-//! stream body goes as it is. An empty body sends no body. A body larger than
-//! `maxBodySize` fails the exchange with [`CamelError::StreamLimitExceeded`].
+//! header sets a different type. An XML body gets `application/xml` in the
+//! same way. A text body becomes UTF-8 bytes. A byte or stream body goes as
+//! it is. An empty body sends no body. A body larger than `maxBodySize`
+//! fails the exchange with [`CamelError::StreamLimitExceeded`].
 //!
 //! The reply replaces the in body. A JSON reply becomes a JSON body. A text or
 //! XML reply becomes a text body. Other replies become a byte body. The
@@ -82,6 +83,10 @@
 //! [`SanMateo`]: san_mateo::SanMateo
 //! [`CamelError::StreamLimitExceeded`]: camel_api::CamelError::StreamLimitExceeded
 //! [`CamelError::HttpOperationFailed`]: camel_api::CamelError::HttpOperationFailed
+
+// The camel traits take and return `CamelError` by value. It is large, but a
+// box would not match the trait signatures.
+#![allow(clippy::result_large_err)]
 
 mod component;
 mod error;
