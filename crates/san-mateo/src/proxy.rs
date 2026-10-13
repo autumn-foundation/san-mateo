@@ -600,8 +600,27 @@ mod tests {
             "https://[::ffff:127.0.0.1]/x",
             "https://localhost/x",
             "ftp://api.example.com/x",
+            // Review findings: more internal forms.
+            "https://localhost./x",
+            "https://api.localhost./x",
+            "https://0.1.2.3/x",
+            "https://198.18.0.1/x",
+            "https://224.0.0.1/x",
+            "https://240.0.0.1/x",
+            "https://[::7f00:1]/x",
+            "https://[64:ff9b::a00:1]/x",
+            "https://[2002:7f00:1::]/x",
+            "https://[ff02::1]/x",
+            "https://[fec0::1]/x",
         ] {
             assert!(check_upstream(bad, None, false, &s).is_err(), "{bad}");
+        }
+        for good in [
+            "https://8.8.8.8/x",
+            "https://[2001:4860:4860::8888]/x",
+            "https://[64:ff9b::808:808]/x",
+        ] {
+            assert!(check_upstream(good, None, false, &s).is_ok(), "{good}");
         }
         let dev = ProxySettings {
             allow_private_hosts: true,

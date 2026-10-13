@@ -15,6 +15,8 @@ use tower::ServiceExt as _;
 const KEY: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=";
 /// An old key with the id of the active key: a duplicate id.
 const OLD_K1: &str = "k1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+/// A valid old key.
+const OLD_K0: &str = "k0:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 
 fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
     let map: HashMap<String, String> = pairs
@@ -178,6 +180,10 @@ fn errors_name_the_variable() {
         (
             [base(), vec![("SAN_MATEO_OLD_ENCRYPTION_KEYS", OLD_K1)]].concat(),
             "SAN_MATEO_OLD_ENCRYPTION_KEYS",
+        ),
+        (
+            [base(), vec![("SAN_MATEO_OLD_ENCRYPTION_KEYS", OLD_K0)]].concat(),
+            "SAN_MATEO_LOOKUP_KEY_ID",
         ),
     ];
     for (vars, name) in cases {

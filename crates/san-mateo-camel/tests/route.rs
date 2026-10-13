@@ -73,7 +73,7 @@ async fn headers_replace_the_options_and_proxy_headers_go_upstream() {
         .reply("POST", &url, json_reply(201, &json!({"id": "i-1"})));
     let camel = start(
         &h,
-        "san-mateo:keyed?connectionId=wrong&method=GET&path=/nope",
+        "san-mateo:keyed?connectionId=wrong&method=GET&path=/nope&allowHeaderOverrides=true",
     )
     .await;
     let mut msg = Message::new(Body::Json(json!({"name": "a"})));
@@ -102,6 +102,27 @@ async fn headers_replace_the_options_and_proxy_headers_go_upstream() {
     assert_eq!(sent[0].body, br#"{"name":"a"}"#);
     assert_eq!(ex.input.body, Body::Json(json!({"id": "i-1"})));
     assert_eq!(ex.input.header(HEADER_RESPONSE_CODE), Some(&json!(201)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn headers_cannot_change_the_tenant_unless_the_route_allows_it() {
+    let h = harness().await;
+    let url = format!("{KEYED_API}/v1/items");
+    h.http
+        .reply("GET", &url, json_reply(200, &json!({"ok": true})));
+    let camel = start(&h, "san-mateo:keyed?connectionId=k1&path=/v1/items").await;
+    // Headers from an outside caller, for example copied by an HTTP consumer.
+    let mut msg = Message::new(Body::Empty);
+    msg.set_header("sanmateoconnectionid", "other-tenant");
+    msg.set_header(HEADER_PATH, "/admin");
+    msg.set_header(HEADER_METHOD, "DELETE");
+    send(&camel, msg).await.unwrap();
+    stop(camel).await;
+    assert!(h.http.requests_to(&format!("{KEYED_API}/admin")).is_empty());
+    let sent = h.http.requests_to(&url);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].method, "GET");
+    assert_eq!(sent[0].header_value("x-api-key"), Some("key-1"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -375,7 +396,7 @@ async fn a_network_failure_is_retryable() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_missing_connection_id_or_path_fails_validation() {
     let h = harness().await;
-    let camel = start(&h, "san-mateo:crm").await;
+    let camel = start(&h, "san-mateo:crm?allowHeaderOverrides=true").await;
     let err = send(&camel, Message::default()).await.unwrap_err();
     assert!(matches!(err, CamelError::ValidationError(_)), "{err:?}");
     assert!(err.to_string().contains(HEADER_CONNECTION_ID), "{err}");

@@ -985,6 +985,14 @@ enabled = false
             assert!(e.contains("old_encryption_keys"), "{e}");
         }
         assert!(check(|c| c.lookup_key_id = Some("k9".into())).contains("lookup_key_id"));
+        // Old keys need an explicit lookup key. Else lookup hashes move to
+        // the new key and live sessions stop matching.
+        assert!(
+            check(|c| {
+                c.old_encryption_keys.insert("k0".into(), "OLD".into());
+            })
+            .contains("lookup_key_id")
+        );
         assert!(check(|c| c.providers_file = Some(String::new())).contains("providers_file"));
         assert!(
             check(|c| c.proxy.allowed_hosts = vec!["https://x".into()]).contains("allowed_hosts")
