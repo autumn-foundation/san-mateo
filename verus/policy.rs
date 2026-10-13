@@ -292,6 +292,7 @@ pub fn sync_frequency_ms(requested_ms: u64) -> (r: u64)
     ensures
         r >= MIN_SYNC_FREQUENCY_MS,
         requested_ms >= MIN_SYNC_FREQUENCY_MS ==> r == requested_ms,
+        requested_ms < MIN_SYNC_FREQUENCY_MS ==> r == MIN_SYNC_FREQUENCY_MS,
 {
     if requested_ms < MIN_SYNC_FREQUENCY_MS {
         MIN_SYNC_FREQUENCY_MS
