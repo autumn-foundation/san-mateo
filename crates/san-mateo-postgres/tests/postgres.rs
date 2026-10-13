@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
-use san_mateo::clock::{ManualClock, SeqEntropy};
+use san_mateo::clock::ManualClock;
 use san_mateo::records::RecordQuery;
 use san_mateo::store::{ConnectionRow, RecordWrite, Store, conformance};
 use san_mateo::transport::HttpResponse;
@@ -19,25 +19,20 @@ use san_mateo::{
 };
 use san_mateo_postgres::PgStore;
 use serde_json::json;
-use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-static STORE: OnceCell<Option<PgStore>> = OnceCell::const_new();
-
 /// Returns a migrated store, or `None` when no database is set.
+///
+/// Each test makes its own pool: a pool connection lives on the runtime of
+/// the test that opened it.
 async fn store() -> Option<PgStore> {
-    STORE
-        .get_or_init(|| async {
-            let Ok(url) = std::env::var("SAN_MATEO_TEST_DATABASE_URL") else {
-                eprintln!("SAN_MATEO_TEST_DATABASE_URL is not set: Postgres tests do nothing");
-                return None;
-            };
-            let s = PgStore::connect(&url, 16).unwrap();
-            s.migrate().await.unwrap();
-            Some(s)
-        })
-        .await
-        .clone()
+    let Ok(url) = std::env::var("SAN_MATEO_TEST_DATABASE_URL") else {
+        eprintln!("SAN_MATEO_TEST_DATABASE_URL is not set: Postgres tests do nothing");
+        return None;
+    };
+    let s = PgStore::connect(&url, 16).unwrap();
+    s.migrate().await.unwrap();
+    Some(s)
 }
 
 #[tokio::test]
@@ -173,7 +168,6 @@ async fn the_service_runs_on_postgres() {
         .key_ring(KeyRing::new("k1", [3; 32]).unwrap())
         .transport(Arc::new(http.clone()))
         .clock(Arc::new(ManualClock::new(Utc.timestamp_opt(1_700_000_000, 0).unwrap())))
-        .entropy(Arc::new(SeqEntropy::default()))
         .build()
         .unwrap();
     san.create_integration(&env, NewIntegration { unique_key: "crm".into(), provider: "crm".into(), client_id: Some("id".into()), client_secret: Some(Secret::new("secret")), ..NewIntegration::default() })
