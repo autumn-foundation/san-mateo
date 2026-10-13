@@ -12,17 +12,21 @@ categories = ["web-programming", "authentication"]
 
 [dependencies]
 san-mateo.workspace = true
-autumn-web = { version = "0.8.0", default-features = false }
+# Keep this requirement equal to `AUTUMN_WEB_REQUIREMENT`. A unit test checks it.
+autumn-web = { version = "0.8", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 toml = "0.9"
+tower.workspace = true
 tracing.workspace = true
+url.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
+reqwest.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
-tower.workspace = true
 
 [lints]
 workspace = true
