@@ -189,9 +189,11 @@ See [`san-mateo-harvest`](crates/san-mateo-harvest).
 
 ### rust-camel
 
+Register `SanMateoComponent::new(san)` with the camel context. Then send
+exchanges to an endpoint such as:
+
 ```text
-from("direct:contacts")
-  .to("san-mateo:hubspot?connectionId=acme&method=GET&path=/crm/v3/objects/contacts")
+san-mateo:hubspot?connectionId=acme&path=/crm/v3/objects/contacts&retries=2
 ```
 
 - The exchange body goes upstream. `SanMateoProxy-<Name>` headers go
