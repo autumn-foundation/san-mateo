@@ -25,6 +25,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 [dev-dependencies]
 tower.workspace = true
 serde_json.workspace = true
+tokio = { workspace = true, features = ["test-util", "io-util"] }
 
 [lints]
 workspace = true
