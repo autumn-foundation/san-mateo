@@ -1,24 +1,26 @@
 # Acceptance criteria: evidence
 
-This file lists each acceptance criterion (AC) of [plan.md](plan.md), its
-status and its evidence. It also records the TDD steps, the review rounds
-and the mutation tests.
+This file lists each acceptance criterion (AC) of [plan.md](plan.md) and
+of [examples-plan.md](examples-plan.md) (EX1 to EX14), its status and its
+evidence. It also records the TDD steps, the review rounds and the mutation
+tests.
 
 Paths: `core/` is `crates/san-mateo`, `pg/` is `crates/san-mateo-postgres`,
 `server/` is `crates/san-mateo-server`, `plugin/` is
 `crates/autumn-plugin-san-mateo`, `harvest/` is `crates/san-mateo-harvest`,
-`camel/` is `crates/san-mateo-camel`. `t/` is a `tests/` folder. `u:` is a
-unit test in `src/`.
+`camel/` is `crates/san-mateo-camel`, `hc/` is `examples/harvest-camel`.
+`t/` is a `tests/` folder. `u:` is a unit test in `src/`. `ex:` is a test in
+an example file.
 
 ## Summary
 
 | Item | Result |
 |---|---|
-| ACs done | 26 of 26 (AC25 with the limits in its row) |
-| Tests | 453 pass, 0 fail: core 246, Postgres 14, server 12, autumn plugin 69, harvest 68, camel 44. 11 ignored: one child-process entry point that the boot tests start, and 10 doc snippets marked `ignore`. |
-| Line coverage | 96.69% of lines in the workspace: core 96.68%, Postgres 96.60%, server 91.58%, autumn plugin 95.44%, harvest 99.01%, camel 98.31% (`cargo llvm-cov`, with Postgres and the Nango catalog). CI fails under 85%. |
+| ACs done | 26 of 26 (AC25 with the limits in its row). Examples: 14 of 14 (EX1 to EX14). |
+| Tests | 466 pass, 0 fail in the main workspace: the 453 tests of the first PR, 8 example tests, 4 guard tests and the README doc test. 12 ignored: one child-process entry point, and 11 doc snippets marked `ignore`. The `hc/` workspace: 5 pass. |
+| Line coverage | 96.69% of library lines (`cargo llvm-cov --workspace --all-targets`, with Postgres and the Nango catalog). `cargo llvm-cov` leaves example files out. CI fails under 85%. |
 | Verus | `verus/policy.rs`: 29 verified, 0 errors |
-| CI | fmt, clippy `-D warnings`, docs `-D warnings`, tests with Postgres 16, coverage ≥ 85%, MSRV 1.89, Verus. Green on the PR head. |
+| CI | fmt, clippy `-D warnings`, docs `-D warnings` (with the examples), tests with Postgres 16, coverage ≥ 85%, MSRV 1.89, Verus, `examples`, `example-harvest-camel`. A weekly and a manual run use the newest compatible dependencies. Green on the PR head. |
 
 ## Acceptance criteria
 
@@ -49,7 +51,26 @@ unit test in `src/`.
 | AC23 Connect page | Done | `core/t/api.rs::the_connect_page_lists_integrations_and_escapes_text`, u: `api::html::escapes_markup`, `core/t/hardening.rs::{the_connect_page_never_puts_secrets_in_a_url, the_error_page_hides_internal_details}`. |
 | AC24 Quality | Done | CI jobs `fmt`, `clippy` (pedantic and nursery, `-D warnings`, also `cargo doc -D warnings`), `test` (Postgres, `cargo llvm-cov --fail-under-lines 85`), `msrv`. Workspace lints: `unsafe_code = "forbid"`, `unwrap_used` and `expect_used` (tests allowed by `clippy.toml`). Proptests: `policy::{decide_invariants, backoff_matches_closed_form, expired_is_monotonic_in_time}`. |
 | AC25 Verus | Done, with limits | CI job `verus`. `policy::verus_bodies_match` compares 9 function bodies and all shared constants. `policy::the_drift_check_sees_changes`. Limits: `backoff_ms` has proof code in its loop, so a proptest links it to the spec. The service code that calls the policy (for example the refresh order) is tested, not proved. |
-| AC26 Docs | Done | `README.md` (Mermaid flow and sequence diagrams), `CLAUDE.md`, `docs/plan.md`, `docs/adr/0001`–`0005`, crate docs. A review pass checked ASD-STE100 wording and accuracy (commit `0d9ef52`). |
+| AC26 Docs | Done | `README.md` (Mermaid flow and sequence diagrams), `CLAUDE.md`, `docs/plan.md`, `docs/examples-plan.md`, `docs/adr/0001`–`0006`, crate docs. A review pass checked ASD-STE100 wording and accuracy (commit `0d9ef52`, and the docs angle of the examples review). |
+
+## Runnable examples: acceptance criteria
+
+| AC | Status | Evidence |
+|---|---|---|
+| EX1 Embedded | Done | `core/examples/embedded.rs` ex: `the_app_connects_refreshes_and_proxies`: the OAuth start gives a 302 that the client does not follow, `state` is set, the PKCE verifier matches the S256 challenge, 2 token calls (`authorization_code`, then `refresh_token`), 1 upstream call with the new token, the exact app reply, a signed `auth` webhook with no secret, a clean stop. ex: `a_missing_refresh_fails_the_check`, `an_upstream_error_gives_a_502`. CI step "example: embedded". Mutations M1, M2. |
+| EX2 autumn plugin | Done | `plugin/examples/autumn_app/main.rs` ex: `the_app_route_proxies_with_the_plugin` (`TestApp`, the `[san_mateo]` section of `autumn.toml` through `include_str!`, an API key connect, `x-api-key` upstream, a health reply with no secret), `an_upstream_error_gives_a_502`. `scripts/smoke-autumn-example.sh` (CI step "example: autumn_app"): the real binary boots in the dev and prod profiles, the routes and the connect page answer, an unknown connection gives 404, SIGTERM gives exit code 0, a missing key stops the boot and the error names the variable, the log shows no secret. Mutations M3, M4, M5. |
+| EX3 harvest workflow | Done | `harvest/examples/harvest_workflow.rs` ex: `a_post_retry_sends_one_idempotency_key`: a real worker on Postgres, 503 then 201, 2 POSTs with one key and the San Mateo auth, 1 GET, the exact result. ex: `a_client_error_fails_the_workflow_with_no_retry` (1 POST), `a_wrong_reply_fails_the_check`. CI steps "example: harvest_workflow" and "example: harvest_workflow, two runs at the same time". Mutations M6, M7. |
+| EX4 harvest-camel | Done | `hc/src/main.rs` ex: `a_create_retry_sends_one_key_and_a_404_is_not_retried` (2 POSTs with one key, 1 GET, the exact result), `a_create_without_a_key_sends_no_post`, `a_client_error_fails_the_workflow_with_no_retry`, `a_wrong_reply_fails_the_check`, `harvest_camel_retries_what_san_mateo_retries` (33 San Mateo errors against the real `harvest_camel::is_retryable`). CI job `example-harvest-camel`. Mutations M8, M9. |
+| EX5 Self-check | Done | Each `check` error starts with `check failed:`. Failure tests: embedded 2, autumn 1, harvest_workflow 2, harvest_camel 3. `main` returns the error, so the exit code is 1. All 12 mutations make a test or a CI step fail (see below). |
+| EX6 No hang | Done | `RUN_TIMEOUT` (60 s or 120 s) in each example. The guard checks it. Harvest workers drain in 5 s. `timeout-minutes`: 30 (`examples`), 45 (`example-harvest-camel`). The smoke script has curl time limits and a 60 s boot limit. Mutation M7 (activities on the wrong queue) ends with the run timeout, not a hang. |
+| EX7 No secret leaks | Done | Keys come from `OsEntropy` or `openssl rand` at run time. embedded: the check scans the summary for the fake tokens, and the summary records that the webhook shows no secret. autumn: the test scans the summary and the health reply. The smoke script scans the app log and hides the keys in its failure output. The guard finds no dev-only proxy flag. |
+| EX8 Database tests | Done | `database_url()` in harvest_workflow and harvest_camel. With `CI=true` and no URL, the tests fail with "CI must set SAN_MATEO_TEST_DATABASE_URL to a Postgres URL" (RED run). The CI `test` job ran the harvest_workflow tests (2 passed in 2.74 s on `c584992`). |
+| EX9 CI | Done | Jobs `examples` and `example-harvest-camel`, green on `c584992`, `499353c`, `09d716f` and `d33131e` (CI runs 14 to 17 of the PR). `schedule` (Monday 04:17 UTC) and `workflow_dispatch` run `cargo update` before the examples, and do not save the cache. |
+| EX10 Gates | Done | CI `fmt`, `clippy` (with `cargo doc --lib --examples -D warnings`), `msrv` (1.89, `--locked`, all targets), `test` (coverage 96.69%, gate 85%). `example-harvest-camel`: fmt, clippy `-D warnings`, MSRV 1.89. |
+| EX11 Guard | Done | `core/t/examples_wired.rs`: 4 tests. Mutations M10, M11. |
+| EX12 Docs | Done | README "Examples" and the ecosystem notes, CLAUDE.md, `docs/examples-plan.md`, ADR 0006, crate docs. The README `rust` and `rust,no_run` blocks compile as doc tests of `server/src/lib.rs` (mutation M12). No doc says that a harvest-camel context cannot hold the component. The research row of the plan records the start state (camel 0.55). The queue limit of the library workflows is in the README, the `san-mateo-harvest` docs and "Known limits". |
+| EX13 TDD | Done | RED `9c9ce53`: each example test failed ("not yet"), the guard failed ("CI does not run …"), the smoke script failed ("the app stopped at boot"). GREEN `c584992`. REFACTOR `499353c`. Review fixes `d33131e`: the key guard test of `hc/` failed first (the route sent the POST and got a retryable 503), then passed. |
+| EX14 harvest-camel pin | Done | harvest-camel PRs 5 and 6 merged: camel 0.57 on `main`. The example pins `29a4783` of `main` (`09d716f`). CI step "One version each of camel and autumn-harvest" is green. |
 
 ## TDD record
 
@@ -71,6 +92,8 @@ commit (tests pass) and, when needed, a REFACTOR commit.
 | Sync scheduler | `ebf3faf` | `3fe6e0d` | |
 | Records | `eba0043` | `30fb7f1` | |
 | Adapters (ecosystem review) | `16f89c9` | `fd4ad8a` | |
+| Runnable examples | `9c9ce53` | `c584992` | `499353c` |
+| Examples review: camel key guard | `d33131e` (test first, see EX13) | `d33131e` | |
 | Client vars, CC scopes | `4552902` | `011aaf2` | |
 | Proxy quota and attempt bound (mutation review) | `d1dbcdb` | `94e7170` | |
 
@@ -87,6 +110,21 @@ code. The fixes use the TDD steps above.
 | Ecosystem | 1 high, 4 medium, 4 low | All fixed: harvest write retries, plugin body limit, loops at startup, harvest pause, harvest-camel note, root CSRF fix, `server_url` warning, token-like headers, empty sync key. |
 | Docs and STE | 9 accuracy defects | Fixed in `0d9ef52` and later doc commits. |
 | Tests and spec (mutation) | 2 bugs, spec gaps, test gaps | Bugs fixed (5xx quota rule, 11th send). Verus gate spec made exact, sequence lemma added, drift test checks constants. Missing tests added (see below). |
+
+The examples had one more round: six reviewers (correctness, security, CI,
+ecosystem, docs, tests) and one adversarial verifier for each angle. The
+verifiers confirmed 53 of 62 findings (some angles found the same issue). No
+finding stayed high. Commit `d33131e` fixes all 53, with two limits that
+need a decision (see "Known limits").
+
+| Angle | Real / found | Main fixes |
+|---|---|---|
+| Correctness | 8 / 9 | Exact failure tests with a `check failed:` prefix, handlers check the upstream status, smoke script time limits and errors, no silent empty id. |
+| Security | 9 / 10 | A camel `POST` route needs the harvest idempotency key, docs say when a retry is safe, no secret in failure output, read-only CI token, local-only Postgres port. |
+| CI | 8 / 9 | Manual runs update the dependencies, a clear stale-lock error, the guard checks the harvest-camel tests and the `examples` folder, the smoke script runs from any directory. |
+| Ecosystem | 9 / 9 | `#[autumn_web::main]` (prod profile in a release build), `AUTUMN_ENV`, the README autumn snippet has a route. |
+| Docs | 12 / 12 | README, plan, ADR and crate docs match the code. |
+| Tests | 7 / 13 | Failure tests assert the POST count and the workflow error. New wrong-reply tests. |
 
 ## Mutation tests
 
@@ -117,6 +155,26 @@ Each new test was run with its mutant applied by hand in a scratch clone. Each o
 The other missed mutants give the same result (for example a bound on both
 sides of an equal value), change only speed, or touch `Debug` and log text.
 
+## Mutation tests of the examples
+
+Each mutation ran in a `git clone` in the scratchpad. 12 of 12 make a test
+or a CI step fail.
+
+| Id | Mutation | Fails |
+|---|---|---|
+| M1 | embedded: the first token lives 1 h, so no refresh | `the_app_connects_refreshes_and_proxies` |
+| M2 | embedded: the handler ignores the upstream status | `an_upstream_error_gives_a_502` |
+| M3 | autumn_app: the route ignores the upstream status | `an_upstream_error_gives_a_502` |
+| M4 | autumn.toml: a renamed config key | `the_app_route_proxies_with_the_plugin` |
+| M5 | autumn.toml: no CSRF exemption | the smoke script (prod boot) |
+| M6 | harvest_workflow: the key is not forwarded | `a_post_retry_sends_one_idempotency_key` |
+| M7 | harvest_workflow: activities on the queue `default` | `a_post_retry_sends_one_idempotency_key` (run timeout) |
+| M8 | harvest_camel: no key guard | `a_create_without_a_key_sends_no_post` |
+| M9 | harvest_camel: the key is not copied upstream | `a_create_retry_sends_one_key_and_a_404_is_not_retried` |
+| M10 | README: no row for `embedded` | `each_example_has_a_test_a_ci_step_and_a_readme_row` |
+| M11 | harvest_workflow target: no `test = true` | `each_example_has_a_test_a_ci_step_and_a_readme_row` |
+| M12 | README: a broken Rust snippet | the README doc test |
+
 ## Known limits
 
 - The SSRF check reads IP literals. It does not resolve DNS names. Use a
@@ -132,3 +190,7 @@ sides of an equal value), change only speed, or touch `Debug` and log text.
   does not get them. A fix changes behaviour, so it needs approval.
 - A crashed process holds the refresh lease of its connections for up to
   120 s. Reads with a valid token do not wait for it.
+- `san-mateo-camel` has no method rule for the harvest-camel retry: a
+  `POST` route must copy `HarvestIdempotencyKey`, as the `harvest_camel`
+  example does. A rule in the component (no retry after a 5xx for a
+  non-idempotent call with no key) changes behaviour, so it needs approval.
