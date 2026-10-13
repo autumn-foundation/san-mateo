@@ -344,6 +344,21 @@ mod tests {
     }
 
     #[test]
+    fn ids_and_hashes_are_golden() {
+        // Stored rows hold these values. If a value changes, a sync writes
+        // each record again as a new record.
+        assert_eq!(
+            record_id(Uuid::from_u128(1), "contacts", "42").to_string(),
+            "e2667ab0-488c-5351-97d6-dc854f70857e"
+        );
+        let k = KeyRing::new("k", [1; 32]).unwrap();
+        assert_eq!(
+            data_hash(&k, &json!({"b": [true, null, "x"], "a": 1})),
+            "8a0977254a6f07b84a66044774b888d6ed2584ab86e636f57f1b02958006f5e6"
+        );
+    }
+
+    #[test]
     fn external_ids() {
         assert_eq!(external_id(&json!({"id": "a1"})).unwrap(), "a1");
         assert_eq!(external_id(&json!({"id": 7})).unwrap(), "7");

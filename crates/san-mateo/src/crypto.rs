@@ -376,6 +376,16 @@ mod tests {
         for bad in ["", "a.b", "has space", "x".repeat(33).as_str()] {
             assert!(KeyRing::new(bad, [1; 32]).is_err(), "{bad}");
         }
+        for good in ["a_b", "a-b", "_", "-", "K1", "x".repeat(32).as_str()] {
+            assert!(KeyRing::new(good, [1; 32]).is_ok(), "{good}");
+        }
+        for bad in ["k.1", "k 1", "k/1", "k\u{e9}", "x".repeat(33).as_str()] {
+            assert!(
+                matches!(ring().with_key(bad, [2; 32]), Err(Error::Invalid(_))),
+                "{bad}"
+            );
+        }
+        assert!(ring().with_key("k_2-b", [2; 32]).is_ok());
         assert!(ring().with_key("k1", [2; 32]).is_err());
         assert!(ring().activate("nope").is_err());
         assert!(ring().lookup_with("nope").is_err());
@@ -412,6 +422,25 @@ mod tests {
             .lookup_with("k9")
             .unwrap();
         assert_ne!(moved.lookup_hash("token"), h);
+    }
+
+    #[test]
+    fn lookup_hashes_are_golden() {
+        // Stored rows hold these hashes. If a value changes, stored tokens
+        // and records are not found again.
+        let r = ring();
+        assert_eq!(
+            r.lookup_hash("token"),
+            "51bfe4b279e903f4135eb2c05b8fdb4b78fc1cd2e8cdfefd09dfdfebfbff8df3"
+        );
+        assert_eq!(
+            r.lookup_hash(""),
+            "1c257d07c3e95f9322718ce4e36d34978ab82641f171fb5151843f180bdbe2cc"
+        );
+        assert_eq!(
+            r.keyed_hash("records", b"token"),
+            "bc75be904e0e8e1e81972abb5c9bcabda35f49d9d6cdf1248e9e650d054ae232"
+        );
     }
 
     #[test]
