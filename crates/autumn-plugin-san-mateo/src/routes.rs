@@ -214,7 +214,12 @@ mod tests {
     }
 
     fn started(cell: &Cell) -> Arc<Runtime> {
-        let rt = Arc::new(Runtime::new(service(), None, Duration::from_secs(1)));
+        let rt = Arc::new(Runtime::new(
+            service(),
+            None,
+            Duration::from_secs(1),
+            1 << 20,
+        ));
         let _ = cell.set(Arc::clone(&rt));
         rt
     }

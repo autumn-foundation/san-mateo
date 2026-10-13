@@ -59,6 +59,11 @@ pub async fn proxy_from_activity(
 /// becomes a failure (see [`crate::failure_for_status`]). A retryable reply
 /// with a `Retry-After` value in seconds gives a retry hint to harvest.
 ///
+/// A non-idempotent call (for example `POST`) that gets a 5xx, 408, 425 or a
+/// network error gives a non-retryable failure: the provider possibly did
+/// the call. It stays retryable with `forward_idempotency_key`, or when the
+/// status is in `request.retry_on`.
+///
 /// # Errors
 ///
 /// The failure of [`crate::failure_for_status`] for a 4xx or 5xx reply. The
@@ -84,16 +89,35 @@ pub async fn proxy_with(
             .retain(|(name, _)| !name.eq_ignore_ascii_case(IDEMPOTENCY_KEY_HEADER));
         request = request.header(IDEMPOTENCY_KEY_HEADER, idempotency_key.as_str());
     }
-    let response = san
-        .proxy(environment, key, request)
-        .await
-        .map_err(|e| failure_for_error(&e))?;
+    // After a 5xx or a network error, the provider possibly did the call. Send
+    // a non-idempotent call again only with an idempotency key or an opt-in.
+    // A 429 means the provider did not do the call.
+    let safe_to_send_again = |status: Option<u16>| {
+        san_mateo::proxy::is_idempotent(&request.method)
+            || forward_idempotency_key
+            || status.is_some_and(|s| s == 429 || request.retry_on.contains(&s))
+    };
+    let response = match san.proxy(environment, key, request.clone()).await {
+        Ok(response) => response,
+        Err(e) => {
+            let mut failure = failure_for_error(&e);
+            if matches!(e, san_mateo::Error::Upstream(_)) && !safe_to_send_again(None) {
+                failure.non_retryable = true;
+            }
+            return Err(failure);
+        }
+    };
     match failure_for_status(response.status, &response.body) {
         None => Ok(response),
-        Some(failure) => Err(match retry_after(&response) {
-            Some(wait) if !failure.non_retryable => failure.with_retry_after(wait),
-            _ => failure,
-        }),
+        Some(mut failure) => {
+            if !safe_to_send_again(Some(response.status)) {
+                failure.non_retryable = true;
+            }
+            Err(match retry_after(&response) {
+                Some(wait) if !failure.non_retryable => failure.with_retry_after(wait),
+                _ => failure,
+            })
+        }
     }
 }
 

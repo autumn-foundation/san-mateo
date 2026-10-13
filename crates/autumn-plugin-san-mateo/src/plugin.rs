@@ -217,6 +217,7 @@ impl SanMateoPlugin {
         let cell: Cell = Arc::new(OnceLock::new());
         let health = Arc::new(SanMateoHealth::new(Arc::clone(&cell)));
         let runtime = self.start_inner(state, role)?;
+        runtime.start_loops();
         let _ = cell.set(Arc::clone(&runtime));
         Ok(SanMateoRuntime {
             runtime,
@@ -244,34 +245,30 @@ impl SanMateoPlugin {
         let prefix = self.prefix.clone();
         let loops_on = self.background.unwrap_or(config.background.enabled) && role.runs_workers();
         let san = self.into_service(&config)?;
-        let background = if loops_on {
-            if tokio::runtime::Handle::try_current().is_ok() {
-                Some(san.start_background(config.background.settings()))
-            } else {
-                tracing::warn!("san mateo: no tokio runtime, so no background loops");
-                None
-            }
-        } else {
-            None
-        };
         state.insert_extension(SanMateoService::new(san.clone()));
         tracing::info!(
             prefix = %prefix,
             environments = san.config().environments.len(),
             providers = san.catalog().len(),
-            background = background.is_some(),
+            background = loops_on,
             "san mateo started"
         );
+        // The loops start in the startup hook, not here: autumn also runs
+        // state initializers in modes that serve nothing, such as a build.
         Ok(Arc::new(Runtime::new(
             san,
-            background,
+            loops_on.then(|| config.background.settings()),
             Duration::from_secs(config.drain_timeout_secs),
+            state.config().security.upload.max_request_size_bytes,
         )))
     }
 
     /// The given service, or a new service from the config and the secrets.
     fn into_service(self, config: &SanMateoConfig) -> Result<SanMateo, PluginError> {
         if let Some(san) = self.service {
+            if let Some(warning) = server_url_warning(&san.config().server_url, &self.prefix) {
+                tracing::warn!("san mateo: {warning}");
+            }
             let unused: Vec<&str> = [
                 ("registry", self.registry.is_some()),
                 ("catalog", self.catalog.is_some()),
@@ -357,22 +354,45 @@ fn mutating_routes(cfg: &AutumnConfig, prefix: &str) -> Vec<(&'static str, Strin
 
 /// A warning when the `server_url` of a given service does not end with the
 /// mount prefix: the OAuth callback URL then gives 404.
-fn server_url_warning(_server_url: &str, _prefix: &str) -> Option<String> {
-    None
+fn server_url_warning(server_url: &str, prefix: &str) -> Option<String> {
+    let path = url::Url::parse(server_url).map_or_else(
+        |_| String::new(),
+        |u| u.path().trim_end_matches('/').to_owned(),
+    );
+    (!path.ends_with(prefix)).then(|| {
+        format!(
+            "the server_url {server_url} of the given service does not end with the mount \
+             prefix {prefix}: OAuth callbacks and connect links will give 404"
+        )
+    })
 }
 
-/// The exempt list to add. At the root, name each top path: `"/"`
-/// exempts the whole app.
+/// The exempt list to add. At the root, name the static prefix of each
+/// route that changes data. `"/"` or a top segment such as `"/auth"` would
+/// also exempt routes of the app.
 fn exemption_fix(prefix: &str) -> String {
     if !prefix.is_empty() {
         return format!("[\"{prefix}\"]");
     }
-    let tops: BTreeSet<String> = routes::mounted_specs(true)
+    let statics: BTreeSet<String> = routes::mounted_specs(true)
         .into_iter()
         .filter(|r| r.method != "GET")
-        .filter_map(|r| r.path.split('/').nth(1).map(|top| format!("\"/{top}\"")))
+        .map(|r| {
+            let end = r.path.find("/{").unwrap_or(r.path.len());
+            r.path[..end].to_owned()
+        })
         .collect();
-    format!("[{}]", tops.into_iter().collect::<Vec<_>>().join(", "))
+    // Leave out a path that a shorter one in the list covers.
+    let all: Vec<String> = statics.iter().cloned().collect();
+    let fix: Vec<String> = statics
+        .into_iter()
+        .filter(|p| {
+            !all.iter()
+                .any(|q| q != p && is_exempt(p, std::slice::from_ref(q)))
+        })
+        .map(|p| format!("\"{p}\""))
+        .collect();
+    format!("[{}]", fix.join(", "))
 }
 
 /// Fails when CSRF or CAPTCHA blocks a San Mateo route. A plugin cannot
@@ -526,7 +546,11 @@ impl Plugin for SanMateoPlugin {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take();
-            let started = check_cell.get().is_some();
+            let runtime = check_cell.get();
+            if let Some(rt) = runtime {
+                rt.start_loops();
+            }
+            let started = runtime.is_some();
             async move {
                 match failed {
                     Some(e) => Err(AutumnError::internal_server_error(e)),
@@ -711,12 +735,13 @@ mod tests {
         shutdown_hook(&Arc::new(OnceLock::new())).await;
         let cell: Cell = Arc::new(OnceLock::new());
         let san = service();
-        let bg = san.start_background(san_mateo::BackgroundSettings::default());
         let rt = Arc::new(Runtime::new(
             san,
-            Some(bg),
+            Some(san_mateo::BackgroundSettings::default()),
             std::time::Duration::from_secs(1),
+            1 << 20,
         ));
+        rt.start_loops();
         let _ = cell.set(Arc::clone(&rt));
         shutdown_hook(&cell).await;
         assert!(rt.is_closed());
@@ -736,8 +761,8 @@ mod tests {
         assert!(e.contains("catalog") && e.contains("registry"), "{e}");
     }
 
-    #[test]
-    fn loops_start_at_startup_not_in_the_state_initializer() {
+    #[tokio::test]
+    async fn loops_start_at_startup_not_in_the_state_initializer() {
         // autumn runs state initializers also in modes that serve nothing,
         // for example `autumn build`. Loops must not run there.
         let state = AppState::for_test();
@@ -750,6 +775,7 @@ mod tests {
         assert!(rt.background_running());
         rt.start_loops();
         assert!(rt.background_running(), "a second start does nothing");
+        rt.shutdown().await;
     }
 
     #[test]

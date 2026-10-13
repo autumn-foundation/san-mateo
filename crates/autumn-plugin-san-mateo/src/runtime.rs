@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use autumn_web::reexports::axum::Router;
-use san_mateo::{Background, SanMateo};
+use san_mateo::{Background, BackgroundSettings, SanMateo};
 
 /// The runtime, set once at startup. Routes reply 503 before that.
 pub(crate) type Cell = Arc<OnceLock<Arc<Runtime>>>;
@@ -18,6 +18,9 @@ pub(crate) struct Runtime {
     pub(crate) api: Router,
     /// The background loops, if they run.
     background: Mutex<Option<Background>>,
+    /// The loop settings, when the loops must run. [`Self::start_loops`]
+    /// starts them.
+    loop_settings: Option<BackgroundSettings>,
     /// `true` after shutdown starts. Routes then reply 503.
     closed: AtomicBool,
     /// The longest wait for webhooks and syncs at shutdown.
@@ -35,20 +38,45 @@ impl std::fmt::Debug for Runtime {
 }
 
 impl Runtime {
-    /// Makes a runtime. The core router comes from `san`.
-    pub(crate) fn new(san: SanMateo, background: Option<Background>, drain: Duration) -> Self {
-        let api = san_mateo::api::router(san.clone());
+    /// Makes a runtime with no running loops. The core router comes from
+    /// `san` and gets the app body limit.
+    pub(crate) fn new(
+        san: SanMateo,
+        loop_settings: Option<BackgroundSettings>,
+        drain: Duration,
+        body_limit: usize,
+    ) -> Self {
+        let api = san_mateo::api::router(san.clone()).layer(
+            autumn_web::reexports::axum::extract::DefaultBodyLimit::max(body_limit),
+        );
         Self {
             san,
             api,
-            background: Mutex::new(background),
+            background: Mutex::new(None),
+            loop_settings,
             closed: AtomicBool::new(false),
             drain,
         }
     }
 
-    /// Starts the background loops, if the config asks for them.
-    pub(crate) fn start_loops(&self) {}
+    /// Starts the background loops, if the config asks for them. A second
+    /// call does nothing.
+    pub(crate) fn start_loops(&self) {
+        let Some(settings) = &self.loop_settings else {
+            return;
+        };
+        if self.is_closed() {
+            return;
+        }
+        if tokio::runtime::Handle::try_current().is_err() {
+            tracing::warn!("san mateo: no tokio runtime, so no background loops");
+            return;
+        }
+        let mut loops = self.loops();
+        if loops.is_none() {
+            *loops = Some(self.san.start_background(*settings));
+        }
+    }
 
     /// `true` after shutdown starts.
     pub(crate) fn is_closed(&self) -> bool {
@@ -91,8 +119,9 @@ mod tests {
     #[tokio::test]
     async fn shutdown_closes_and_stops_background() {
         let san = service();
-        let bg = san.start_background(san_mateo::BackgroundSettings::default());
-        let rt = Runtime::new(san, Some(bg), Duration::from_secs(1));
+        let settings = Some(san_mateo::BackgroundSettings::default());
+        let rt = Runtime::new(san, settings, Duration::from_secs(1), 1 << 20);
+        rt.start_loops();
         assert!(!rt.is_closed());
         assert!(rt.background_running());
         assert!(format!("{rt:?}").contains("background: true"), "{rt:?}");
@@ -101,7 +130,7 @@ mod tests {
         assert!(!rt.background_running());
         // A second shutdown does nothing.
         rt.shutdown().await;
-        let quiet = Runtime::new(service(), None, Duration::from_secs(1));
+        let quiet = Runtime::new(service(), None, Duration::from_secs(1), 1 << 20);
         assert!(!quiet.background_running());
         quiet.shutdown().await;
         assert!(quiet.is_closed());

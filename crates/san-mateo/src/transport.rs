@@ -65,6 +65,26 @@ pub fn is_secret_header(name: &str) -> bool {
     SECRET_HEADERS.iter().any(|h| h.eq_ignore_ascii_case(name))
 }
 
+/// Parts of header names that hold secrets.
+const SECRET_NAME_PARTS: &[&str] = &[
+    "authorization",
+    "cookie",
+    "token",
+    "secret",
+    "password",
+    "api-key",
+    "apikey",
+];
+
+/// Returns `true` for a header that holds a secret or looks like it, for
+/// example `X-Access-Token`. Use it for data that goes to a log, a history
+/// or a message.
+#[must_use]
+pub fn is_secret_like_header(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    is_secret_header(&name) || SECRET_NAME_PARTS.iter().any(|p| name.contains(p))
+}
+
 /// Returns the URL with no query, for logs. A query can hold a key.
 #[must_use]
 pub fn redact_query(url: &str) -> String {

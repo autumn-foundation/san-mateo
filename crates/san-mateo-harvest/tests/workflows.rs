@@ -252,15 +252,17 @@ async fn a_timed_out_run_does_not_stop_the_loop() {
 }
 
 #[tokio::test]
-async fn an_input_with_no_sync_key_gets_one() {
+async fn an_input_with_no_sync_key_fails_with_no_run() {
+    // Harvest reads the concurrency key before the body runs. With no key,
+    // all such loops share one limit. Use `SyncLoopInput::new`.
     let mut input = serde_json::to_value(loop_input(60, 1)).unwrap();
     input.as_object_mut().unwrap().remove("sync_key");
     let outcome = WorkflowTestEnv::new()
         .mock_activity(RUN_SYNC, |_| Ok(ok_run(0)))
         .run(san_mateo_sync_loop_info().handler, input)
         .await;
-    let next = continued(&outcome).unwrap();
-    assert_eq!(next.sync_key, loop_input(60, 1).sync_key);
+    assert!(outcome.result.is_err());
+    assert_eq!(scheduled(&outcome, RUN_SYNC), 0);
 }
 
 #[tokio::test]

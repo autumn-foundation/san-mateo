@@ -58,7 +58,8 @@ pub struct SyncLoopInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iterations_before_continue: Option<u32>,
     /// The key of the harvest concurrency limit: one for each (environment,
-    /// connection, sync). [`SyncLoopInput::new`] sets it.
+    /// connection, sync). [`SyncLoopInput::new`] sets it. An input with an
+    /// empty key fails.
     #[serde(default)]
     pub sync_key: String,
     /// Successful runs in earlier executions of this loop.
@@ -148,6 +149,8 @@ impl SyncLoopInput {
             ("provider_config_key", &self.provider_config_key),
             ("connection_id", &self.connection_id),
             ("sync_name", &self.sync_name),
+            // The concurrency key. Empty, it joins all such loops in one limit.
+            ("sync_key", &self.sync_key),
         ] {
             if value.is_empty() {
                 return Err(WorkflowFailure::new(
@@ -237,9 +240,6 @@ pub async fn san_mateo_sync_loop(
 ) -> Result<SyncLoopOutput, WorkflowFailure> {
     input.check()?;
     let mut state = input;
-    if state.sync_key.is_empty() {
-        state.sync_key = state.sync_key_of();
-    }
     let every = state.frequency_secs.max(MIN_FREQUENCY_SECS);
     let iterations = state
         .iterations_before_continue

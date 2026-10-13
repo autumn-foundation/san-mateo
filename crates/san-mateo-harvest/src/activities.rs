@@ -15,7 +15,8 @@ use autumn_harvest::failure::ActivityFailure;
 use autumn_harvest::policy::RetryPolicy;
 use autumn_harvest::prelude::activity;
 use san_mateo::store::SyncCounts;
-use san_mateo::transport::is_secret_header;
+use san_mateo::store::SyncStatus;
+use san_mateo::transport::is_secret_like_header;
 use san_mateo::{
     ConnectionKey, GetOptions, ProxyRequest, ProxyResponse, RefreshReport, SanMateo, SyncRunReport,
 };
@@ -135,7 +136,7 @@ impl ProxyInput {
     pub fn to_request(&self) -> Result<ProxyRequest, ActivityFailure> {
         let mut request = ProxyRequest::new(&self.method, &self.endpoint);
         for (name, value) in &self.headers {
-            if is_secret_header(name) {
+            if is_secret_like_header(name) {
                 return Err(invalid_input(format!(
                     "the header {name} is not allowed in an activity input; \
                      San Mateo adds the credentials"
@@ -149,6 +150,7 @@ impl ProxyInput {
         for (name, value) in &self.query {
             request = request.query(name, value);
         }
+        request.retry_on.clone_from(&self.retry_on);
         Ok(request)
     }
 
@@ -196,7 +198,7 @@ impl ProxyOutput {
         let headers = response
             .headers
             .iter()
-            .filter(|(name, _)| !is_secret_header(name))
+            .filter(|(name, _)| !is_secret_like_header(name))
             .map(|(name, value)| (name.to_ascii_lowercase(), value.clone()))
             .collect();
         Self {
@@ -326,6 +328,30 @@ impl RunSyncInput {
     /// A retryable `san_mateo.sync_failed` failure when the run fails. The
     /// failure of [`crate::failure_for_error`] when the run cannot start.
     pub async fn run(&self, san: &SanMateo) -> Result<SyncRunOutput, ActivityFailure> {
+        // A pause stops the harvest loop too, not only the in-process
+        // scheduler.
+        let paused = san
+            .sync_status(
+                &self.environment,
+                &self.provider_config_key,
+                Some(&self.connection_id),
+                std::slice::from_ref(&self.sync_name),
+            )
+            .await
+            .map_err(|e| failure_for_error(&e))?
+            .iter()
+            .any(|s| s.status == SyncStatus::Paused);
+        if paused {
+            return Ok(SyncRunOutput {
+                sync_name: self.sync_name.clone(),
+                provider_config_key: self.provider_config_key.clone(),
+                connection_id: self.connection_id.clone(),
+                success: true,
+                counts: SyncCounts::default(),
+                error: None,
+                skipped: true,
+            });
+        }
         let report = san
             .run_sync(&self.environment, &self.key(), &self.sync_name)
             .await
@@ -428,7 +454,9 @@ impl RunActionInput {
     ///
     /// # Errors
     ///
-    /// The failure of [`crate::failure_for_error`] for a San Mateo error.
+    /// The failure of [`crate::failure_for_error`] for a San Mateo error. It
+    /// is always non-retryable: an action can write, so it runs at most once.
+    /// Retry in the workflow when the action is idempotent.
     pub async fn run(&self, san: &SanMateo) -> Result<Value, ActivityFailure> {
         san.run_action(
             &self.environment,
@@ -437,7 +465,11 @@ impl RunActionInput {
             self.input.clone(),
         )
         .await
-        .map_err(|e| failure_for_error(&e))
+        .map_err(|e| {
+            let mut failure = failure_for_error(&e);
+            failure.non_retryable = true;
+            failure
+        })
     }
 }
 

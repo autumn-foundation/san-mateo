@@ -108,8 +108,9 @@ mod tests {
         let cell: Cell = Arc::new(OnceLock::new());
         let h = SanMateoHealth::new(Arc::clone(&cell));
         let san = service();
-        let bg = san.start_background(san_mateo::BackgroundSettings::default());
-        let rt = Arc::new(Runtime::new(san, Some(bg), Duration::from_secs(1)));
+        let settings = Some(san_mateo::BackgroundSettings::default());
+        let rt = Arc::new(Runtime::new(san, settings, Duration::from_secs(1), 1 << 20));
+        rt.start_loops();
         let _ = cell.set(Arc::clone(&rt));
         let out = h.check().await;
         assert_eq!(out.status, HealthStatus::Up);

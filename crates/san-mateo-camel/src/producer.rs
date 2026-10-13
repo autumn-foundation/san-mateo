@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use camel_api::{Body, CamelError, Exchange, Message, Value};
-use san_mateo::transport::is_secret_header;
+use san_mateo::transport::is_secret_like_header;
 use san_mateo::{ConnectionKey, ProxyRequest, ProxyResponse, SanMateo};
 
 use crate::error::{status_error, to_camel_error};
@@ -238,13 +238,9 @@ pub(crate) fn reply_body(content_type: Option<&str>, bytes: Vec<u8>) -> Body {
     }
 }
 
-/// Parts of reply header names that hold secrets.
-const SECRET_NAME_PARTS: &[&str] = &["cookie", "token", "secret", "password", "api-key", "apikey"];
-
 /// Returns `true` for a reply header that must not reach the exchange.
 pub(crate) fn is_secret_reply_header(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    is_secret_header(&name) || SECRET_NAME_PARTS.iter().any(|p| name.contains(p))
+    is_secret_like_header(name)
 }
 
 /// Puts a reply into the in message and clears the out message.
