@@ -7,10 +7,14 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use san_mateo::Secret;
 use san_mateo_server::{ServerConfig, app, build, serve};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tower::ServiceExt as _;
 
 const KEY: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=";
+/// An old key with the id of the active key: a duplicate id.
+const OLD_K1: &str = "k1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 
 fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
     let map: HashMap<String, String> = pairs
@@ -33,7 +37,8 @@ fn defaults() {
     assert_eq!(c.service.server_url, "http://localhost:3003");
     assert_eq!(c.bind.to_string(), "0.0.0.0:3003");
     assert_eq!(c.database_url, None);
-    assert_eq!(c.encryption_key, ("k1".to_owned(), KEY.to_owned()));
+    assert_eq!(c.encryption_key.0, "k1");
+    assert_eq!(c.encryption_key.1.expose(), KEY);
     assert_eq!(c.service.environments.len(), 1);
     assert_eq!(c.service.environments[0].id, "dev");
     assert!(c.background);
@@ -83,7 +88,16 @@ fn full_settings() {
     let c = ServerConfig::from_env(env(&e)).unwrap();
     assert_eq!(c.service.server_url, "https://sm.example.com");
     assert_eq!(c.bind.to_string(), "127.0.0.1:8080");
-    assert_eq!(c.database_url.as_deref(), Some("postgres://u:p@db/sm"));
+    assert_eq!(
+        c.database_url.as_ref().map(Secret::expose),
+        Some("postgres://u:p@db/sm")
+    );
+    let debug = format!("{c:?}");
+    assert!(
+        !debug.contains("u:p@db"),
+        "Debug hides the database password"
+    );
+    assert!(!debug.contains(KEY), "Debug hides the key");
     assert_eq!(c.encryption_key.0, "k2");
     assert_eq!(c.old_keys.len(), 1);
     assert_eq!(c.lookup_key_id.as_deref(), Some("k1"));
@@ -156,6 +170,14 @@ fn errors_name_the_variable() {
         (
             [base(), vec![("SAN_MATEO_ENVIRONMENTS", " , ")]].concat(),
             "SAN_MATEO_ENVIRONMENTS",
+        ),
+        (
+            [base(), vec![("SAN_MATEO_LOOKUP_KEY_ID", "k9")]].concat(),
+            "SAN_MATEO_LOOKUP_KEY_ID",
+        ),
+        (
+            [base(), vec![("SAN_MATEO_OLD_ENCRYPTION_KEYS", OLD_K1)]].concat(),
+            "SAN_MATEO_OLD_ENCRYPTION_KEYS",
         ),
     ];
     for (vars, name) in cases {
@@ -245,7 +267,6 @@ async fn serve_stops_cleanly_on_shutdown() {
         let _ = rx.await;
     }));
     let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     stream
         .write_all(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
         .await
@@ -273,4 +294,42 @@ async fn run_starts_and_stops() {
     )
     .await;
     done.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn build_uses_old_keys_and_the_lookup_key() {
+    let mut e = base();
+    e.extend([
+        ("SAN_MATEO_ENCRYPTION_KEY_ID", "k2"),
+        (
+            "SAN_MATEO_OLD_ENCRYPTION_KEYS",
+            "k1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        ),
+        ("SAN_MATEO_LOOKUP_KEY_ID", "k1"),
+    ]);
+    let c = ServerConfig::from_env(env(&e)).unwrap();
+    build(&c).await.unwrap();
+}
+
+#[tokio::test]
+async fn main_exit_codes() {
+    use san_mateo_server::main_exit_code;
+    assert_eq!(main_exit_code(env(&[]), async {}).await, 2, "bad config");
+
+    let mut e = base();
+    e.push(("SAN_MATEO_BIND", "127.0.0.1:0"));
+    e.push(("SAN_MATEO_BACKGROUND", "false"));
+    assert_eq!(main_exit_code(env(&e), async {}).await, 0, "clean stop");
+
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = taken.local_addr().unwrap().to_string();
+    let mut e = base();
+    e.push(("SAN_MATEO_BIND", &addr));
+    assert_eq!(main_exit_code(env(&e), async {}).await, 1, "bind fails");
+}
+
+#[test]
+fn init_tracing_can_run_twice() {
+    san_mateo_server::init_tracing();
+    san_mateo_server::init_tracing();
 }

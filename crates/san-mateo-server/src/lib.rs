@@ -38,6 +38,9 @@ use san_mateo_postgres::PgStore;
 /// The largest request body: 25 MiB.
 pub const MAX_BODY_BYTES: usize = 25 * 1024 * 1024;
 
+/// A key id and its base64 value.
+pub type NamedKey = (String, Secret);
+
 /// Server settings from the environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
@@ -45,12 +48,12 @@ pub struct ServerConfig {
     pub service: san_mateo::Config,
     /// The listen address.
     pub bind: SocketAddr,
-    /// The Postgres URL, if any.
-    pub database_url: Option<String>,
+    /// The Postgres URL, if any. It can contain a password.
+    pub database_url: Option<Secret>,
     /// The active key: (id, base64).
-    pub encryption_key: (String, String),
+    pub encryption_key: NamedKey,
     /// Old keys: (id, base64).
-    pub old_keys: Vec<(String, String)>,
+    pub old_keys: Vec<NamedKey>,
     /// The key id for lookup hashes.
     pub lookup_key_id: Option<String>,
     /// An extra catalog file.
@@ -61,132 +64,163 @@ pub struct ServerConfig {
     pub tick_secs: u64,
 }
 
+/// Reads and checks variables. Errors name the variable, never the value.
+struct Vars<F>(F);
+
+impl<F: Fn(&str) -> Option<String>> Vars<F> {
+    fn get(&self, name: &str) -> Option<String> {
+        (self.0)(name)
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+    }
+
+    fn required(&self, name: &str) -> Result<String> {
+        self.get(name).ok_or_else(|| bad(name, "is required"))
+    }
+
+    fn flag(&self, name: &str, default: bool) -> Result<bool> {
+        match self.get(name).as_deref() {
+            None => Ok(default),
+            Some("1" | "true" | "yes" | "on") => Ok(true),
+            Some("0" | "false" | "no" | "off") => Ok(false),
+            Some(_) => Err(bad(name, "must be true or false")),
+        }
+    }
+
+    fn list(&self, name: &str) -> Option<Vec<String>> {
+        self.get(name).map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+    }
+
+    fn keys(&self) -> Result<(NamedKey, Vec<NamedKey>)> {
+        let name = "SAN_MATEO_ENCRYPTION_KEY";
+        let key = self.required(name)?;
+        let id = self
+            .get("SAN_MATEO_ENCRYPTION_KEY_ID")
+            .unwrap_or_else(|| "k1".to_owned());
+        KeyRing::from_base64(&id, &key)
+            .map_err(|_| bad(name, "must be a base64 32-byte key with a valid id"))?;
+        let name = "SAN_MATEO_OLD_ENCRYPTION_KEYS";
+        let mut old = Vec::new();
+        for item in self.list(name).unwrap_or_default() {
+            let (old_id, k) = item
+                .split_once(':')
+                .ok_or_else(|| bad(name, "each item must be id:base64"))?;
+            KeyRing::from_base64(old_id, k)
+                .map_err(|_| bad(name, "each key must be a base64 32-byte key"))?;
+            old.push((old_id.to_owned(), Secret::new(k)));
+        }
+        Ok(((id, Secret::new(key)), old))
+    }
+
+    fn environments(&self) -> Result<Vec<EnvironmentConfig>> {
+        let ids = self
+            .list("SAN_MATEO_ENVIRONMENTS")
+            .unwrap_or_else(|| vec!["dev".to_owned()]);
+        if ids.is_empty() {
+            return Err(bad("SAN_MATEO_ENVIRONMENTS", "has no environment id"));
+        }
+        ids.into_iter()
+            .map(|id| {
+                let p = format!("SAN_MATEO_{}_", id.to_ascii_uppercase().replace('-', "_"));
+                let mut env = EnvironmentConfig::new(id, self.required(&format!("{p}SECRET_KEY"))?);
+                env.callback_url = self.get(&format!("{p}CALLBACK_URL"));
+                env.webhooks = WebhookSettings {
+                    primary_url: self.get(&format!("{p}WEBHOOK_URL")),
+                    secondary_url: self.get(&format!("{p}WEBHOOK_URL_SECONDARY")),
+                    signing_secret: self.get(&format!("{p}WEBHOOK_SECRET")).map(Secret::new),
+                    ..WebhookSettings::default()
+                };
+                Ok(env)
+            })
+            .collect()
+    }
+}
+
+fn bad(name: &str, why: &str) -> Error {
+    Error::Invalid(format!("{name}: {why}"))
+}
+
 impl ServerConfig {
     /// Reads the settings with `get`, for example `|k| std::env::var(k).ok()`.
     ///
     /// # Errors
     ///
     /// [`san_mateo::Error::Invalid`] that names the variable that is missing
-    /// or wrong.
+    /// or wrong. The error never contains the value.
     pub fn from_env(get: impl Fn(&str) -> Option<String>) -> Result<Self> {
-        let var = |name: &str| {
-            get(name)
-                .map(|v| v.trim().to_owned())
-                .filter(|v| !v.is_empty())
-        };
-        let bad = |name: &str, why: &str| Error::Invalid(format!("{name}: {why}"));
-        let flag = |name: &str, default: bool| -> Result<bool> {
-            match var(name).as_deref() {
-                None => Ok(default),
-                Some("1" | "true" | "yes" | "on") => Ok(true),
-                Some("0" | "false" | "no" | "off") => Ok(false),
-                Some(_) => Err(bad(name, "must be true or false")),
-            }
-        };
-        let list = |name: &str| -> Vec<String> {
-            var(name)
-                .map(|v| {
-                    v.split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-
-        let key = var("SAN_MATEO_ENCRYPTION_KEY")
-            .ok_or_else(|| bad("SAN_MATEO_ENCRYPTION_KEY", "is required"))?;
-        let key_id = var("SAN_MATEO_ENCRYPTION_KEY_ID").unwrap_or_else(|| "k1".to_owned());
-        KeyRing::from_base64(&key_id, &key).map_err(|_| {
-            bad(
-                "SAN_MATEO_ENCRYPTION_KEY",
-                "must be a base64 32-byte key with a valid id",
-            )
-        })?;
-        let mut old_keys = Vec::new();
-        for item in list("SAN_MATEO_OLD_ENCRYPTION_KEYS") {
-            let (id, k) = item.split_once(':').ok_or_else(|| {
-                bad(
-                    "SAN_MATEO_OLD_ENCRYPTION_KEYS",
-                    "each item must be id:base64",
-                )
-            })?;
-            KeyRing::from_base64(id, k).map_err(|_| {
-                bad(
-                    "SAN_MATEO_OLD_ENCRYPTION_KEYS",
-                    "each key must be a base64 32-byte key",
-                )
-            })?;
-            old_keys.push((id.to_owned(), k.to_owned()));
-        }
-
-        let env_ids = match var("SAN_MATEO_ENVIRONMENTS") {
-            Some(_) => list("SAN_MATEO_ENVIRONMENTS"),
-            None => vec!["dev".to_owned()],
-        };
-        if env_ids.is_empty() {
-            return Err(bad("SAN_MATEO_ENVIRONMENTS", "has no environment id"));
-        }
-        let mut environments = Vec::new();
-        for id in env_ids {
-            let p = format!("SAN_MATEO_{}_", id.to_ascii_uppercase().replace('-', "_"));
-            let secret_name = format!("{p}SECRET_KEY");
-            let secret = var(&secret_name).ok_or_else(|| bad(&secret_name, "is required"))?;
-            let mut env = EnvironmentConfig::new(id, secret);
-            env.callback_url = var(&format!("{p}CALLBACK_URL"));
-            env.webhooks = WebhookSettings {
-                primary_url: var(&format!("{p}WEBHOOK_URL")),
-                secondary_url: var(&format!("{p}WEBHOOK_URL_SECONDARY")),
-                signing_secret: var(&format!("{p}WEBHOOK_SECRET")).map(Secret::new),
-                ..WebhookSettings::default()
-            };
-            environments.push(env);
-        }
-
-        let bind_text = var("SAN_MATEO_BIND").unwrap_or_else(|| "0.0.0.0:3003".to_owned());
-        let bind = bind_text
+        let v = Vars(get);
+        let (encryption_key, old_keys) = v.keys()?;
+        let bind = v
+            .get("SAN_MATEO_BIND")
+            .unwrap_or_else(|| "0.0.0.0:3003".to_owned())
             .parse()
             .map_err(|_| bad("SAN_MATEO_BIND", "must be an address such as 0.0.0.0:3003"))?;
-        let tick_secs = match var("SAN_MATEO_TICK_SECS") {
-            Some(t) => t
-                .parse::<u64>()
+        let tick_secs = v.get("SAN_MATEO_TICK_SECS").map_or(Ok(30), |t| {
+            t.parse::<u64>()
                 .ok()
                 .filter(|n| *n > 0)
-                .ok_or_else(|| bad("SAN_MATEO_TICK_SECS", "must be a positive whole number"))?,
-            None => 30,
-        };
+                .ok_or_else(|| bad("SAN_MATEO_TICK_SECS", "must be a positive whole number"))
+        })?;
         let service = san_mateo::Config {
-            server_url: var("SAN_MATEO_SERVER_URL")
+            server_url: v
+                .get("SAN_MATEO_SERVER_URL")
                 .unwrap_or_else(|| "http://localhost:3003".to_owned()),
-            connect_url: var("SAN_MATEO_CONNECT_URL"),
-            environments,
+            connect_url: v.get("SAN_MATEO_CONNECT_URL"),
+            environments: v.environments()?,
             proxy: ProxySettings {
-                allowed_hosts: list("SAN_MATEO_ALLOWED_HOSTS"),
-                allow_private_hosts: flag("SAN_MATEO_ALLOW_PRIVATE_HOSTS", false)?,
-                allow_plain_http: flag("SAN_MATEO_ALLOW_PLAIN_HTTP", false)?,
+                allowed_hosts: v.list("SAN_MATEO_ALLOWED_HOSTS").unwrap_or_default(),
+                allow_private_hosts: v.flag("SAN_MATEO_ALLOW_PRIVATE_HOSTS", false)?,
+                allow_plain_http: v.flag("SAN_MATEO_ALLOW_PLAIN_HTTP", false)?,
                 ..ProxySettings::default()
             },
             ..san_mateo::Config::default()
         };
-        Ok(Self {
+        let config = Self {
             service,
             bind,
-            database_url: var("SAN_MATEO_DATABASE_URL"),
-            encryption_key: (key_id, key),
+            database_url: v.get("SAN_MATEO_DATABASE_URL").map(Secret::new),
+            encryption_key,
             old_keys,
-            lookup_key_id: var("SAN_MATEO_LOOKUP_KEY_ID"),
-            providers_file: var("SAN_MATEO_PROVIDERS_FILE"),
-            background: flag("SAN_MATEO_BACKGROUND", true)?,
+            lookup_key_id: v.get("SAN_MATEO_LOOKUP_KEY_ID"),
+            providers_file: v.get("SAN_MATEO_PROVIDERS_FILE"),
+            background: v.flag("SAN_MATEO_BACKGROUND", true)?,
             tick_secs,
-        })
+        };
+        config.check_keys()?;
+        Ok(config)
+    }
+
+    /// Checks that key ids are unique and that the lookup key id names a key.
+    fn check_keys(&self) -> Result<()> {
+        let mut ids: Vec<&str> = self.old_keys.iter().map(|(id, _)| id.as_str()).collect();
+        ids.push(&self.encryption_key.0);
+        if let Some(id) = &self.lookup_key_id
+            && !ids.contains(&id.as_str())
+        {
+            return Err(bad("SAN_MATEO_LOOKUP_KEY_ID", "must name a configured key"));
+        }
+        ids.sort_unstable();
+        if ids.windows(2).any(|w| w[0] == w[1]) {
+            return Err(bad(
+                "SAN_MATEO_OLD_ENCRYPTION_KEYS",
+                "key ids must be unique",
+            ));
+        }
+        Ok(())
     }
 
     /// Builds the key ring.
     fn key_ring(&self) -> Result<KeyRing> {
-        let mut keys = KeyRing::from_base64(&self.encryption_key.0, &self.encryption_key.1)?;
+        let (id, key) = &self.encryption_key;
+        let mut keys = KeyRing::from_base64(id, key.expose())?;
         for (id, k) in &self.old_keys {
-            keys = keys.with_base64_key(id, k)?;
+            keys = keys.with_base64_key(id, k.expose())?;
         }
         match &self.lookup_key_id {
             Some(id) => keys.lookup_with(id),
@@ -206,17 +240,14 @@ pub async fn build(config: &ServerConfig) -> Result<SanMateo> {
     if let Some(path) = &config.providers_file {
         catalog = catalog.merge(Catalog::from_yaml_file(path)?);
     }
-    let store: Arc<dyn Store> = match &config.database_url {
-        Some(url) => {
-            let pg = PgStore::connect(url, 16)?;
-            let applied = pg.migrate().await?;
-            tracing::info!(count = applied.len(), "database migrations applied");
-            Arc::new(pg)
-        }
-        None => {
-            tracing::warn!("no SAN_MATEO_DATABASE_URL: data stays in memory and is lost at exit");
-            Arc::new(MemoryStore::new())
-        }
+    let store: Arc<dyn Store> = if let Some(url) = &config.database_url {
+        let pg = PgStore::connect(url.expose(), 16)?;
+        let applied = pg.migrate().await?;
+        tracing::info!(count = applied.len(), "database migrations applied");
+        Arc::new(pg)
+    } else {
+        tracing::warn!("no SAN_MATEO_DATABASE_URL: data stays in memory and is lost at exit");
+        Arc::new(MemoryStore::new())
     };
     SanMateo::builder()
         .config(config.service.clone())
@@ -275,6 +306,29 @@ pub async fn run(
     san.flush().await;
     tracing::info!("san-mateo stopped");
     served
+}
+
+/// Runs the binary: reads the settings with `get`, then runs until
+/// `shutdown` ends. Returns the exit code: 0 after a clean stop, 1 when the
+/// server fails, 2 when the settings are wrong.
+pub async fn main_exit_code(
+    get: impl Fn(&str) -> Option<String>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> u8 {
+    let config = match ServerConfig::from_env(get) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("san-mateo: {e}");
+            return 2;
+        }
+    };
+    match run(config, shutdown).await {
+        Ok(()) => 0,
+        Err(e) => {
+            tracing::error!(code = e.code(), error = %e, "the server stopped with an error");
+            1
+        }
+    }
 }
 
 /// Ends on Ctrl-C or, on Unix, on `SIGTERM`.
