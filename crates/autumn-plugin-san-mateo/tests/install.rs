@@ -114,7 +114,7 @@ async fn connect_and_proxy_through_the_autumn_stack() {
         None,
     )
     .await;
-    r.assert_status(204);
+    r.assert_status(200);
     // The `auth` webhooks are signed with the secret from the named env var.
     let san = SanMateoService::require(client.state()).unwrap();
     san.flush().await;
