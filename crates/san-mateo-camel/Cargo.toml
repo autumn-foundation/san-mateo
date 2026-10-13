@@ -1,0 +1,30 @@
+[package]
+name = "san-mateo-camel"
+description = "A rust-camel component for San Mateo: call provider APIs with stored auth from camel routes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["camel", "eip", "integration", "oauth", "harvest"]
+categories = ["network-programming", "authentication"]
+
+[dependencies]
+san-mateo.workspace = true
+async-trait.workspace = true
+camel-api = "0.57"
+camel-component-api = "0.57"
+camel-core = "0.57"
+serde_json.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+camel-builder = "0.57"
+camel-component-direct = "0.57"
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

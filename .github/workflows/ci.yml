@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.99.0
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Docs build with no warnings
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  test:
+    needs: clippy
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sm
+          POSTGRES_PASSWORD: sm
+          POSTGRES_DB: sm_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sm -d sm_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # The Postgres tests run only when this is set.
+      SAN_MATEO_TEST_DATABASE_URL: postgres://sm:sm@127.0.0.1:5432/sm_test
+      # The full Nango catalog at a fixed commit, for the AC1 parse test. CI
+      # reads it. The repo does not hold a copy (ADR 0001).
+      NANGO_REV: bd2d9111d640c799cce54e2768dc3b1ef14a00a9
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Get the Nango catalog
+        run: |
+          curl -fsSL --retry 4 -o "$RUNNER_TEMP/nango-providers.yaml" \
+            "https://raw.githubusercontent.com/NangoHQ/nango/$NANGO_REV/packages/providers/providers.yaml"
+          echo "SAN_MATEO_NANGO_PROVIDERS=$RUNNER_TEMP/nango-providers.yaml" >> "$GITHUB_ENV"
+      - name: Test with coverage (fail under 85% lines)
+        run: cargo llvm-cov --workspace --all-targets --fail-under-lines 85 --lcov --output-path lcov.info
+      - name: Doc tests
+        run: cargo test --workspace --doc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: lcov.info
+
+  msrv:
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +1.89.0 check --workspace --all-targets --locked
+
+  verus:
+    runs-on: ubuntu-latest
+    env:
+      # Same build as local: Verus from source at a pinned commit, z3 from PyPI.
+      VERUS_REV: 2c9bf54cfa6391ee3769f23d8d173b96a0b70560
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/verus-src/source/target-verus
+          key: verus-${{ env.VERUS_REV }}
+      # Build Verus outside the repo: in the repo, cargo takes it as a
+      # member of the San Mateo workspace.
+      - name: Build Verus
+        run: |
+          set -eu
+          mkdir -p "$HOME/verus-src" && cd "$HOME/verus-src"
+          git init -q
+          git fetch -q --depth 1 https://github.com/verus-lang/verus "$VERUS_REV"
+          git checkout -q FETCH_HEAD
+          pip download -q --no-deps z3-solver==4.16.0.0 -d /tmp/z3
+          python3 -m zipfile -e /tmp/z3/*.whl /tmp/z3/x
+          cp /tmp/z3/x/z3_solver-4.16.0.0.data/data/bin/z3 source/z3
+          chmod +x source/z3
+          cd source
+          rustup toolchain install
+          bash -c 'source ../tools/activate && vargo build --release'
+      - name: Verify the policy spec
+        run: |
+          VERUS_Z3_PATH="$HOME/verus-src/source/z3" \
+            "$HOME/verus-src/source/target-verus/release/verus" verus/policy.rs

@@ -1,0 +1,963 @@
+//! Connections API and token refresh (AC8, AC9).
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
+
+mod common;
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use common::*;
+use san_mateo::credentials::OAuth2Credentials;
+use san_mateo::model::ConnectionKey;
+use san_mateo::store::{ConnectionFilter, Store};
+use san_mateo::transport::{HttpResponse, TransportError};
+use san_mateo::{
+    Connection, ConnectionPatch, Credentials, Error, GetOptions, ImportConnection, NewIntegration,
+    Registry, Secret,
+};
+use serde_json::{Map, Value, json};
+
+const TOKEN_URL: &str = "https://auth.crm.example.com/token";
+const ZEN_TOKEN_URL: &str = "https://acme.zen.example.com/oauth/token";
+
+fn refresh_form(h: &Harness, n: usize) -> BTreeMap<String, String> {
+    let reqs = h.http.requests_to(TOKEN_URL);
+    url::form_urlencoded::parse(&reqs[n].body)
+        .into_owned()
+        .collect()
+}
+
+/// Reads a connection with the default options (refresh when needed).
+async fn read(h: &Harness, key: &ConnectionKey) -> san_mateo::Result<Connection> {
+    h.san
+        .get_connection("dev", key, GetOptions::default())
+        .await
+}
+
+fn invalid_grant() -> HttpResponse {
+    HttpResponse::json(400, &json!({"error": "invalid_grant"}))
+}
+
+/// Imports an `OAuth2` connection with `at-1` and `rt-1`. The token expires
+/// `expires_in` seconds from now.
+async fn import_oauth2(
+    h: &Harness,
+    integration: &str,
+    id: &str,
+    connection_config: Value,
+    expires_in: i64,
+) -> ConnectionKey {
+    let Value::Object(connection_config) = connection_config else {
+        panic!("the connection config must be an object");
+    };
+    h.san
+        .import_connection(
+            "dev",
+            ImportConnection {
+                connection_id: Some(id.to_owned()),
+                provider_config_key: integration.to_owned(),
+                credentials: Credentials::OAuth2(OAuth2Credentials {
+                    access_token: "at-1".into(),
+                    refresh_token: Some("rt-1".into()),
+                    expires_at: Some(now(h) + chrono::Duration::seconds(expires_in)),
+                    raw: json!({}),
+                }),
+                connection_config,
+                metadata: Map::new(),
+                tags: BTreeMap::new(),
+                end_user: None,
+                webhook_url_override: None,
+            },
+        )
+        .await
+        .unwrap()
+        .key()
+}
+
+#[tokio::test]
+async fn the_refresh_cooldown_is_30_seconds() {
+    let h = ready().await;
+    let key = connect_crm(&h, "at-1", Some("rt-1"), Some(60)).await.key();
+    h.http.reply("POST", TOKEN_URL, invalid_grant());
+    h.clock.advance(chrono::Duration::minutes(5));
+    assert!(matches!(
+        read(&h, &key).await,
+        Err(Error::Provider {
+            code: "refresh_failed",
+            ..
+        })
+    ));
+    let calls = h.http.requests_to(TOKEN_URL).len();
+    // 29.999 s after the failure: no token call.
+    h.clock.advance(chrono::Duration::milliseconds(29_999));
+    assert_eq!(read(&h, &key).await.unwrap_err(), Error::RefreshCooldown);
+    assert_eq!(h.http.requests_to(TOKEN_URL).len(), calls);
+    // 30 s after the failure: a new token call.
+    h.clock.advance(chrono::Duration::milliseconds(1));
+    assert!(matches!(
+        read(&h, &key).await,
+        Err(Error::Provider {
+            code: "refresh_failed",
+            ..
+        })
+    ));
+    assert_eq!(h.http.requests_to(TOKEN_URL).len(), calls + 1);
+    // The new failure starts a new cooldown.
+    h.clock.advance(chrono::Duration::seconds(29));
+    assert_eq!(read(&h, &key).await.unwrap_err(), Error::RefreshCooldown);
+    assert_eq!(h.http.requests_to(TOKEN_URL).len(), calls + 1);
+}
+
+#[tokio::test]
+async fn failures_count_once_for_each_utc_day() {
+    let h = ready().await;
+    let conn = connect_crm(&h, "at-1", Some("rt-1"), Some(60)).await;
+    let key = conn.key();
+    h.http.reply("POST", TOKEN_URL, invalid_grant());
+    let at = |secs: i64| chrono::DateTime::from_timestamp(secs, 0).unwrap();
+    // The start is 2023-11-14T22:13:20Z. Each step is after the cooldown.
+    // Times: 14th 23:58:00, 14th 23:59:59, 15th 00:00:30, 15th 23:59:59,
+    // 16th 00:00:30, 17th 00:00:30.
+    let mut calls = h.http.requests_to(TOKEN_URL).len();
+    for (secs, attempts, exhausted) in [
+        (1_700_006_280, 1, false),
+        (1_700_006_399, 1, false),
+        // The next UTC day counts, also when less than 24 hours passed.
+        (1_700_006_430, 2, false),
+        (1_700_092_799, 2, false),
+        (1_700_092_830, 3, false),
+        // The fourth day with a failure exhausts the connection.
+        (1_700_179_230, 4, true),
+    ] {
+        h.clock.set(at(secs));
+        assert!(
+            matches!(
+                read(&h, &key).await,
+                Err(Error::Provider {
+                    code: "refresh_failed",
+                    ..
+                })
+            ),
+            "{secs}"
+        );
+        calls += 1;
+        assert_eq!(h.http.requests_to(TOKEN_URL).len(), calls, "{secs}");
+        let row = h
+            .store
+            .get_connection("dev", "crm", &conn.connection_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (row.refresh_attempts, row.refresh_exhausted),
+            (attempts, exhausted),
+            "{secs}"
+        );
+        assert_eq!(row.last_refresh_failure, Some(at(secs)));
+    }
+    h.clock.advance(chrono::Duration::seconds(31));
+    assert_eq!(read(&h, &key).await.unwrap_err(), Error::RefreshExhausted);
+    assert_eq!(h.http.requests_to(TOKEN_URL).len(), calls);
+}
+
+#[tokio::test]
+async fn the_default_refresh_buffer_is_15_minutes() {
+    let h = ready().await;
+    let key = connect_crm(&h, "at-1", Some("rt-1"), Some(3_600))
+        .await
+        .key();
+    h.http
+        .reply("POST", TOKEN_URL, token_reply("at-2", None, Some(3_600)));
+    // 15 min 1 s remain, then 15 min: no refresh.
+    h.clock.advance(chrono::Duration::seconds(45 * 60 - 1));
+    for _ in 0..2 {
+        let got = read(&h, &key).await.unwrap();
+        assert_eq!(got.credentials.bearer_token(), Some("at-1"));
+        assert_eq!(h.http.requests_to(TOKEN_URL).len(), 1);
+        h.clock.advance(chrono::Duration::seconds(1));
+    }
+    // 14 min 59 s remain: a refresh.
+    let got = read(&h, &key).await.unwrap();
+    assert_eq!(got.credentials.bearer_token(), Some("at-2"));
+    assert_eq!(h.http.requests_to(TOKEN_URL).len(), 2);
+}
+
+/// A provider with a 2 minute refresh buffer.
+const QUICK: &str = r"
+quick:
+    display_name: Quick
+    auth_mode: OAUTH2
+    authorization_url: https://auth.quick.example.com/authorize
+    token_url: https://auth.quick.example.com/token
+    token_expiration_buffer: 120
+    proxy:
+        base_url: https://api.quick.example.com
+    docs: https://quick.example.com/docs
+";
+
+#[tokio::test]
+async fn the_provider_buffer_replaces_the_default() {
+    let h = harness_with_catalog(Registry::new(), QUICK);
+    h.san
+        .create_integration(
+            "dev",
+            NewIntegration {
+                unique_key: "quick".to_owned(),
+                provider: "quick".to_owned(),
+                client_id: Some("quick-client".to_owned()),
+                client_secret: Some(Secret::new("quick-secret")),
+                ..NewIntegration::default()
+            },
+        )
+        .await
+        .unwrap();
+    let url = "https://auth.quick.example.com/token";
+    h.http
+        .reply("POST", url, token_reply("at-2", None, Some(3_600)));
+    let key = import_oauth2(&h, "quick", "q1", json!({}), 600).await;
+    // 10 min remain: inside the default buffer, but not inside 2 min.
+    let got = read(&h, &key).await.unwrap();
+    assert_eq!(got.credentials.bearer_token(), Some("at-1"));
+    // 2 min 1 s remain, then 2 min: no refresh.
+    h.clock.advance(chrono::Duration::seconds(8 * 60 - 1));
+    for _ in 0..2 {
+        let got = read(&h, &key).await.unwrap();
+        assert_eq!(got.credentials.bearer_token(), Some("at-1"));
+        h.clock.advance(chrono::Duration::seconds(1));
+    }
+    assert!(h.http.requests_to(url).is_empty());
+    // 1 min 59 s remain: a refresh.
+    let got = read(&h, &key).await.unwrap();
+    assert_eq!(got.credentials.bearer_token(), Some("at-2"));
+    assert_eq!(h.http.requests_to(url).len(), 1);
+}
+
+#[tokio::test]
+async fn get_returns_fresh_credentials_without_a_refresh() {
+    let h = ready().await;
+    let conn = connect_crm(&h, "at-1", Some("rt-1"), Some(3_600)).await;
+    h.clock.advance(chrono::Duration::minutes(5));
+    let got = h
+        .san
+        .get_connection("dev", &conn.key(), GetOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(got.credentials.bearer_token(), Some("at-1"));
+    assert_eq!(got.last_fetched_at, Some(now(&h)));
+    assert_eq!(
+        h.http.requests_to(TOKEN_URL).len(),
+        1,
+        "only the code exchange"
+    );
+    assert!(matches!(
+        h.san
+            .get_connection(
+                "dev",
+                &ConnectionKey::new("crm", "nope"),
+                GetOptions::default()
+            )
+            .await,
+        Err(Error::UnknownConnection(_))
+    ));
+    assert!(matches!(
+        h.san
+            .get_connection("prod", &conn.key(), GetOptions::default())
+            .await,
+        Err(Error::UnknownConnection(_))
+    ));
+}
+
+#[tokio::test]
+async fn refresh_inside_the_buffer_keeps_the_old_refresh_token() {
+    let h = ready().await;
+    let conn = connect_crm(&h, "at-1", Some("rt-1"), Some(3_600)).await;
+    // 46 minutes later, 14 minutes remain: inside the 15 minute buffer.
+    h.clock.advance(chrono::Duration::minutes(46));
+    h.http
+        .reply("POST", TOKEN_URL, token_reply("at-2", None, Some(3_600)));
+    let got = h
+        .san
+        .get_connection("dev", &conn.key(), GetOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(got.credentials.bearer_token(), Some("at-2"));
+    assert_eq!(got.credentials.refresh_token(), Some("rt-1"));
+    assert_eq!(
+        got.credentials.expires_at(),
+        Some(now(&h) + chrono::Duration::seconds(3_600))
+    );
+    let form = refresh_form(&h, 1);
+    assert_eq!(form["grant_type"], "refresh_token");
+    assert_eq!(form["refresh_token"], "rt-1");
+    assert_eq!(form["client_id"], "crm-client");
+    let row = h
+        .store
+        .get_connection("dev", "crm", &conn.connection_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.last_refresh_success, Some(now(&h)));
+    assert_eq!(row.credentials_expires_at, got.credentials.expires_at());
+}
+
+#[tokio::test]
+async fn header_authorization_method_refreshes_with_basic_auth() {
+    let h = shop_harness().await;
+    let key = shop_connection(&h, "s1", json!({}), Some("rt-1")).await;
+    let url = "https://auth.shop.example.com/token";
+    h.http
+        .reply("POST", url, token_reply("at-2", None, Some(3_600)));
+    let got = h
+        .san
+        .get_connection(
+            "dev",
+            &key,
+            GetOptions {
+                force_refresh: true,
+                ..GetOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(got.credentials.bearer_token(), Some("at-2"));
+    let sent = &h.http.requests_to(url)[0];
+    assert_eq!(
+        sent.header_value("authorization"),
+        Some("Basic c2hvcC1jbGllbnQ6c2hvcC1zZWNyZXQ=")
+    );
+    let form: BTreeMap<String, String> = url::form_urlencoded::parse(&sent.body)
+        .into_owned()
+        .collect();
+    assert_eq!(form["refresh_token"], "rt-1");
+    assert!(!form.contains_key("client_id") && !form.contains_key("client_secret"));
+}
+
+#[tokio::test]
+async fn force_refresh_and_no_refresh_token() {
+    let h = ready().await;
+    let conn = connect_crm(&h, "at-1", Some("rt-1"), Some(3_600)).await;
+    h.http.reply(
+        "POST",
+        TOKEN_URL,
+        token_reply("at-2", Some("rt-2"), Some(3_600)),
+    );
+    let got = h
+        .san
+        .get_connection(
+            "dev",
+            &conn.key(),
+            GetOptions {
+                force_refresh: true,
+                ..GetOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(got.credentials.bearer_token(), Some("at-2"));
+    assert_eq!(got.credentials.refresh_token(), Some("rt-2"));
+
+    // With no refresh token, an expired token comes back as it is.
+    let plain = connect_crm(&h, "at-x", None, Some(60)).await;
+    h.clock.advance(chrono::Duration::hours(2));
+    let before = h.http.requests_to(TOKEN_URL).len();
+    let got = h
+        .san
+        .get_connection("dev", &plain.key(), GetOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(got.credentials.bearer_token(), Some("at-x"));
+    assert_eq!(h.http.requests_to(TOKEN_URL).len(), before);
+    // `refresh_if_needed = false` skips the refresh.
+    let got = h
+        .san
+        .get_connection(
+            "dev",
+            &conn.key(),
+            GetOptions {
+                refresh_if_needed: false,
+                force_refresh: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(got.credentials.bearer_token(), Some("at-2"));
+}
+
+#[tokio::test]
+async fn refresh_failures_cool_down_and_exhaust() {
+    let h = ready().await;
+    let conn = connect_crm(&h, "at-1", Some("rt-1"), Some(60)).await;
+    let key = conn.key();
+    h.http.reply(
+        "POST",
+        TOKEN_URL,
+        HttpResponse::json(400, &json!({"error": "invalid_grant"})),
+    );
+    h.clock.advance(chrono::Duration::minutes(5));
+    let err = h
+        .san
+        .get_connection("dev", &key, GetOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Provider {
+                code: "refresh_failed",
+                status: Some(400),
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    // A second call in the cooldown does not call the provider.
+    let calls = h.http.requests_to(TOKEN_URL).len();
+    assert_eq!(
+        h.san
+            .get_connection("dev", &key, GetOptions::default())
+            .await
+            .unwrap_err(),
+        Error::RefreshCooldown
+    );
+    assert_eq!(h.http.requests_to(TOKEN_URL).len(), calls);
+    // Failures on the same day count once.
+    h.clock.advance(chrono::Duration::seconds(31));
+    assert!(
+        h.san
+            .get_connection("dev", &key, GetOptions::default())
+            .await
+            .is_err()
+    );
+    let row = h
+        .store
+        .get_connection("dev", "crm", &conn.connection_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.refresh_attempts, 1);
+    assert!(!row.refresh_exhausted);
+    // Failures on four days exhaust the connection.
+    for _ in 0..3 {
+        h.clock.advance(chrono::Duration::days(1));
+        assert!(
+            h.san
+                .get_connection("dev", &key, GetOptions::default())
+                .await
+                .is_err()
+        );
+    }
+    let row = h
+        .store
+        .get_connection("dev", "crm", &conn.connection_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.refresh_attempts, 4);
+    assert!(row.refresh_exhausted);
+    h.clock.advance(chrono::Duration::days(1));
+    assert_eq!(
+        h.san
+            .get_connection("dev", &key, GetOptions::default())
+            .await
+            .unwrap_err(),
+        Error::RefreshExhausted
+    );
+    // A forced refresh tries again. Success resets the counters.
+    h.http.reply(
+        "POST",
+        TOKEN_URL,
+        token_reply("at-9", Some("rt-9"), Some(3_600)),
+    );
+    let got = h
+        .san
+        .get_connection(
+            "dev",
+            &key,
+            GetOptions {
+                force_refresh: true,
+                ..GetOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(got.credentials.bearer_token(), Some("at-9"));
+    let row = h
+        .store
+        .get_connection("dev", "crm", &conn.connection_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            row.refresh_attempts,
+            row.refresh_exhausted,
+            row.last_refresh_failure
+        ),
+        (0, false, None)
+    );
+
+    h.san.flush().await;
+    let refresh_hooks: Vec<_> = webhooks_sent(&h)
+        .into_iter()
+        .filter(|w| w["operation"] == "refresh")
+        .collect();
+    assert!(!refresh_hooks.is_empty());
+    assert!(
+        refresh_hooks
+            .iter()
+            .all(|w| w["success"] == false && w["error"]["type"] == "refresh_failed")
+    );
+}
+
+#[tokio::test]
+async fn network_errors_during_refresh_are_retryable() {
+    let h = ready().await;
+    let conn = connect_crm(&h, "at-1", Some("rt-1"), Some(60)).await;
+    h.clock.advance(chrono::Duration::minutes(5));
+    h.http.fail("POST", TOKEN_URL, TransportError::Timeout);
+    let err = h
+        .san
+        .get_connection("dev", &conn.key(), GetOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Provider {
+                code: "refresh_failed",
+                status: None,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(err.is_retryable());
+}
+
+#[tokio::test]
+async fn concurrent_gets_share_one_refresh() {
+    let h = ready().await;
+    let conn = connect_crm(&h, "at-1", Some("rt-1"), Some(60)).await;
+    h.clock.advance(chrono::Duration::minutes(5));
+    h.http.reply(
+        "POST",
+        TOKEN_URL,
+        token_reply("at-2", Some("rt-2"), Some(3_600)),
+    );
+    let key = conn.key();
+    let calls = (0..8).map(|_| h.san.get_connection("dev", &key, GetOptions::default()));
+    let results = futures::future::join_all(calls).await;
+    assert!(
+        results
+            .iter()
+            .all(|r| r.as_ref().unwrap().credentials.bearer_token() == Some("at-2"))
+    );
+    assert_eq!(
+        h.http.requests_to(TOKEN_URL).len(),
+        2,
+        "one code exchange and one refresh"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_lease_of_another_process_is_respected() {
+    let h = ready().await;
+    let conn = connect_crm(&h, "at-1", Some("rt-1"), Some(60)).await;
+    h.clock.advance(chrono::Duration::minutes(5));
+    let lease = format!("refresh:dev:crm:{}", conn.connection_id);
+    assert!(
+        h.store
+            .try_lease(&lease, "other-process", now(&h), 60_000)
+            .await
+            .unwrap()
+    );
+    // The other process writes fresh credentials after a short time.
+    let store = h.store.clone();
+    let keys = h.keys.clone();
+    let id = conn.connection_id.clone();
+    let fresh_at = now(&h) + chrono::Duration::hours(1);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mut row = store
+            .get_connection("dev", "crm", &id)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut creds: san_mateo::Credentials = keys
+            .open_json(
+                &row.credentials,
+                &san_mateo::crypto::aad(&["connection", "dev", "crm", &id]),
+            )
+            .unwrap();
+        if let san_mateo::Credentials::OAuth2(c) = &mut creds {
+            c.access_token = "from-other".into();
+            c.expires_at = Some(fresh_at);
+        }
+        row.credentials = keys
+            .seal_json(
+                &creds,
+                &san_mateo::crypto::aad(&["connection", "dev", "crm", &id]),
+            )
+            .unwrap();
+        row.credentials_expires_at = Some(fresh_at);
+        store.update_connection(&row).await.unwrap();
+    });
+    let got = h
+        .san
+        .get_connection("dev", &conn.key(), GetOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(got.credentials.bearer_token(), Some("from-other"));
+    assert_eq!(
+        h.http.requests_to(TOKEN_URL).len(),
+        1,
+        "no refresh in this process"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_held_lease_with_no_progress_gives_a_cooldown_error() {
+    let h = ready().await;
+    let conn = connect_crm(&h, "at-1", Some("rt-1"), Some(60)).await;
+    h.clock.advance(chrono::Duration::minutes(5));
+    let lease = format!("refresh:dev:crm:{}", conn.connection_id);
+    assert!(
+        h.store
+            .try_lease(&lease, "stuck-process", now(&h), 600_000)
+            .await
+            .unwrap()
+    );
+    let err = h
+        .san
+        .get_connection("dev", &conn.key(), GetOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(err, Error::RefreshCooldown);
+}
+
+#[tokio::test]
+async fn client_credentials_refresh_with_a_new_grant() {
+    let h = ready().await;
+    let token = session(&h).await;
+    h.http.reply(
+        "POST",
+        "https://auth.machine.example.com/token",
+        HttpResponse::json(200, &json!({"access_token": "cc-1", "expires_in": 600})),
+    );
+    let cc = h
+        .san
+        .connect_client_credentials(
+            &token,
+            "machine",
+            "m-id".into(),
+            "m-secret".into(),
+            san_mateo::ConnectOptions::default(),
+        )
+        .await
+        .unwrap();
+    h.clock.advance(chrono::Duration::minutes(9));
+    h.http.reply(
+        "POST",
+        "https://auth.machine.example.com/token",
+        HttpResponse::json(200, &json!({"access_token": "cc-2", "expires_in": 600})),
+    );
+    let got = h
+        .san
+        .get_connection("dev", &cc.key(), GetOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(got.credentials.bearer_token(), Some("cc-2"));
+    let reqs = h.http.requests_to("https://auth.machine.example.com/token");
+    let form: BTreeMap<String, String> = url::form_urlencoded::parse(&reqs[1].body)
+        .into_owned()
+        .collect();
+    assert_eq!(form["grant_type"], "client_credentials");
+    assert_eq!(form["client_id"], "m-id");
+}
+
+#[tokio::test]
+async fn list_delete_metadata_and_patch() {
+    let h = ready().await;
+    let a = connect_crm(&h, "at-a", None, None).await;
+    let b = connect_crm(&h, "at-b", None, None).await;
+    let all = h
+        .san
+        .list_connections("dev", &ConnectionFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 2);
+    assert!(
+        !format!("{all:?}").contains("at-a"),
+        "no credentials in a list"
+    );
+    let by_user = ConnectionFilter {
+        end_user_id: Some("user-1".into()),
+        ..ConnectionFilter::default()
+    };
+    assert_eq!(
+        h.san.list_connections("dev", &by_user).await.unwrap().len(),
+        2
+    );
+
+    let m = h
+        .san
+        .set_metadata(
+            "dev",
+            &a.key(),
+            Map::from_iter([("x".to_owned(), json!(1)), ("y".to_owned(), json!(2))]),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(m.len(), 2);
+    let m = h
+        .san
+        .set_metadata(
+            "dev",
+            &a.key(),
+            Map::from_iter([("y".to_owned(), json!(3))]),
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(json!(m), json!({"x": 1, "y": 3}));
+    let m = h
+        .san
+        .set_metadata(
+            "dev",
+            &a.key(),
+            Map::from_iter([("z".to_owned(), json!(0))]),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(json!(m), json!({"z": 0}));
+
+    h.san
+        .patch_connection(
+            "dev",
+            &a.key(),
+            ConnectionPatch {
+                tags: Some(BTreeMap::from([("t".to_owned(), "1".to_owned())])),
+                webhook_url_override: Some(Some("https://override.example.com/h".to_owned())),
+                end_user: None,
+            },
+        )
+        .await
+        .unwrap();
+    let got = h
+        .san
+        .get_connection("dev", &a.key(), GetOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(got.tags["t"], "1");
+    assert_eq!(
+        got.webhook_url_override.as_deref(),
+        Some("https://override.example.com/h")
+    );
+    assert!(matches!(
+        h.san
+            .patch_connection(
+                "dev",
+                &a.key(),
+                ConnectionPatch {
+                    webhook_url_override: Some(Some("ftp://x".into())),
+                    ..ConnectionPatch::default()
+                }
+            )
+            .await,
+        Err(Error::Invalid(_))
+    ));
+
+    h.http.reply(
+        "POST",
+        "https://override.example.com/h",
+        HttpResponse::new(200, ""),
+    );
+    h.san.delete_connection("dev", &a.key()).await.unwrap();
+    assert!(matches!(
+        h.san.delete_connection("dev", &a.key()).await,
+        Err(Error::UnknownConnection(_))
+    ));
+    assert_eq!(
+        h.san
+            .list_connections("dev", &ConnectionFilter::default())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(matches!(
+        h.san.set_metadata("dev", &a.key(), Map::new(), true).await,
+        Err(Error::UnknownConnection(_))
+    ));
+    h.san.flush().await;
+    let deletion = h.http.requests_to("https://override.example.com/h");
+    assert_eq!(
+        deletion.len(),
+        1,
+        "the override URL gets the deletion event"
+    );
+    let body: serde_json::Value = serde_json::from_slice(&deletion[0].body).unwrap();
+    assert_eq!(body["operation"], "deletion");
+    let _ = b;
+}
+
+#[tokio::test]
+async fn the_sweep_refreshes_tokens_that_expire_soon() {
+    let h = ready().await;
+    let soon = connect_crm(&h, "at-soon", Some("rt-soon"), Some(600)).await;
+    let late = connect_crm(&h, "at-late", Some("rt-late"), Some(86_400)).await;
+    // The token endpoint of this zen connection refuses its refresh token.
+    let broken = import_oauth2(&h, "zen", "z1", json!({"subdomain": "acme"}), 300).await;
+    h.http.reply(
+        "POST",
+        TOKEN_URL,
+        token_reply("at-new", Some("rt-new"), Some(3_600)),
+    );
+    h.http.reply("POST", ZEN_TOKEN_URL, invalid_grant());
+    let report = h
+        .san
+        .refresh_due(Duration::from_secs(30 * 60), 100)
+        .await
+        .unwrap();
+    // The broken row comes first (it expires first). Its failure does not
+    // stop the sweep.
+    assert_eq!((report.refreshed, report.failed), (1, 1));
+    assert_eq!(h.http.requests_to(ZEN_TOKEN_URL).len(), 1);
+    let row = h
+        .store
+        .get_connection("dev", "zen", &broken.connection_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (row.refresh_attempts, row.last_refresh_failure),
+        (1, Some(now(&h)))
+    );
+    let got = h
+        .san
+        .get_connection(
+            "dev",
+            &soon.key(),
+            GetOptions {
+                refresh_if_needed: false,
+                force_refresh: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(got.credentials.bearer_token(), Some("at-new"));
+    let got = h
+        .san
+        .get_connection(
+            "dev",
+            &late.key(),
+            GetOptions {
+                refresh_if_needed: false,
+                force_refresh: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(got.credentials.bearer_token(), Some("at-late"));
+
+    h.clock.advance(chrono::Duration::minutes(50));
+    h.http.reply("POST", TOKEN_URL, HttpResponse::new(503, ""));
+    let report = h
+        .san
+        .refresh_due(Duration::from_secs(30 * 60), 100)
+        .await
+        .unwrap();
+    assert_eq!(report.failed, 2);
+    let report = h
+        .san
+        .refresh_due(Duration::from_secs(30 * 60), 100)
+        .await
+        .unwrap();
+    assert_eq!(report.skipped, 2, "cooldown");
+}
+
+#[tokio::test(start_paused = true)]
+async fn background_loops_start_and_stop() {
+    let h = ready().await;
+    let soon = connect_crm(&h, "at-soon", Some("rt-soon"), Some(600)).await;
+    h.http.reply(
+        "POST",
+        TOKEN_URL,
+        token_reply("at-bg", Some("rt-bg"), Some(3_600)),
+    );
+    let bg = h.san.start_background(san_mateo::BackgroundSettings {
+        tick: Duration::from_secs(1),
+        ..san_mateo::BackgroundSettings::default()
+    });
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    bg.stop().await;
+    let got = h
+        .san
+        .get_connection(
+            "dev",
+            &soon.key(),
+            GetOptions {
+                refresh_if_needed: false,
+                force_refresh: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(got.credentials.bearer_token(), Some("at-bg"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_background_loop_purges_expired_sessions() {
+    let h = ready().await;
+    let state_of = |url: &str| query_of(url)["state"].clone();
+    // A connect session (30 min) with an OAuth flow (15 min).
+    let old = session(&h).await;
+    let old_state = state_of(
+        &h.san
+            .oauth_start(&old, "crm", san_mateo::ConnectOptions::default())
+            .await
+            .unwrap(),
+    );
+    h.clock.advance(chrono::Duration::minutes(31));
+    // A live session and flow.
+    let live = session(&h).await;
+    let live_state = state_of(
+        &h.san
+            .oauth_start(&live, "crm", san_mateo::ConnectOptions::default())
+            .await
+            .unwrap(),
+    );
+    let (old, live) = (h.keys.lookup_hash(&old), h.keys.lookup_hash(&live));
+    assert!(h.store.get_connect_session(&old).await.unwrap().is_some());
+    let bg = h.san.start_background(san_mateo::BackgroundSettings {
+        tick: Duration::from_secs(1),
+        run_syncs: false,
+        ..san_mateo::BackgroundSettings::default()
+    });
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    bg.stop().await;
+    // The expired rows are gone. The live rows stay.
+    assert!(h.store.get_connect_session(&old).await.unwrap().is_none());
+    assert!(h.store.get_connect_session(&live).await.unwrap().is_some());
+    let (old_state, live_state) = (
+        h.keys.lookup_hash(&old_state),
+        h.keys.lookup_hash(&live_state),
+    );
+    assert!(
+        h.store
+            .take_oauth_session(&old_state)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        h.store
+            .take_oauth_session(&live_state)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
