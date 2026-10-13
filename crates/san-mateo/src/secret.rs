@@ -20,20 +20,19 @@ impl Secret {
     /// Returns the value. Do not log it.
     #[must_use]
     pub fn expose(&self) -> &str {
-        todo!()
+        &self.0
     }
 
     /// Returns `true` when the value is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        todo!()
+        self.0.is_empty()
     }
 }
 
 impl std::fmt::Debug for Secret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        todo!()
+        f.write_str("Secret(<redacted>)")
     }
 }
 

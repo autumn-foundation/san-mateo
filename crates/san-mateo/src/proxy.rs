@@ -2,12 +2,17 @@
 //! reply class and retry waits. The send loop is in [`crate::service`].
 //! See ADR 0004.
 
+use std::net::IpAddr;
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use serde_json::Value;
 
 use crate::credentials::Credentials;
 use crate::error::{Error, Result};
 use crate::policy::Outcome;
 use crate::provider::{Provider, RetryHeaders};
+use crate::transport::header_value;
 
 /// Caller headers with these prefixes go upstream without the prefix.
 pub const FORWARD_PREFIXES: &[&str] = &["san-mateo-proxy-", "nango-proxy-"];
@@ -159,8 +164,9 @@ impl ProxyResponse {
 /// Returns `true` for `GET`, `HEAD`, `OPTIONS`, `PUT` and `DELETE`.
 #[must_use]
 pub fn is_idempotent(method: &str) -> bool {
-    let _ = method;
-    todo!()
+    ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"]
+        .iter()
+        .any(|m| m.eq_ignore_ascii_case(method))
 }
 
 /// Joins a base URL and an endpoint. The endpoint can have a query. An
@@ -170,8 +176,14 @@ pub fn is_idempotent(method: &str) -> bool {
 ///
 /// [`Error::Invalid`] when the result is not a valid URL.
 pub fn join_url(base: &str, endpoint: &str) -> Result<String> {
-    let _ = (base, endpoint);
-    todo!()
+    let rest = if !base.is_empty() && endpoint.starts_with(base) {
+        &endpoint[base.len()..]
+    } else {
+        endpoint
+    };
+    let joined = format!("{}/{}", base.trim_end_matches('/'), rest.trim_start_matches('/'));
+    url::Url::parse(&joined).map_err(|_| Error::Invalid("the upstream URL is not valid".to_owned()))?;
+    Ok(joined)
 }
 
 /// Adds query parameters to a URL.
@@ -180,8 +192,51 @@ pub fn join_url(base: &str, endpoint: &str) -> Result<String> {
 ///
 /// [`Error::Invalid`] when the URL is not valid.
 pub fn add_query(url: &str, params: &[(String, String)]) -> Result<String> {
-    let _ = (url, params);
-    todo!()
+    url::Url::parse(url).map_err(|_| Error::Invalid("the upstream URL is not valid".to_owned()))?;
+    if params.is_empty() {
+        return Ok(url.to_owned());
+    }
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(params.iter())
+        .finish();
+    let sep = if url.contains('?') { "&" } else { "?" };
+    Ok(format!("{url}{sep}{query}"))
+}
+
+/// Returns `true` for an IP that is private, loopback, link-local,
+/// unspecified, broadcast or shared (CGNAT).
+fn is_internal_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || (a == 100 && (64..128).contains(&b))
+        }
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_internal_ip(IpAddr::V4(mapped));
+            }
+            let first = v6.segments()[0];
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+fn host_allowed(host: &str, allowed: &[String]) -> bool {
+    allowed.iter().any(|entry| {
+        let entry = entry.to_ascii_lowercase();
+        match entry.strip_prefix("*.") {
+            Some(suffix) => host.len() > suffix.len() + 1 && host.ends_with(&format!(".{suffix}")),
+            None => host == entry,
+        }
+    })
 }
 
 /// Checks an upstream URL before a send.
@@ -201,15 +256,44 @@ pub fn check_upstream(
     base_url_override: bool,
     settings: &ProxySettings,
 ) -> Result<()> {
-    let _ = (url, provider_host, base_url_override, settings);
-    todo!()
+    let parsed = url::Url::parse(url).map_err(|_| Error::Invalid("the upstream URL is not valid".to_owned()))?;
+    match parsed.scheme() {
+        "https" => {}
+        "http" if settings.allow_plain_http => {}
+        other => return Err(Error::ForbiddenHost(format!("the scheme {other} is not allowed"))),
+    }
+    let host = parsed
+        .host_str()
+        .map(|h| h.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase())
+        .ok_or_else(|| Error::Invalid("the upstream URL has no host".to_owned()))?;
+    let internal = match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => is_internal_ip(IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => is_internal_ip(IpAddr::V6(ip)),
+        _ => host == "localhost" || host.ends_with(".localhost"),
+    };
+    if internal && !settings.allow_private_hosts {
+        return Err(Error::ForbiddenHost(format!("the host {host} is internal")));
+    }
+    if base_url_override {
+        let same = provider_host.is_some_and(|p| p.eq_ignore_ascii_case(&host));
+        if !same && !host_allowed(&host, &settings.allowed_hosts) {
+            return Err(Error::ForbiddenHost(format!("the host {host} is not allowed")));
+        }
+    }
+    Ok(())
 }
 
 /// Returns the host of a URL, in lower case.
 #[must_use]
 pub fn host_of(url: &str) -> Option<String> {
-    let _ = url;
-    todo!()
+    url::Url::parse(url).ok()?.host_str().map(str::to_ascii_lowercase)
+}
+
+fn has_provider_auth_header(provider: &Provider) -> bool {
+    provider
+        .proxy
+        .as_ref()
+        .is_some_and(|p| p.headers.keys().any(|k| k.eq_ignore_ascii_case("authorization")))
 }
 
 /// Returns the auth headers for the credentials.
@@ -219,8 +303,25 @@ pub fn host_of(url: &str) -> Option<String> {
 /// key. A provider `authorization` header replaces the default header.
 #[must_use]
 pub fn auth_headers(credentials: &Credentials, provider: &Provider) -> Vec<(String, String)> {
-    let _ = (credentials, provider);
-    todo!()
+    if has_provider_auth_header(provider) {
+        return Vec::new();
+    }
+    let value = match credentials {
+        Credentials::OAuth2(_) | Credentials::OAuth2ClientCredentials(_) => {
+            credentials.bearer_token().map(|t| format!("Bearer {t}"))
+        }
+        Credentials::Basic { username, password } => {
+            Some(format!("Basic {}", STANDARD.encode(format!("{username}:{}", password.expose()))))
+        }
+        Credentials::ApiKey { .. } | Credentials::Unauthenticated => None,
+    };
+    value.map(|v| ("authorization".to_owned(), v)).into_iter().collect()
+}
+
+fn render_map(map: &std::collections::BTreeMap<String, String>, vars: &Value) -> Result<Vec<(String, String)>> {
+    map.iter()
+        .map(|(k, v)| Ok((k.to_ascii_lowercase(), crate::template::render(v, vars)?)))
+        .collect()
 }
 
 /// Renders the provider `proxy.headers` with `vars`.
@@ -229,8 +330,7 @@ pub fn auth_headers(credentials: &Credentials, provider: &Provider) -> Vec<(Stri
 ///
 /// [`Error::Template`] when a value is missing.
 pub fn provider_headers(provider: &Provider, vars: &Value) -> Result<Vec<(String, String)>> {
-    let _ = (provider, vars);
-    todo!()
+    provider.proxy.as_ref().map_or_else(|| Ok(Vec::new()), |p| render_map(&p.headers, vars))
 }
 
 /// Renders the provider `proxy.query` with `vars`.
@@ -239,31 +339,49 @@ pub fn provider_headers(provider: &Provider, vars: &Value) -> Result<Vec<(String
 ///
 /// [`Error::Template`] when a value is missing.
 pub fn provider_query(provider: &Provider, vars: &Value) -> Result<Vec<(String, String)>> {
-    let _ = (provider, vars);
-    todo!()
+    provider.proxy.as_ref().map_or_else(|| Ok(Vec::new()), |p| render_map(&p.query, vars))
+}
+
+fn is_hop_by_hop(name: &str) -> bool {
+    HOP_BY_HOP.iter().any(|h| h.eq_ignore_ascii_case(name))
 }
 
 /// Returns the caller headers that go upstream: the headers with a
 /// [`FORWARD_PREFIXES`] prefix, with no prefix and in lower case.
 #[must_use]
 pub fn forwarded_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
-    let _ = headers;
-    todo!()
+    headers
+        .iter()
+        .filter_map(|(k, v)| {
+            let k = k.to_ascii_lowercase();
+            let name = FORWARD_PREFIXES.iter().find_map(|p| k.strip_prefix(p))?;
+            (!name.is_empty() && !is_hop_by_hop(name)).then(|| (name.to_owned(), v.clone()))
+        })
+        .collect()
 }
 
-/// Removes hop-by-hop headers.
+/// Removes hop-by-hop headers. Names become lower case.
 #[must_use]
 pub fn strip_hop_by_hop(headers: Vec<(String, String)>) -> Vec<(String, String)> {
-    let _ = headers;
-    todo!()
+    headers
+        .into_iter()
+        .filter(|(k, _)| !is_hop_by_hop(k))
+        .map(|(k, v)| (k.to_ascii_lowercase(), v))
+        .collect()
 }
 
 /// Merges headers. A header in `over` replaces all headers with that name
 /// in `base`. Names are lower case.
 #[must_use]
 pub fn merge_headers(base: Vec<(String, String)>, over: Vec<(String, String)>) -> Vec<(String, String)> {
-    let _ = (base, over);
-    todo!()
+    let over: Vec<(String, String)> = over.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect();
+    let mut out: Vec<(String, String)> = base
+        .into_iter()
+        .map(|(k, v)| (k.to_ascii_lowercase(), v))
+        .filter(|(k, _)| !over.iter().any(|(o, _)| o == k))
+        .collect();
+    out.extend(over);
+    out
 }
 
 /// Classifies a reply. Returns the outcome and `true` when the caller or
@@ -275,16 +393,51 @@ pub fn classify(
     retry: Option<&RetryHeaders>,
     retry_on: &[u16],
 ) -> (Outcome, bool) {
-    let _ = (status, headers, retry, retry_on);
-    todo!()
+    if status < 400 {
+        return (Outcome::Success, false);
+    }
+    let opted_in = retry_on.contains(&status)
+        || retry.is_some_and(|r| r.error_code.iter().any(|e| error_code_matches(e, status)));
+    let none_left = retry
+        .and_then(|r| r.remaining.as_deref())
+        .and_then(|name| header_value(headers, name))
+        .is_some_and(|v| v.trim() == "0");
+    let outcome = if status == 429 || none_left {
+        Outcome::RateLimited
+    } else if status >= 500 {
+        Outcome::ServerError
+    } else {
+        Outcome::ClientError
+    };
+    (outcome, opted_in)
 }
 
 /// Returns `true` when `status` matches a provider `error_code` entry:
 /// `"429"`, `"5xx"` or `"500-502"`.
 #[must_use]
 pub fn error_code_matches(entry: &str, status: u16) -> bool {
-    let _ = (entry, status);
-    todo!()
+    let e = entry.trim().to_ascii_lowercase();
+    if let Some(class) = e.strip_suffix("xx") {
+        return class.len() == 1 && class.parse::<u16>().is_ok_and(|c| status / 100 == c);
+    }
+    if let Some((a, b)) = e.split_once('-') {
+        return match (a.trim().parse::<u16>(), b.trim().parse::<u16>()) {
+            (Ok(a), Ok(b)) => (a..=b).contains(&status),
+            _ => false,
+        };
+    }
+    e.parse::<u16>().is_ok_and(|c| c == status)
+}
+
+/// Seconds as text to ms. Negative or bad values give `None`.
+fn secs_text_to_ms(v: &str) -> Option<u64> {
+    let secs: f64 = v.trim().parse().ok()?;
+    if !secs.is_finite() || secs < 0.0 || secs > 1.0e12 {
+        return None;
+    }
+    // The range check keeps the value inside `u64`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some((secs * 1000.0).round() as u64)
 }
 
 /// Returns the wait that the reply headers ask for, in ms.
@@ -294,8 +447,22 @@ pub fn error_code_matches(entry: &str, status: u16) -> bool {
 /// wait wins.
 #[must_use]
 pub fn header_wait_ms(headers: &[(String, String)], retry: Option<&RetryHeaders>, now_ms: u64) -> Option<u64> {
-    let _ = (headers, retry, now_ms);
-    todo!()
+    let until = |v: &str| {
+        crate::clock::parse_instant_str(v).map(|t| crate::policy::wait_until_ms(now_ms, crate::clock::to_ms(t)))
+    };
+    let mut waits = Vec::new();
+    if let Some(v) = header_value(headers, "retry-after") {
+        waits.extend(secs_text_to_ms(v).or_else(|| until(v)));
+    }
+    if let Some(r) = retry {
+        for name in &r.after {
+            waits.extend(header_value(headers, name).and_then(secs_text_to_ms));
+        }
+        for name in &r.at {
+            waits.extend(header_value(headers, name).and_then(until));
+        }
+    }
+    waits.into_iter().max()
 }
 
 #[cfg(test)]

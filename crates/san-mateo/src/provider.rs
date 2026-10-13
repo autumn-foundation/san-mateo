@@ -42,20 +42,33 @@ impl AuthMode {
     /// Returns the catalog name, for example `OAUTH2`.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        todo!()
+        match self {
+            Self::OAuth2 => "OAUTH2",
+            Self::OAuth2ClientCredentials => "OAUTH2_CC",
+            Self::ApiKey => "API_KEY",
+            Self::Basic => "BASIC",
+            Self::None => "NONE",
+            Self::Other(s) => s,
+        }
     }
 
     /// Returns `true` when San Mateo can make connections with this mode.
     #[must_use]
     pub const fn is_supported(&self) -> bool {
-        todo!()
+        !matches!(self, Self::Other(_))
     }
 
     /// Parses a catalog name. Unknown names give [`AuthMode::Other`].
     #[must_use]
     pub fn parse(s: &str) -> Self {
-        let _ = s;
-        todo!()
+        match s {
+            "OAUTH2" => Self::OAuth2,
+            "OAUTH2_CC" => Self::OAuth2ClientCredentials,
+            "API_KEY" => Self::ApiKey,
+            "BASIC" => Self::Basic,
+            "NONE" => Self::None,
+            other => Self::Other(other.to_owned()),
+        }
     }
 }
 
@@ -130,43 +143,43 @@ pub enum TokenUrl {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FieldSchema {
     /// The JSON type. Always `string` in the Nango format.
-    #[serde(default, rename = "type")]
+    #[serde(default, rename = "type", deserialize_with = "de_opt_string")]
     pub kind: Option<String>,
     /// A short title.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_string")]
     pub title: Option<String>,
     /// A description.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_string")]
     pub description: Option<String>,
     /// An example value.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_string")]
     pub example: Option<String>,
     /// A regular expression that the value must match.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_string")]
     pub pattern: Option<String>,
     /// `true` when the field can be empty.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_bool")]
     pub optional: Option<bool>,
     /// A format: `hostname`, `uri`, `uuid` or `email`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_string")]
     pub format: Option<String>,
     /// A default value.
     #[serde(default, deserialize_with = "de_opt_string")]
     pub default_value: Option<String>,
     /// `true` for a secret field.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_bool")]
     pub secret: Option<bool>,
     /// `true` when San Mateo fills the field (for example from the token reply).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_bool")]
     pub automated: Option<bool>,
     /// The allowed values.
     #[serde(default, rename = "enum", deserialize_with = "de_string_vec")]
     pub allowed: Vec<String>,
     /// Text to show before the input.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_string")]
     pub prefix: Option<String>,
     /// Text to show after the input.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_string")]
     pub suffix: Option<String>,
 }
 
@@ -221,13 +234,13 @@ pub struct ProxyConfig {
     #[serde(default, deserialize_with = "de_string_map")]
     pub query: BTreeMap<String, String>,
     /// Provider retry headers.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_lenient")]
     pub retry: Option<RetryHeaders>,
-    /// The default pagination.
-    #[serde(default)]
+    /// The default pagination. A kind that San Mateo does not know gives `None`.
+    #[serde(default, deserialize_with = "de_lenient")]
     pub paginate: Option<PaginationConfig>,
     /// A check for API key and basic credentials.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_lenient")]
     pub verification: Option<Verification>,
 }
 
@@ -259,7 +272,7 @@ pub struct Provider {
     #[serde(default)]
     pub authorization_code_param_in_callback: Option<String>,
     /// The token URL.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_lenient")]
     pub token_url: Option<TokenUrl>,
     /// Extra token request parameters. Values can be templates.
     #[serde(default, deserialize_with = "de_string_map")]
@@ -277,13 +290,13 @@ pub struct Provider {
     #[serde(default, deserialize_with = "de_string_vec")]
     pub default_scopes: Vec<String>,
     /// `true` to turn off PKCE.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_bool")]
     pub disable_pkce: Option<bool>,
     /// The token request body format.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_lenient")]
     pub body_format: Option<BodyFormat>,
     /// The client auth at the token endpoint.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_lenient")]
     pub token_request_auth_method: Option<TokenAuthMethod>,
     /// A dotted path to the token object in the token reply.
     #[serde(default)]
@@ -292,7 +305,7 @@ pub struct Provider {
     #[serde(default)]
     pub expires_in_unit: Option<String>,
     /// The refresh margin in seconds.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_lenient")]
     pub token_expiration_buffer: Option<u64>,
     /// Dotted paths in the token reply to copy into the connection config.
     #[serde(default, deserialize_with = "de_string_vec")]
@@ -301,13 +314,13 @@ pub struct Provider {
     #[serde(default, deserialize_with = "de_string_vec")]
     pub redirect_uri_metadata: Vec<String>,
     /// The proxy block.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_lenient")]
     pub proxy: Option<ProxyConfig>,
     /// Connection config fields.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_schema_map")]
     pub connection_config: BTreeMap<String, FieldSchema>,
     /// Credential fields.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_schema_map")]
     pub credentials: BTreeMap<String, FieldSchema>,
     /// Legacy list of connection config field names.
     #[serde(default, deserialize_with = "de_string_vec")]
@@ -318,38 +331,47 @@ impl Provider {
     /// Returns the token URL template for `mode`.
     #[must_use]
     pub fn token_url_for(&self, mode: &AuthMode) -> Option<&str> {
-        let _ = mode;
-        todo!()
+        match self.token_url.as_ref()? {
+            TokenUrl::One(u) => Some(u),
+            TokenUrl::ByMode(m) => {
+                let key = match mode {
+                    AuthMode::OAuth2ClientCredentials => "OAUTH2CC",
+                    other => other.as_str(),
+                };
+                m.get(key).map(String::as_str)
+            }
+        }
     }
 
     /// Returns the refresh margin in ms.
     #[must_use]
     pub fn refresh_buffer_ms(&self) -> u64 {
-        todo!()
+        self.token_expiration_buffer
+            .map_or(crate::policy::DEFAULT_REFRESH_BUFFER_MS, crate::policy::secs_to_ms)
     }
 
     /// Returns the scope separator.
     #[must_use]
     pub fn scope_separator(&self) -> &str {
-        todo!()
+        self.scope_separator.as_deref().unwrap_or(" ")
     }
 
     /// Returns `true` when the authorization request uses PKCE.
     #[must_use]
     pub fn uses_pkce(&self) -> bool {
-        todo!()
+        !self.disable_pkce.unwrap_or(false)
     }
 
     /// Returns `true` when `expires_in` is in ms.
     #[must_use]
     pub fn expires_in_ms(&self) -> bool {
-        todo!()
+        self.expires_in_unit.as_deref() == Some("milliseconds")
     }
 
     /// Returns the proxy base URL template.
     #[must_use]
     pub fn base_url(&self) -> Option<&str> {
-        todo!()
+        self.proxy.as_ref()?.base_url.as_deref()
     }
 }
 
@@ -376,8 +398,28 @@ impl Catalog {
     /// [`Error::Invalid`] when the YAML does not parse, an alias is unknown or
     /// makes a loop, or an entry does not match the schema.
     pub fn from_yaml_str(yaml: &str) -> Result<Self> {
-        let _ = yaml;
-        todo!()
+        let root: serde_yaml::Value =
+            serde_yaml::from_str(yaml).map_err(|e| Error::Invalid(format!("catalog YAML: {e}")))?;
+        let entries = match root {
+            serde_yaml::Value::Mapping(m) => m,
+            serde_yaml::Value::Null => serde_yaml::Mapping::new(),
+            _ => return Err(Error::Invalid("the catalog must be a map of providers".to_owned())),
+        };
+        let mut raw = BTreeMap::new();
+        for (k, v) in entries {
+            let name = scalar_to_string(k)
+                .ok_or_else(|| Error::Invalid("a provider name is not text".to_owned()))?;
+            raw.insert(name, v);
+        }
+        let mut providers = BTreeMap::new();
+        for name in raw.keys() {
+            let merged = resolve_alias(&raw, name)?;
+            let mut p: Provider = serde_yaml::from_value(merged)
+                .map_err(|e| Error::Invalid(format!("provider {name}: {e}")))?;
+            p.name.clone_from(name);
+            providers.insert(name.clone(), Arc::new(p));
+        }
+        Ok(Self { providers })
     }
 
     /// Reads a catalog file.
@@ -386,23 +428,24 @@ impl Catalog {
     ///
     /// Fails when the file does not read or parse.
     pub fn from_yaml_file(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        let _ = path;
-        todo!()
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| Error::Invalid(format!("catalog file {}: {e}", path.display())))?;
+        Self::from_yaml_str(&text)
     }
 
     /// Adds the providers of `other`. A provider in `other` replaces one with
     /// the same name.
     #[must_use]
-    pub fn merge(self, other: Self) -> Self {
-        let _ = other;
-        todo!()
+    pub fn merge(mut self, other: Self) -> Self {
+        self.providers.extend(other.providers);
+        self
     }
 
     /// Returns a provider.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<Arc<Provider>> {
-        let _ = name;
-        todo!()
+        self.providers.get(name).cloned()
     }
 
     /// Returns a provider or [`Error::UnknownProvider`].
@@ -434,8 +477,81 @@ impl Catalog {
 
 /// Reads a string, a number or a bool as a string.
 fn scalar_to_string(v: serde_yaml::Value) -> Option<String> {
-    let _ = v;
-    todo!()
+    match v {
+        serde_yaml::Value::String(s) => Some(s),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// The deepest chain of aliases that the catalog accepts.
+const MAX_ALIAS_DEPTH: usize = 8;
+
+/// Returns the entry with its alias chain merged in (shallow, own keys win).
+fn resolve_alias(raw: &BTreeMap<String, serde_yaml::Value>, name: &str) -> Result<serde_yaml::Value> {
+    let alias_key = serde_yaml::Value::String("alias".to_owned());
+    let mut chain = vec![name.to_owned()];
+    let mut current = raw
+        .get(name)
+        .cloned()
+        .ok_or_else(|| Error::Invalid(format!("unknown provider {name}")))?;
+    loop {
+        let serde_yaml::Value::Mapping(mut own) = current else {
+            return Err(Error::Invalid(format!("provider {name} is not a map")));
+        };
+        let Some(base_name) = own.remove(&alias_key).and_then(scalar_to_string) else {
+            return Ok(serde_yaml::Value::Mapping(own));
+        };
+        if chain.contains(&base_name) || chain.len() > MAX_ALIAS_DEPTH {
+            return Err(Error::Invalid(format!("provider {name} has an alias loop")));
+        }
+        let base = raw
+            .get(&base_name)
+            .ok_or_else(|| Error::Invalid(format!("provider {name}: unknown alias {base_name}")))?;
+        let serde_yaml::Value::Mapping(mut merged) = base.clone() else {
+            return Err(Error::Invalid(format!("provider {base_name} is not a map")));
+        };
+        for (k, v) in own {
+            merged.insert(k, v);
+        }
+        chain.push(base_name);
+        current = serde_yaml::Value::Mapping(merged);
+    }
+}
+
+/// Reads a value with `T`. A value of another shape gives `None`.
+fn de_lenient<'de, D, T>(d: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let v = serde_yaml::Value::deserialize(d)?;
+    Ok(serde_yaml::from_value(v).ok())
+}
+
+fn de_schema_map<'de, D: Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<BTreeMap<String, FieldSchema>, D::Error> {
+    let v = serde_yaml::Value::deserialize(d)?;
+    let mut out = BTreeMap::new();
+    if let serde_yaml::Value::Mapping(m) = v {
+        for (k, v) in m {
+            if let (Some(k), Ok(f)) = (scalar_to_string(k), serde_yaml::from_value(v)) {
+                out.insert(k, f);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn de_opt_bool<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Option<bool>, D::Error> {
+    let v = serde_yaml::Value::deserialize(d)?;
+    Ok(match v {
+        serde_yaml::Value::Bool(b) => Some(b),
+        serde_yaml::Value::String(s) => s.parse().ok(),
+        _ => None,
+    })
 }
 
 fn de_opt_string<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Option<String>, D::Error> {
@@ -446,13 +562,24 @@ fn de_opt_string<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Option<
 fn de_string_map<'de, D: Deserializer<'de>>(
     d: D,
 ) -> std::result::Result<BTreeMap<String, String>, D::Error> {
-    let _ = d;
-    todo!()
+    let v = serde_yaml::Value::deserialize(d)?;
+    let mut out = BTreeMap::new();
+    if let serde_yaml::Value::Mapping(m) = v {
+        for (k, v) in m {
+            if let (Some(k), Some(v)) = (scalar_to_string(k), scalar_to_string(v)) {
+                out.insert(k, v);
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn de_string_vec<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Vec<String>, D::Error> {
-    let _ = d;
-    todo!()
+    let v = serde_yaml::Value::deserialize(d)?;
+    Ok(match v {
+        serde_yaml::Value::Sequence(items) => items.into_iter().filter_map(scalar_to_string).collect(),
+        other => scalar_to_string(other).into_iter().collect(),
+    })
 }
 
 fn de_string_or_vec<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Vec<String>, D::Error> {

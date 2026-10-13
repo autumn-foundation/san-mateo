@@ -1,6 +1,8 @@
 //! Records that syncs save: stable ids, keyed content hashes, change
 //! classes and cursors.
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -32,8 +34,12 @@ impl LastAction {
     /// Parses `added`, `updated` or `deleted`. Case does not matter.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
-        let _ = s;
-        todo!()
+        match s.trim().to_ascii_lowercase().as_str() {
+            "added" => Some(Self::Added),
+            "updated" => Some(Self::Updated),
+            "deleted" => Some(Self::Deleted),
+            _ => None,
+        }
     }
 }
 
@@ -64,24 +70,33 @@ pub struct RecordState {
 /// Classifies an upsert.
 #[must_use]
 pub fn classify_upsert(existing: Option<&RecordState>, new_hash: &str) -> Change {
-    let _ = (existing, new_hash);
-    todo!()
+    match existing {
+        None => Change::Added,
+        Some(s) if s.deleted => Change::Added,
+        Some(s) if s.data_hash == new_hash => Change::Unchanged,
+        Some(_) => Change::Updated,
+    }
 }
 
 /// Classifies a delete.
 #[must_use]
 pub fn classify_delete(existing: Option<&RecordState>) -> Change {
-    let _ = existing;
-    todo!()
+    match existing {
+        Some(s) if !s.deleted => Change::Deleted,
+        _ => Change::Ignored,
+    }
 }
 
 /// Returns the stable id of a record: a UUID v5 from the connection, the
 /// model and the external id.
 #[must_use]
 pub fn record_id(connection: Uuid, model: &str, external_id: &str) -> Uuid {
-    let _ = (connection, model, external_id);
-    todo!()
+    let name = crate::crypto::aad(&[&connection.to_string(), model, external_id]);
+    Uuid::new_v5(&RECORD_NAMESPACE, &name)
 }
+
+/// The UUID v5 namespace of record ids.
+const RECORD_NAMESPACE: Uuid = Uuid::from_u128(0x5a4e_4d41_5445_4f00_8000_7265_636f_7264);
 
 /// Returns the external id of a record: its `id` field (a string or a number).
 ///
@@ -89,22 +104,57 @@ pub fn record_id(connection: Uuid, model: &str, external_id: &str) -> Uuid {
 ///
 /// [`Error::Invalid`] when the field is missing, empty or of another type.
 pub fn external_id(record: &Value) -> Result<String> {
-    let _ = record;
-    todo!()
+    match record.get("id") {
+        Some(Value::String(s)) if !s.is_empty() => Ok(s.clone()),
+        Some(Value::Number(n)) => Ok(n.to_string()),
+        _ => Err(invalid("each record needs an `id` (text or number)")),
+    }
 }
 
 /// Returns JSON text with sorted object keys and no white space.
 #[must_use]
 pub fn canonical_json(value: &Value) -> String {
-    let _ = value;
-    todo!()
+    let mut out = String::new();
+    write_canonical(value, &mut out);
+    out
+}
+
+fn write_canonical(value: &Value, out: &mut String) {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (i, k) in keys.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&Value::String((*k).clone()).to_string());
+                out.push(':');
+                if let Some(v) = map.get(*k) {
+                    write_canonical(v, out);
+                }
+            }
+            out.push('}');
+        }
+        Value::Array(items) => {
+            out.push('[');
+            for (i, v) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_canonical(v, out);
+            }
+            out.push(']');
+        }
+        other => out.push_str(&other.to_string()),
+    }
 }
 
 /// Returns the keyed content hash of a record.
 #[must_use]
 pub fn data_hash(keys: &KeyRing, value: &Value) -> String {
-    let _ = (keys, value);
-    todo!()
+    keys.keyed_hash("records", canonical_json(value).as_bytes())
 }
 
 /// A position in a record list: after this `(updated_at, id)`.
@@ -120,7 +170,7 @@ impl Cursor {
     /// Encodes the cursor as base64url text.
     #[must_use]
     pub fn encode(&self) -> String {
-        todo!()
+        URL_SAFE_NO_PAD.encode(format!("{}:{}", self.updated_at_us, self.id))
     }
 
     /// Decodes a cursor.
@@ -129,8 +179,14 @@ impl Cursor {
     ///
     /// [`Error::Invalid`] when the text is not a cursor.
     pub fn decode(s: &str) -> Result<Self> {
-        let _ = s;
-        todo!()
+        let bad = || invalid("the cursor is not valid");
+        let bytes = URL_SAFE_NO_PAD.decode(s.trim()).map_err(|_| bad())?;
+        let text = String::from_utf8(bytes).map_err(|_| bad())?;
+        let (us, id) = text.split_once(':').ok_or_else(bad)?;
+        Ok(Self {
+            updated_at_us: us.parse().map_err(|_| bad())?,
+            id: Uuid::parse_str(id).map_err(|_| bad())?,
+        })
     }
 }
 
@@ -156,14 +212,21 @@ pub struct BatchOutcome {
 impl BatchOutcome {
     /// Adds one result.
     pub fn push(&mut self, external_id: String, change: Change) {
-        let _ = (external_id, change);
-        todo!()
+        match change {
+            Change::Added => self.added.push(external_id),
+            Change::Updated => self.updated.push(external_id),
+            Change::Deleted => self.deleted.push(external_id),
+            Change::Unchanged => self.unchanged.push(external_id),
+            Change::Ignored => {}
+        }
     }
 
     /// Adds the counts of `other`.
     pub fn extend(&mut self, other: Self) {
-        let _ = other;
-        todo!()
+        self.added.extend(other.added);
+        self.updated.extend(other.updated);
+        self.deleted.extend(other.deleted);
+        self.unchanged.extend(other.unchanged);
     }
 }
 
@@ -190,8 +253,11 @@ pub struct RecordQuery {
 ///
 /// [`Error::Invalid`] when the value is 0 or above [`MAX_LIMIT`].
 pub fn check_limit(limit: Option<u32>) -> Result<u32> {
-    let _ = limit;
-    todo!()
+    match limit {
+        None => Ok(DEFAULT_LIMIT),
+        Some(n) if (1..=MAX_LIMIT).contains(&n) => Ok(n),
+        Some(_) => Err(invalid(format!("the limit must be 1 to {MAX_LIMIT}"))),
+    }
 }
 
 /// Parses a filter such as `added,updated`.
@@ -200,11 +266,11 @@ pub fn check_limit(limit: Option<u32>) -> Result<u32> {
 ///
 /// [`Error::Invalid`] for an unknown action.
 pub fn parse_filter(s: &str) -> Result<Vec<LastAction>> {
-    let _ = s;
-    todo!()
+    s.split(',')
+        .map(|part| LastAction::parse(part).ok_or_else(|| invalid("the filter must be added, updated or deleted")))
+        .collect()
 }
 
-#[allow(dead_code)]
 fn invalid(msg: impl Into<String>) -> Error {
     Error::Invalid(msg.into())
 }

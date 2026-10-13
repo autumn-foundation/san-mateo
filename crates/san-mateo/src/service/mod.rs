@@ -1,9 +1,11 @@
 //! The San Mateo service. It ties the catalog, the store, the key ring, the
 //! transport, the functions and the webhooks together.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+
+use tokio_util::task::TaskTracker;
 
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
@@ -19,9 +21,16 @@ use crate::provider::Catalog;
 use crate::proxy::{ProxyRequest, ProxyResponse, ProxySettings};
 use crate::records::BatchOutcome;
 use crate::secret::Secret;
-use crate::store::{Store, SyncCounts, SyncStatus};
-use crate::transport::HttpTransport;
-use crate::webhook::WebhookSettings;
+use crate::store::{MemoryStore, Store, SyncCounts, SyncStatus};
+use crate::transport::{HttpTransport, ReqwestTransport, TransportConfig};
+use crate::webhook::{WebhookEvent, WebhookSender, WebhookSettings};
+
+mod connect;
+mod connections;
+mod functions;
+mod integrations;
+mod proxying;
+mod records;
 
 /// The prefix of a connect session token.
 pub const CONNECT_TOKEN_PREFIX: &str = "smcs_";
@@ -529,32 +538,93 @@ impl SanMateoBuilder {
     /// environment id or secret key that repeats or is empty, or a server
     /// URL that is not valid.
     pub fn build(self) -> Result<SanMateo> {
-        let _ = (
-            self.config,
-            self.catalog,
-            self.store,
-            self.keys,
-            self.transport,
-            self.clock,
-            self.entropy,
-            self.registry,
-        );
-        todo!()
+        let keys = self.keys.ok_or_else(|| invalid("a key ring is required"))?;
+        let config = self.config;
+        if config.environments.is_empty() {
+            return Err(invalid("at least one environment is required"));
+        }
+        url::Url::parse(&config.server_url).map_err(|_| invalid("the server URL is not valid"))?;
+        let mut env_by_hash = BTreeMap::new();
+        let mut ids = std::collections::BTreeSet::new();
+        for (i, env) in config.environments.iter().enumerate() {
+            if env.id.is_empty() || !ids.insert(env.id.clone()) {
+                return Err(invalid("each environment needs a unique, non-empty id"));
+            }
+            if env.secret_key.is_empty() {
+                return Err(invalid("each environment needs a secret key"));
+            }
+            if env_by_hash.insert(keys.lookup_hash(env.secret_key.expose()), i).is_some() {
+                return Err(invalid("two environments have the same secret key"));
+            }
+        }
+        let catalog = match self.catalog {
+            Some(c) => c,
+            None => Catalog::builtin()?,
+        };
+        let transport: Arc<dyn HttpTransport> = match self.transport {
+            Some(t) => t,
+            None => Arc::new(
+                ReqwestTransport::new(TransportConfig::default())
+                    .map_err(|e| Error::Internal(format!("transport: {e}")))?,
+            ),
+        };
+        let owner = self.entropy.uuid().to_string();
+        Ok(SanMateo {
+            inner: Arc::new(Inner {
+                config,
+                catalog,
+                store: self.store.unwrap_or_else(|| Arc::new(MemoryStore::new())),
+                keys,
+                webhooks: WebhookSender::new(transport.clone()),
+                transport,
+                clock: self.clock,
+                entropy: self.entropy,
+                registry: self.registry,
+                env_by_hash,
+                flights: std::sync::Mutex::new(HashMap::new()),
+                running_syncs: std::sync::Mutex::new(HashSet::new()),
+                tasks: TaskTracker::new(),
+                owner,
+            }),
+        })
     }
 }
 
-pub(crate) struct Inner {}
+pub(crate) struct Inner {
+    pub(crate) config: Config,
+    pub(crate) catalog: Catalog,
+    pub(crate) store: Arc<dyn Store>,
+    pub(crate) keys: KeyRing,
+    pub(crate) transport: Arc<dyn HttpTransport>,
+    pub(crate) clock: Arc<dyn Clock>,
+    pub(crate) entropy: Arc<dyn Entropy>,
+    pub(crate) registry: Registry,
+    pub(crate) webhooks: WebhookSender,
+    /// Environment index by the lookup hash of its secret key.
+    pub(crate) env_by_hash: BTreeMap<String, usize>,
+    /// One refresh lock for each connection, for single flight.
+    pub(crate) flights: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Syncs that run now, by (connection, sync name).
+    pub(crate) running_syncs: std::sync::Mutex<HashSet<(Uuid, String)>>,
+    /// Background tasks: webhooks and triggered syncs.
+    pub(crate) tasks: TaskTracker,
+    /// The lease owner id of this process.
+    pub(crate) owner: String,
+}
 
 /// The San Mateo service. Clone it freely: clones share state.
 #[derive(Clone)]
 pub struct SanMateo {
-    #[allow(dead_code)]
-    inner: Arc<Inner>,
+    pub(crate) inner: Arc<Inner>,
 }
 
 impl std::fmt::Debug for SanMateo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SanMateo")
+        f.debug_struct("SanMateo")
+            .field("server_url", &self.inner.config.server_url)
+            .field("environments", &self.inner.config.environments.iter().map(|e| &e.id).collect::<Vec<_>>())
+            .field("providers", &self.inner.catalog.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -568,29 +638,50 @@ impl SanMateo {
     /// Returns the catalog.
     #[must_use]
     pub fn catalog(&self) -> &Catalog {
-        todo!()
+        &self.inner.catalog
     }
 
     /// Returns the settings.
     #[must_use]
     pub fn config(&self) -> &Config {
-        todo!()
+        &self.inner.config
     }
 
     /// Returns the functions.
     #[must_use]
     pub fn registry(&self) -> &Registry {
-        todo!()
+        &self.inner.registry
     }
 
-    /// Returns the environment of a secret key.
+    /// Returns the store.
+    #[must_use]
+    pub fn store(&self) -> &Arc<dyn Store> {
+        &self.inner.store
+    }
+
+    /// Returns the environment of a secret key. The lookup uses a keyed hash
+    /// and a constant-time compare.
     ///
     /// # Errors
     ///
     /// [`Error::Unauthorized`] when no environment has the key.
     pub fn authenticate(&self, secret_key: &str) -> Result<&EnvironmentConfig> {
-        let _ = secret_key;
-        todo!()
+        let deny = || Error::Unauthorized("the secret key is not valid".to_owned());
+        if secret_key.is_empty() {
+            return Err(deny());
+        }
+        let hash = self.inner.keys.lookup_hash(secret_key);
+        let env = self
+            .inner
+            .env_by_hash
+            .get(&hash)
+            .and_then(|i| self.inner.config.environments.get(*i))
+            .ok_or_else(deny)?;
+        if crate::crypto::constant_time_eq(env.secret_key.expose().as_bytes(), secret_key.as_bytes()) {
+            Ok(env)
+        } else {
+            Err(deny())
+        }
     }
 
     /// Returns an environment.
@@ -599,464 +690,59 @@ impl SanMateo {
     ///
     /// [`Error::Invalid`] when the environment does not exist.
     pub fn environment(&self, id: &str) -> Result<&EnvironmentConfig> {
-        let _ = id;
-        todo!()
+        self.inner
+            .config
+            .environments
+            .iter()
+            .find(|e| e.id == id)
+            .ok_or_else(|| invalid(format!("unknown environment {id}")))
     }
-
-    // ------------------------------------------------------- integrations
-
-    /// Adds an integration.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownProvider`], [`Error::Conflict`], [`Error::Invalid`].
-    pub async fn create_integration(&self, env: &str, input: NewIntegration) -> Result<Integration> {
-        let _ = (env, input);
-        todo!()
-    }
-
-    /// Reads an integration.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownIntegration`].
-    pub async fn get_integration(&self, env: &str, key: &str) -> Result<Integration> {
-        let _ = (env, key);
-        todo!()
-    }
-
-    /// Lists the integrations of an environment.
-    ///
-    /// # Errors
-    ///
-    /// Store errors.
-    pub async fn list_integrations(&self, env: &str) -> Result<Vec<Integration>> {
-        let _ = env;
-        todo!()
-    }
-
-    /// Changes an integration.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownIntegration`].
-    pub async fn update_integration(
-        &self,
-        env: &str,
-        key: &str,
-        patch: IntegrationPatch,
-    ) -> Result<Integration> {
-        let _ = (env, key, patch);
-        todo!()
-    }
-
-    /// Deletes an integration and its connections.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownIntegration`].
-    pub async fn delete_integration(&self, env: &str, key: &str) -> Result<()> {
-        let _ = (env, key);
-        todo!()
-    }
-
-    // ---------------------------------------------------- connect sessions
-
-    /// Makes a connect session.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownIntegration`] for an allowed integration that does not
-    /// exist. [`Error::Invalid`] for a webhook URL that is not HTTPS.
-    pub async fn create_connect_session(
-        &self,
-        env: &str,
-        input: ConnectSessionInput,
-    ) -> Result<ConnectSessionCreated> {
-        let _ = (env, input);
-        todo!()
-    }
-
-    /// Makes a connect session that reconnects one connection.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownConnection`] when the connection does not exist.
-    pub async fn create_reconnect_session(
-        &self,
-        env: &str,
-        key: &ConnectionKey,
-        input: ConnectSessionInput,
-    ) -> Result<ConnectSessionCreated> {
-        let _ = (env, key, input);
-        todo!()
-    }
-
-    /// Reads a live connect session.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InvalidConnectSession`] when the token is unknown, wrong or expired.
-    pub async fn connect_session(&self, token: &str) -> Result<ConnectSession> {
-        let _ = token;
-        todo!()
-    }
-
-    /// Deletes a connect session.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InvalidConnectSession`].
-    pub async fn delete_connect_session(&self, token: &str) -> Result<()> {
-        let _ = token;
-        todo!()
-    }
-
-    // ---------------------------------------------------------- auth flows
-
-    /// Starts an OAuth2 flow. Returns the provider URL for the browser.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InvalidConnectSession`], [`Error::IntegrationNotAllowed`],
-    /// [`Error::UnknownIntegration`], [`Error::UnsupportedAuthMode`],
-    /// [`Error::MissingField`], [`Error::Template`].
-    pub async fn oauth_start(&self, token: &str, integration: &str, options: ConnectOptions) -> Result<String> {
-        let _ = (token, integration, options);
-        todo!()
-    }
-
-    /// Ends an OAuth2 flow with the callback query.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InvalidOAuthState`], [`Error::Provider`] when the provider
-    /// gives an error or the code exchange fails.
-    pub async fn oauth_callback(&self, query: &BTreeMap<String, String>) -> Result<Connection> {
-        let _ = query;
-        todo!()
-    }
-
-    /// Makes an API key connection.
-    ///
-    /// # Errors
-    ///
-    /// Session errors, and [`Error::Provider`] with `verification_failed`.
-    pub async fn connect_api_key(
-        &self,
-        token: &str,
-        integration: &str,
-        api_key: Secret,
-        options: ConnectOptions,
-    ) -> Result<Connection> {
-        let _ = (token, integration, api_key, options);
-        todo!()
-    }
-
-    /// Makes a Basic auth connection.
-    ///
-    /// # Errors
-    ///
-    /// Session errors, and [`Error::Provider`] with `verification_failed`.
-    pub async fn connect_basic(
-        &self,
-        token: &str,
-        integration: &str,
-        username: String,
-        password: Secret,
-        options: ConnectOptions,
-    ) -> Result<Connection> {
-        let _ = (token, integration, username, password, options);
-        todo!()
-    }
-
-    /// Makes an OAuth2 client credentials connection.
-    ///
-    /// # Errors
-    ///
-    /// Session errors, and [`Error::Provider`] with `token_exchange_failed`.
-    pub async fn connect_client_credentials(
-        &self,
-        token: &str,
-        integration: &str,
-        client_id: String,
-        client_secret: Secret,
-        options: ConnectOptions,
-    ) -> Result<Connection> {
-        let _ = (token, integration, client_id, client_secret, options);
-        todo!()
-    }
-
-    /// Makes a connection with no auth.
-    ///
-    /// # Errors
-    ///
-    /// Session errors.
-    pub async fn connect_unauthenticated(
-        &self,
-        token: &str,
-        integration: &str,
-        options: ConnectOptions,
-    ) -> Result<Connection> {
-        let _ = (token, integration, options);
-        todo!()
-    }
-
-    /// Imports a connection with known credentials.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownIntegration`], [`Error::Invalid`] when the credentials
-    /// do not match the auth mode.
-    pub async fn import_connection(&self, env: &str, input: ImportConnection) -> Result<Connection> {
-        let _ = (env, input);
-        todo!()
-    }
-
-    // --------------------------------------------------------- connections
-
-    /// Lists connections with no credentials.
-    ///
-    /// # Errors
-    ///
-    /// Store errors.
-    pub async fn list_connections(
-        &self,
-        env: &str,
-        filter: &crate::store::ConnectionFilter,
-    ) -> Result<Vec<ConnectionSummary>> {
-        let _ = (env, filter);
-        todo!()
-    }
-
-    /// Reads a connection with fresh credentials.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownConnection`], [`Error::RefreshCooldown`],
-    /// [`Error::RefreshExhausted`], [`Error::Provider`] with `refresh_failed`.
-    pub async fn get_connection(&self, env: &str, key: &ConnectionKey, options: GetOptions) -> Result<Connection> {
-        let _ = (env, key, options);
-        todo!()
-    }
-
-    /// Deletes a connection. Sends a `deletion` webhook.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownConnection`].
-    pub async fn delete_connection(&self, env: &str, key: &ConnectionKey) -> Result<()> {
-        let _ = (env, key);
-        todo!()
-    }
-
-    /// Sets the metadata (`merge = false`) or merges keys into it (`merge = true`).
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownConnection`].
-    pub async fn set_metadata(
-        &self,
-        env: &str,
-        key: &ConnectionKey,
-        metadata: Map<String, Value>,
-        merge: bool,
-    ) -> Result<Map<String, Value>> {
-        let _ = (env, key, metadata, merge);
-        todo!()
-    }
-
-    /// Changes the end user, tags or webhook URL of a connection.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownConnection`].
-    pub async fn patch_connection(&self, env: &str, key: &ConnectionKey, patch: ConnectionPatch) -> Result<()> {
-        let _ = (env, key, patch);
-        todo!()
-    }
-
-    /// Refreshes the tokens that expire before `now + within`.
-    ///
-    /// # Errors
-    ///
-    /// Store errors.
-    pub async fn refresh_due(&self, within: Duration, limit: usize) -> Result<RefreshReport> {
-        let _ = (within, limit);
-        todo!()
-    }
-
-    // --------------------------------------------------------------- proxy
-
-    /// Sends a call to the provider of a connection, with its auth.
-    ///
-    /// # Errors
-    ///
-    /// Connection errors, [`Error::ForbiddenHost`], [`Error::Upstream`],
-    /// [`Error::UpstreamTooLarge`].
-    pub async fn proxy(&self, env: &str, key: &ConnectionKey, request: ProxyRequest) -> Result<ProxyResponse> {
-        let _ = (env, key, request);
-        todo!()
-    }
-
-    /// Reads all pages of a list call and returns all records.
-    ///
-    /// # Errors
-    ///
-    /// The errors of [`Self::proxy`], and [`Error::Invalid`] when there is no
-    /// pagination config or a page is not a 2xx JSON reply.
-    pub async fn paginate(
-        &self,
-        env: &str,
-        key: &ConnectionKey,
-        request: ProxyRequest,
-        options: PaginateOptions,
-    ) -> Result<Vec<Value>> {
-        let _ = (env, key, request, options);
-        todo!()
-    }
-
-    // ------------------------------------------------------------- records
-
-    /// Saves records. Each record must have an `id`. A later record with the
-    /// same `id` in one batch replaces an earlier one.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownConnection`], [`Error::Invalid`].
-    pub async fn save_records(
-        &self,
-        env: &str,
-        key: &ConnectionKey,
-        model: &str,
-        records: Vec<Value>,
-    ) -> Result<BatchOutcome> {
-        let _ = (env, key, model, records);
-        todo!()
-    }
-
-    /// Marks records as deleted.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownConnection`], [`Error::Invalid`].
-    pub async fn delete_records(
-        &self,
-        env: &str,
-        key: &ConnectionKey,
-        model: &str,
-        records: Vec<Value>,
-    ) -> Result<BatchOutcome> {
-        let _ = (env, key, model, records);
-        todo!()
-    }
-
-    /// Reads a page of records.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownConnection`], [`Error::Invalid`].
-    pub async fn list_records(&self, env: &str, key: &ConnectionKey, request: RecordsRequest) -> Result<RecordPage> {
-        let _ = (env, key, request);
-        todo!()
-    }
-
-    // ----------------------------------------------------------- functions
-
-    /// Runs one sync for one connection now, and waits for the end.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownFunction`], [`Error::UnknownConnection`],
-    /// [`Error::Conflict`] when the sync runs already.
-    pub async fn run_sync(&self, env: &str, key: &ConnectionKey, sync_name: &str) -> Result<SyncRunReport> {
-        let _ = (env, key, sync_name);
-        todo!()
-    }
-
-    /// Starts syncs in the background. With no connection id, it starts them
-    /// for each connection of the integration.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownFunction`], [`Error::UnknownIntegration`].
-    pub async fn trigger_syncs(
-        &self,
-        env: &str,
-        integration: &str,
-        connection_id: Option<&str>,
-        syncs: &[String],
-    ) -> Result<usize> {
-        let _ = (env, integration, connection_id, syncs);
-        todo!()
-    }
-
-    /// Pauses or starts the schedule of syncs for connections.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownFunction`], [`Error::UnknownConnection`].
-    pub async fn set_sync_paused(
-        &self,
-        env: &str,
-        integration: &str,
-        connection_id: Option<&str>,
-        syncs: &[String],
-        paused: bool,
-    ) -> Result<()> {
-        let _ = (env, integration, connection_id, syncs, paused);
-        todo!()
-    }
-
-    /// Returns the sync states.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownFunction`], [`Error::UnknownIntegration`].
-    pub async fn sync_status(
-        &self,
-        env: &str,
-        integration: &str,
-        connection_id: Option<&str>,
-        syncs: &[String],
-    ) -> Result<Vec<SyncStatusEntry>> {
-        let _ = (env, integration, connection_id, syncs);
-        todo!()
-    }
-
-    /// Runs the auto-start syncs that are due, in all environments.
-    ///
-    /// # Errors
-    ///
-    /// Store errors.
-    pub async fn run_due_syncs(&self) -> Result<Vec<SyncRunReport>> {
-        todo!()
-    }
-
-    /// Runs an action and returns its output.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownFunction`], [`Error::UnknownConnection`], and the
-    /// errors of the action.
-    pub async fn run_action(&self, env: &str, key: &ConnectionKey, action: &str, input: Value) -> Result<Value> {
-        let _ = (env, key, action, input);
-        todo!()
-    }
-
-    // ----------------------------------------------------------- lifecycle
 
     /// Waits for background tasks (webhooks and triggered syncs) to end.
     pub async fn flush(&self) {
-        todo!()
+        let tasks = &self.inner.tasks;
+        tasks.close();
+        tasks.wait().await;
+        tasks.reopen();
     }
 
-    /// Starts the background loops: refresh sweep, sync scheduler and session
-    /// purge. Stop them with [`Background::stop`].
-    #[must_use]
-    pub fn start_background(&self, settings: BackgroundSettings) -> Background {
-        let _ = settings;
-        todo!()
+    // -------------------------------------------------------------- helpers
+
+    /// Returns the time now, cut to whole microseconds (the store precision).
+    pub(crate) fn now(&self) -> DateTime<Utc> {
+        let t = self.inner.clock.now();
+        DateTime::<Utc>::from_timestamp_micros(t.timestamp_micros()).unwrap_or(t)
+    }
+
+    pub(crate) fn now_ms(&self) -> u64 {
+        crate::clock::to_ms(self.now())
+    }
+
+    /// Returns a URL-safe random token with `bytes` bytes of entropy.
+    pub(crate) fn random_token(&self, bytes: usize) -> String {
+        use base64::Engine as _;
+        let mut buf = vec![0_u8; bytes];
+        self.inner.entropy.fill(&mut buf);
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
+    }
+
+    pub(crate) fn connection_aad(env: &str, key: &str, connection_id: &str) -> Vec<u8> {
+        crate::crypto::aad(&["connection", env, key, connection_id])
+    }
+
+    pub(crate) fn integration_aad(env: &str, key: &str) -> Vec<u8> {
+        crate::crypto::aad(&["integration", env, key])
+    }
+
+    /// Sends an event in the background.
+    pub(crate) fn spawn_webhook(&self, env: &str, url_override: Option<String>, event: WebhookEvent) {
+        let Ok(settings) = self.environment(env).map(|e| e.webhooks.clone()) else {
+            return;
+        };
+        let sender = self.inner.webhooks.clone();
+        self.inner.tasks.spawn(async move {
+            sender.deliver(&settings, url_override.as_deref(), &event).await;
+        });
     }
 }
 
@@ -1094,12 +780,13 @@ pub struct Background {
 impl Background {
     /// Stops the loops and waits for the current tick to end.
     pub async fn stop(mut self) {
-        let _ = (&self.stop, self.task.take());
-        todo!()
+        self.stop.cancel();
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
     }
 }
 
-#[allow(dead_code)]
-fn invalid(msg: impl Into<String>) -> Error {
+pub(crate) fn invalid(msg: impl Into<String>) -> Error {
     Error::Invalid(msg.into())
 }

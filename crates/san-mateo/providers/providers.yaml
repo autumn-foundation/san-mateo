@@ -1,1 +1,575 @@
-{}
+# San Mateo built-in provider catalog.
+#
+# The format is the Nango `providers.yaml` format. The entries come from the
+# public API docs of each provider (see `docs`). They are not a copy of the
+# Nango catalog. See docs/adr/0001-clean-room-and-nango-format.md.
+#
+# To add providers, load your own file with `Catalog::from_yaml_file` and
+# merge it with `Catalog::builtin()`.
+
+# ------------------------------------------------------------------ OAUTH2
+
+airtable:
+    display_name: Airtable
+    auth_mode: OAUTH2
+    categories: [productivity, database]
+    authorization_url: https://airtable.com/oauth2/v1/authorize
+    token_url: https://airtable.com/oauth2/v1/token
+    token_request_auth_method: basic
+    proxy:
+        base_url: https://api.airtable.com
+        retry:
+            after: [retry-after]
+        paginate:
+            type: cursor
+            cursor_path_in_response: offset
+            cursor_name_in_request: offset
+            limit_name_in_request: pageSize
+            response_path: records
+    docs: https://airtable.com/developers/web/api/oauth-reference
+
+asana:
+    display_name: Asana
+    auth_mode: OAUTH2
+    categories: [productivity, ticketing]
+    authorization_url: https://app.asana.com/-/oauth_authorize
+    token_url: https://app.asana.com/-/oauth_token
+    proxy:
+        base_url: https://app.asana.com/api/1.0
+        retry:
+            after: [retry-after]
+        paginate:
+            type: cursor
+            cursor_path_in_response: next_page.offset
+            cursor_name_in_request: offset
+            limit_name_in_request: limit
+            response_path: data
+    docs: https://developers.asana.com/docs/oauth
+
+atlassian:
+    display_name: Atlassian (Jira and Confluence Cloud)
+    auth_mode: OAUTH2
+    categories: [ticketing, knowledge-base]
+    authorization_url: https://auth.atlassian.com/authorize
+    token_url: https://auth.atlassian.com/oauth/token
+    authorization_params:
+        audience: api.atlassian.com
+        prompt: consent
+    default_scopes: [offline_access]
+    proxy:
+        base_url: https://api.atlassian.com
+        retry:
+            after: [retry-after]
+    docs: https://developer.atlassian.com/cloud/jira/platform/oauth-2-3lo-apps/
+
+box:
+    display_name: Box
+    auth_mode: OAUTH2
+    categories: [storage]
+    authorization_url: https://account.box.com/api/oauth2/authorize
+    token_url: https://api.box.com/oauth2/token
+    proxy:
+        base_url: https://api.box.com
+        retry:
+            after: [retry-after]
+    docs: https://developer.box.com/guides/authentication/oauth2/
+
+discord:
+    display_name: Discord
+    auth_mode: OAUTH2
+    categories: [communication]
+    authorization_url: https://discord.com/oauth2/authorize
+    token_url: https://discord.com/api/oauth2/token
+    proxy:
+        base_url: https://discord.com/api
+        retry:
+            after: [retry-after]
+    docs: https://discord.com/developers/docs/topics/oauth2
+
+dropbox:
+    display_name: Dropbox
+    auth_mode: OAUTH2
+    categories: [storage]
+    authorization_url: https://www.dropbox.com/oauth2/authorize
+    token_url: https://api.dropboxapi.com/oauth2/token
+    authorization_params:
+        token_access_type: offline
+    proxy:
+        base_url: https://api.dropboxapi.com
+        retry:
+            after: [retry-after]
+    docs: https://developers.dropbox.com/oauth-guide
+
+github:
+    display_name: GitHub (user OAuth)
+    auth_mode: OAUTH2
+    categories: [dev-tools, ticketing]
+    authorization_url: https://github.com/login/oauth/authorize
+    token_url: https://github.com/login/oauth/access_token
+    proxy:
+        base_url: https://api.github.com
+        headers:
+            accept: application/vnd.github+json
+        retry:
+            at: [x-ratelimit-reset]
+            remaining: x-ratelimit-remaining
+            error_code: ['403', '429']
+        paginate:
+            type: link
+            link_rel_in_response_header: next
+            limit_name_in_request: per_page
+    docs: https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps
+
+gitlab:
+    display_name: GitLab
+    auth_mode: OAUTH2
+    categories: [dev-tools, ticketing]
+    authorization_url: https://gitlab.com/oauth/authorize
+    token_url: https://gitlab.com/oauth/token
+    proxy:
+        base_url: https://gitlab.com/api/v4
+        retry:
+            at: [ratelimit-reset]
+            remaining: ratelimit-remaining
+        paginate:
+            type: link
+            link_rel_in_response_header: next
+            limit_name_in_request: per_page
+    docs: https://docs.gitlab.com/ee/api/oauth2.html
+
+google:
+    display_name: Google
+    auth_mode: OAUTH2
+    categories: [productivity]
+    authorization_url: https://accounts.google.com/o/oauth2/v2/auth
+    token_url: https://oauth2.googleapis.com/token
+    authorization_params:
+        access_type: offline
+        prompt: consent
+    proxy:
+        base_url: https://www.googleapis.com
+        retry:
+            after: [retry-after]
+        paginate:
+            type: cursor
+            cursor_path_in_response: nextPageToken
+            cursor_name_in_request: pageToken
+            limit_name_in_request: maxResults
+            response_path: items
+    docs: https://developers.google.com/identity/protocols/oauth2/web-server
+
+google-calendar:
+    alias: google
+    display_name: Google Calendar
+    categories: [productivity, calendar]
+    proxy:
+        base_url: https://www.googleapis.com/calendar/v3
+        retry:
+            after: [retry-after]
+        paginate:
+            type: cursor
+            cursor_path_in_response: nextPageToken
+            cursor_name_in_request: pageToken
+            limit_name_in_request: maxResults
+            response_path: items
+    docs: https://developers.google.com/calendar/api/guides/auth
+
+hubspot:
+    display_name: HubSpot
+    auth_mode: OAUTH2
+    categories: [crm, marketing]
+    authorization_url: https://app.hubspot.com/oauth/authorize
+    token_url: https://api.hubapi.com/oauth/v1/token
+    proxy:
+        base_url: https://api.hubapi.com
+        retry:
+            remaining: x-hubspot-ratelimit-remaining
+        paginate:
+            type: cursor
+            cursor_path_in_response: paging.next.after
+            cursor_name_in_request: after
+            limit_name_in_request: limit
+            response_path: results
+    docs: https://developers.hubspot.com/docs/api/oauth-quickstart-guide
+
+intercom:
+    display_name: Intercom
+    auth_mode: OAUTH2
+    categories: [support]
+    authorization_url: https://app.intercom.com/oauth
+    token_url: https://api.intercom.io/auth/eagle/token
+    proxy:
+        base_url: https://api.intercom.io
+        retry:
+            at: [x-ratelimit-reset]
+    docs: https://developers.intercom.com/docs/build-an-integration/learn-more/authentication/setting-up-oauth
+
+linear:
+    display_name: Linear
+    auth_mode: OAUTH2
+    categories: [ticketing, dev-tools]
+    authorization_url: https://linear.app/oauth/authorize
+    token_url: https://api.linear.app/oauth/token
+    scope_separator: ','
+    default_scopes: [read]
+    proxy:
+        base_url: https://api.linear.app
+    docs: https://developers.linear.app/docs/oauth/authentication
+
+microsoft:
+    display_name: Microsoft (Graph)
+    auth_mode: OAUTH2
+    categories: [productivity]
+    authorization_url: https://login.microsoftonline.com/common/oauth2/v2.0/authorize
+    token_url: https://login.microsoftonline.com/common/oauth2/v2.0/token
+    default_scopes: [offline_access]
+    proxy:
+        base_url: https://graph.microsoft.com
+        retry:
+            after: [retry-after]
+        paginate:
+            type: link
+            link_path_in_response_body: '@odata.nextLink'
+            response_path: value
+    docs: https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow
+
+notion:
+    display_name: Notion
+    auth_mode: OAUTH2
+    categories: [knowledge-base, productivity]
+    authorization_url: https://api.notion.com/v1/oauth/authorize
+    token_url: https://api.notion.com/v1/oauth/token
+    authorization_params:
+        owner: user
+    token_request_auth_method: basic
+    body_format: json
+    disable_pkce: true
+    proxy:
+        base_url: https://api.notion.com
+        headers:
+            notion-version: '2022-06-28'
+        retry:
+            after: [retry-after]
+    docs: https://developers.notion.com/docs/authorization
+
+salesforce:
+    display_name: Salesforce
+    auth_mode: OAUTH2
+    categories: [crm]
+    authorization_url: https://${connectionConfig.hostname}/services/oauth2/authorize || https://login.salesforce.com/services/oauth2/authorize
+    token_url: https://${connectionConfig.hostname}/services/oauth2/token || https://login.salesforce.com/services/oauth2/token
+    token_response_metadata: [instance_url]
+    connection_config:
+        hostname:
+            type: string
+            title: Login host
+            description: A custom login host, for example mycompany.my.salesforce.com. Leave it empty to use login.salesforce.com.
+            pattern: '^[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)*\.(salesforce|force)\.com$'
+            optional: true
+    proxy:
+        base_url: ${connectionConfig.instance_url}
+    docs: https://help.salesforce.com/s/articleView?id=sf.remoteaccess_oauth_web_server_flow.htm
+
+slack:
+    display_name: Slack
+    auth_mode: OAUTH2
+    categories: [communication]
+    authorization_url: https://slack.com/oauth/v2/authorize
+    token_url: https://slack.com/api/oauth.v2.access
+    scope_separator: ','
+    disable_pkce: true
+    alternate_access_token_response_path: authed_user
+    token_response_metadata: [team.id, bot_user_id]
+    proxy:
+        base_url: https://slack.com/api
+        retry:
+            after: [retry-after]
+        paginate:
+            type: cursor
+            cursor_path_in_response: response_metadata.next_cursor
+            cursor_name_in_request: cursor
+            limit_name_in_request: limit
+    docs: https://api.slack.com/authentication/oauth-v2
+
+spotify:
+    display_name: Spotify
+    auth_mode: OAUTH2
+    categories: [media]
+    authorization_url: https://accounts.spotify.com/authorize
+    token_url: https://accounts.spotify.com/api/token
+    proxy:
+        base_url: https://api.spotify.com
+        retry:
+            after: [retry-after]
+    docs: https://developer.spotify.com/documentation/web-api/tutorials/code-flow
+
+xero:
+    display_name: Xero
+    auth_mode: OAUTH2
+    categories: [accounting]
+    authorization_url: https://login.xero.com/identity/connect/authorize
+    token_url: https://identity.xero.com/connect/token
+    default_scopes: [offline_access]
+    proxy:
+        base_url: https://api.xero.com
+        retry:
+            after: [retry-after]
+    docs: https://developer.xero.com/documentation/guides/oauth2/auth-flow/
+
+zendesk:
+    display_name: Zendesk
+    auth_mode: OAUTH2
+    categories: [support, ticketing]
+    authorization_url: https://${connectionConfig.subdomain}.zendesk.com/oauth/authorizations/new
+    token_url: https://${connectionConfig.subdomain}.zendesk.com/oauth/tokens
+    connection_config:
+        subdomain:
+            type: string
+            title: Zendesk subdomain
+            description: The subdomain of your Zendesk account, for example acme for acme.zendesk.com.
+            pattern: '^[a-z0-9][a-z0-9-]*$'
+            prefix: https://
+            suffix: .zendesk.com
+    proxy:
+        base_url: https://${connectionConfig.subdomain}.zendesk.com
+        retry:
+            after: [retry-after]
+    docs: https://developer.zendesk.com/documentation/ticketing/working-with-oauth/creating-and-using-oauth-tokens-with-the-api/
+
+# --------------------------------------------------------------- OAUTH2_CC
+
+paypal:
+    display_name: PayPal
+    auth_mode: OAUTH2_CC
+    categories: [payment]
+    token_url: https://api-m.paypal.com/v1/oauth2/token
+    token_request_auth_method: basic
+    proxy:
+        base_url: https://api-m.paypal.com
+    docs: https://developer.paypal.com/api/rest/authentication/
+
+paypal-sandbox:
+    alias: paypal
+    display_name: PayPal (sandbox)
+    token_url: https://api-m.sandbox.paypal.com/v1/oauth2/token
+    proxy:
+        base_url: https://api-m.sandbox.paypal.com
+
+# ----------------------------------------------------------------- API_KEY
+
+airtable-pat:
+    display_name: Airtable (personal access token)
+    auth_mode: API_KEY
+    categories: [productivity, database]
+    proxy:
+        base_url: https://api.airtable.com
+        headers:
+            authorization: Bearer ${apiKey}
+        verification:
+            method: GET
+            endpoints: [/v0/meta/whoami]
+    docs: https://airtable.com/developers/web/api/authentication
+
+anthropic:
+    display_name: Anthropic
+    auth_mode: API_KEY
+    categories: [ai]
+    proxy:
+        base_url: https://api.anthropic.com
+        headers:
+            x-api-key: ${apiKey}
+            anthropic-version: '2023-06-01'
+        verification:
+            method: GET
+            endpoints: [/v1/models]
+        retry:
+            after: [retry-after]
+    docs: https://docs.anthropic.com/en/api/overview
+
+openai:
+    display_name: OpenAI
+    auth_mode: API_KEY
+    categories: [ai]
+    proxy:
+        base_url: https://api.openai.com
+        headers:
+            authorization: Bearer ${apiKey}
+        verification:
+            method: GET
+            endpoints: [/v1/models]
+        retry:
+            after: [retry-after]
+    docs: https://platform.openai.com/docs/api-reference/authentication
+
+pagerduty:
+    display_name: PagerDuty
+    auth_mode: API_KEY
+    categories: [dev-tools]
+    proxy:
+        base_url: https://api.pagerduty.com
+        headers:
+            authorization: Token token=${apiKey}
+            accept: application/vnd.pagerduty+json;version=2
+        verification:
+            method: GET
+            endpoints: [/abilities]
+        paginate:
+            type: offset
+            offset_name_in_request: offset
+            limit_name_in_request: limit
+    docs: https://developer.pagerduty.com/docs/authentication
+
+resend:
+    display_name: Resend
+    auth_mode: API_KEY
+    categories: [communication]
+    proxy:
+        base_url: https://api.resend.com
+        headers:
+            authorization: Bearer ${apiKey}
+        verification:
+            method: GET
+            endpoints: [/domains]
+    docs: https://resend.com/docs/api-reference/introduction
+
+sendgrid:
+    display_name: SendGrid
+    auth_mode: API_KEY
+    categories: [communication, marketing]
+    proxy:
+        base_url: https://api.sendgrid.com
+        headers:
+            authorization: Bearer ${apiKey}
+        verification:
+            method: GET
+            endpoints: [/v3/scopes]
+        retry:
+            at: [x-ratelimit-reset]
+    docs: https://www.twilio.com/docs/sendgrid/api-reference/how-to-use-the-sendgrid-v3-api/authentication
+
+stripe:
+    display_name: Stripe
+    auth_mode: API_KEY
+    categories: [payment]
+    proxy:
+        base_url: https://api.stripe.com
+        headers:
+            authorization: Bearer ${apiKey}
+        verification:
+            method: GET
+            endpoints: [/v1/balance]
+    docs: https://docs.stripe.com/api/authentication
+
+# ------------------------------------------------------------------- BASIC
+
+freshdesk:
+    display_name: Freshdesk
+    auth_mode: BASIC
+    categories: [support, ticketing]
+    connection_config:
+        subdomain:
+            type: string
+            title: Freshdesk subdomain
+            description: The subdomain of your Freshdesk account, for example acme for acme.freshdesk.com.
+            pattern: '^[a-z0-9][a-z0-9-]*$'
+    credentials:
+        username:
+            type: string
+            title: API key
+            description: Your Freshdesk API key. San Mateo sends it as the user name.
+        password:
+            type: string
+            title: Password
+            description: Any value, for example X.
+            default_value: X
+    proxy:
+        base_url: https://${connectionConfig.subdomain}.freshdesk.com/api/v2
+        verification:
+            method: GET
+            endpoints: [/agents/me]
+        retry:
+            after: [retry-after]
+    docs: https://developers.freshdesk.com/api/#authentication
+
+jira-basic:
+    display_name: Jira (API token)
+    auth_mode: BASIC
+    categories: [ticketing]
+    connection_config:
+        subdomain:
+            type: string
+            title: Site subdomain
+            description: The subdomain of your site, for example acme for acme.atlassian.net.
+            pattern: '^[a-z0-9][a-z0-9-]*$'
+    credentials:
+        username:
+            type: string
+            title: Email
+            format: email
+        password:
+            type: string
+            title: API token
+    proxy:
+        base_url: https://${connectionConfig.subdomain}.atlassian.net
+        verification:
+            method: GET
+            endpoints: [/rest/api/3/myself]
+        retry:
+            after: [retry-after]
+    docs: https://developer.atlassian.com/cloud/jira/platform/basic-auth-for-rest-apis/
+
+mailgun:
+    display_name: Mailgun
+    auth_mode: BASIC
+    categories: [communication]
+    credentials:
+        username:
+            type: string
+            title: User name
+            description: Always api.
+            default_value: api
+        password:
+            type: string
+            title: API key
+    proxy:
+        base_url: https://api.mailgun.net
+        verification:
+            method: GET
+            endpoints: [/v3/domains]
+    docs: https://documentation.mailgun.com/docs/mailgun/api-reference/authentication/
+
+twilio:
+    display_name: Twilio
+    auth_mode: BASIC
+    categories: [communication]
+    credentials:
+        username:
+            type: string
+            title: Account SID
+        password:
+            type: string
+            title: Auth token
+    proxy:
+        base_url: https://api.twilio.com
+        verification:
+            method: GET
+            endpoints: [/2010-04-01/Accounts.json]
+    docs: https://www.twilio.com/docs/usage/api#authenticate-with-http
+
+# -------------------------------------------------------------------- NONE
+
+hacker-news:
+    display_name: Hacker News
+    auth_mode: NONE
+    categories: [news]
+    proxy:
+        base_url: https://hacker-news.firebaseio.com
+    docs: https://github.com/HackerNews/API
+
+open-meteo:
+    display_name: Open-Meteo
+    auth_mode: NONE
+    categories: [weather]
+    proxy:
+        base_url: https://api.open-meteo.com
+    docs: https://open-meteo.com/en/docs

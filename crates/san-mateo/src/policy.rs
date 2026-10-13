@@ -22,36 +22,52 @@ pub const MS_PER_DAY: u64 = 86_400_000;
 /// A token is expired when it expires before `now + buffer`.
 #[must_use]
 pub const fn token_expired(now_ms: u64, expires_at_ms: u64, buffer_ms: u64) -> bool {
-    let _ = (now_ms, expires_at_ms, buffer_ms);
-    todo!()
+    if expires_at_ms <= now_ms {
+        true
+    } else {
+        expires_at_ms - now_ms < buffer_ms
+    }
 }
 
 /// Converts seconds to ms. It saturates and does not overflow.
 #[must_use]
 pub const fn secs_to_ms(secs: u64) -> u64 {
-    let _ = secs;
-    todo!()
+    if secs <= u64::MAX / 1000 {
+        secs * 1000
+    } else {
+        u64::MAX
+    }
 }
 
 /// Returns the expiry instant for `expires_in` (seconds, or ms if `in_ms`).
 #[must_use]
 pub const fn expires_at_ms(now_ms: u64, expires_in: u64, in_ms: bool) -> u64 {
-    let _ = (now_ms, expires_in, in_ms);
-    todo!()
+    let d = if in_ms {
+        expires_in
+    } else {
+        secs_to_ms(expires_in)
+    };
+    if now_ms <= u64::MAX - d {
+        now_ms + d
+    } else {
+        u64::MAX
+    }
 }
 
 /// Returns the wait until `at_ms`. A past instant gives zero.
 #[must_use]
 pub const fn wait_until_ms(now_ms: u64, at_ms: u64) -> u64 {
-    let _ = (now_ms, at_ms);
-    todo!()
+    if at_ms > now_ms {
+        at_ms - now_ms
+    } else {
+        0
+    }
 }
 
 /// Returns `true` while a session is live. It ends at `expires_at_ms`.
 #[must_use]
 pub const fn session_live(now_ms: u64, expires_at_ms: u64) -> bool {
-    let _ = (now_ms, expires_at_ms);
-    todo!()
+    now_ms < expires_at_ms
 }
 
 /// What the refresh code does next.
@@ -74,8 +90,22 @@ pub const fn refresh_gate(
     now_ms: u64,
     cooldown_ms: u64,
 ) -> Gate {
-    let _ = (force, exhausted, last_failure_ms, now_ms, cooldown_ms);
-    todo!()
+    if force {
+        return Gate::Proceed;
+    }
+    if exhausted {
+        return Gate::Exhausted;
+    }
+    match last_failure_ms {
+        Some(t) => {
+            if now_ms < t || now_ms - t < cooldown_ms {
+                Gate::Cooldown
+            } else {
+                Gate::Proceed
+            }
+        }
+        None => Gate::Proceed,
+    }
 }
 
 /// Counts a refresh failure. The count goes up at most one time each day.
@@ -87,15 +117,26 @@ pub const fn record_failure(
     today: u64,
     max_days: u32,
 ) -> (u32, bool) {
-    let _ = (attempts, last_failure_day, today, max_days);
-    todo!()
+    let same_day = match last_failure_day {
+        Some(d) => d == today,
+        None => false,
+    };
+    let next = if same_day || attempts == u32::MAX {
+        attempts
+    } else {
+        attempts + 1
+    };
+    (next, next >= max_days)
 }
 
 /// Returns the sync frequency, raised to the minimum.
 #[must_use]
 pub const fn sync_frequency_ms(requested_ms: u64) -> u64 {
-    let _ = requested_ms;
-    todo!()
+    if requested_ms < MIN_SYNC_FREQUENCY_MS {
+        MIN_SYNC_FREQUENCY_MS
+    } else {
+        requested_ms
+    }
 }
 
 /// Returns the wait in ms before retry number `attempt` (1-based).
@@ -103,8 +144,22 @@ pub const fn sync_frequency_ms(requested_ms: u64) -> u64 {
 /// The wait is `initial_ms * 2^(attempt - 1)`, capped at `cap_ms`.
 #[must_use]
 pub const fn backoff_ms(initial_ms: u64, attempt: u32, cap_ms: u64) -> u64 {
-    let _ = (initial_ms, attempt, cap_ms);
-    todo!()
+    let mut b: u64 = if initial_ms <= cap_ms {
+        initial_ms
+    } else {
+        cap_ms
+    };
+    let mut i: u32 = 1;
+    while i < attempt {
+        // At the cap or at zero, the value stays. A large `attempt` costs no time.
+        if b == cap_ms || b == 0 {
+            return b;
+        }
+        // Compare with no overflow: `cap - b <= b` is `2b >= cap`.
+        b = if cap_ms - b <= b { cap_ms } else { b * 2 };
+        i += 1;
+    }
+    b
 }
 
 /// The class of one upstream attempt.
@@ -156,8 +211,32 @@ pub const fn decide(
     header_wait_ms: Option<u64>,
     rule: &RetryRule,
 ) -> Step {
-    let _ = (outcome, attempt, idempotent, opted_in, header_wait_ms, rule);
-    todo!()
+    let retryable = match outcome {
+        Outcome::Success => false,
+        Outcome::RateLimited => true,
+        Outcome::ServerError | Outcome::NetworkError => idempotent || opted_in,
+        Outcome::ClientError => opted_in,
+    };
+    if !retryable {
+        return Step::Done;
+    }
+    let max = if rule.max_attempts < MAX_ATTEMPTS {
+        rule.max_attempts
+    } else {
+        MAX_ATTEMPTS
+    };
+    if attempt >= max {
+        return Step::GiveUp;
+    }
+    let wait = match header_wait_ms {
+        Some(w) => w,
+        None => backoff_ms(rule.initial_backoff_ms, attempt, rule.max_wait_ms),
+    };
+    if wait <= rule.max_wait_ms {
+        Step::Retry(wait)
+    } else {
+        Step::GiveUp
+    }
 }
 
 #[cfg(test)]
@@ -165,14 +244,15 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    /// Returns the body of `pub fn name`, from `first` to the closing brace,
-    /// with no comments and no white space.
-    fn body(text: &str, name: &str, first: &str) -> String {
+    /// Returns the body of `pub fn name` with no comments and no white space.
+    /// In the spec, the body starts at a line with only `{` (after `ensures`).
+    fn body(text: &str, name: &str, spec: bool) -> String {
         let at = text
             .find(&format!("pub fn {name}("))
             .or_else(|| text.find(&format!("pub const fn {name}(")))
             .unwrap_or_else(|| panic!("no fn {name}"));
-        let start = at + text[at..].find(first).unwrap_or_else(|| panic!("no {first}"));
+        let open = if spec { "\n{\n" } else { " {\n" };
+        let start = at + text[at..].find(open).unwrap_or_else(|| panic!("no body for {name}")) + open.len();
         let mut depth = 1_i32;
         let mut end = text.len();
         for (i, c) in text[start..].char_indices() {
@@ -201,18 +281,19 @@ mod tests {
     fn verus_bodies_match() {
         let spec = include_str!("../../../verus/policy.rs");
         let code = include_str!("policy.rs");
-        for (name, first) in [
-            ("token_expired", "if expires_at_ms <= now_ms"),
-            ("secs_to_ms", "if secs <= u64::MAX / 1000"),
-            ("expires_at_ms", "let d = if in_ms"),
-            ("wait_until_ms", "if at_ms > now_ms"),
-            ("session_live", "now_ms < expires_at_ms"),
-            ("refresh_gate", "if force"),
-            ("record_failure", "let same_day"),
-            ("sync_frequency_ms", "if requested_ms < MIN_SYNC_FREQUENCY_MS"),
-            ("decide", "let retryable"),
+        // `backoff_ms` has proof code in its loop. A proptest checks it.
+        for name in [
+            "token_expired",
+            "secs_to_ms",
+            "expires_at_ms",
+            "wait_until_ms",
+            "session_live",
+            "refresh_gate",
+            "record_failure",
+            "sync_frequency_ms",
+            "decide",
         ] {
-            assert_eq!(body(spec, name, first), body(code, name, first), "{name}");
+            assert_eq!(body(spec, name, true), body(code, name, false), "{name}");
         }
     }
 
@@ -225,7 +306,8 @@ mod tests {
         assert!(!token_expired(1_000, 1_500, 500));
         assert!(token_expired(u64::MAX, 0, 0));
         assert!(!token_expired(0, u64::MAX, u64::MAX - 1));
-        assert!(token_expired(0, u64::MAX, u64::MAX));
+        assert!(!token_expired(0, u64::MAX, u64::MAX));
+        assert!(token_expired(1, u64::MAX, u64::MAX));
     }
 
     #[test]

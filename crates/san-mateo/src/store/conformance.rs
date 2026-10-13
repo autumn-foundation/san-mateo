@@ -330,6 +330,8 @@ pub async fn connect_sessions(s: Arc<dyn Store>) {
     s.insert_connect_session(row.clone()).await.unwrap();
     assert_eq!(s.get_connect_session(&hash).await.unwrap(), Some(row.clone()));
     assert_eq!(s.get_connect_session("nope").await.unwrap(), None);
+    assert_eq!(s.get_connect_session_by_id(row.id).await.unwrap(), Some(row.clone()));
+    assert_eq!(s.get_connect_session_by_id(Uuid::new_v4()).await.unwrap(), None);
     assert!(s.delete_connect_session(row.id).await.unwrap());
     assert!(!s.delete_connect_session(row.id).await.unwrap());
     assert_eq!(s.get_connect_session(&hash).await.unwrap(), None);

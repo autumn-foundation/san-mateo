@@ -35,8 +35,35 @@ pub struct HttpRequest {
 
 impl std::fmt::Debug for HttpRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        todo!()
+        let headers: Vec<(&str, &str)> = self
+            .headers
+            .iter()
+            .map(|(k, v)| {
+                let v = if is_secret_header(k) { "<redacted>" } else { v.as_str() };
+                (k.as_str(), v)
+            })
+            .collect();
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("url", &redact_query(&self.url))
+            .field("headers", &headers)
+            .field("body_len", &self.body.len())
+            .finish()
+    }
+}
+
+/// Returns `true` for a header that holds a secret.
+#[must_use]
+pub fn is_secret_header(name: &str) -> bool {
+    SECRET_HEADERS.iter().any(|h| h.eq_ignore_ascii_case(name))
+}
+
+/// Returns the URL with no query, for logs. A query can hold a key.
+#[must_use]
+pub fn redact_query(url: &str) -> String {
+    match url.split_once('?') {
+        Some((base, _)) => format!("{base}?<redacted>"),
+        None => url.to_owned(),
     }
 }
 
@@ -44,15 +71,19 @@ impl HttpRequest {
     /// Makes a request with no headers and no body.
     #[must_use]
     pub fn new(method: &str, url: impl Into<String>) -> Self {
-        let _ = (method, url);
-        todo!()
+        Self {
+            method: method.to_ascii_uppercase(),
+            url: url.into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
     }
 
     /// Adds a header. The name becomes lower case.
     #[must_use]
     pub fn header(mut self, name: &str, value: impl Into<String>) -> Self {
-        let _ = (&mut self, name, value);
-        todo!()
+        self.headers.push((name.to_ascii_lowercase(), value.into()));
+        self
     }
 
     /// Sets the body.
@@ -94,15 +125,14 @@ impl HttpResponse {
     /// Makes a JSON reply.
     #[must_use]
     pub fn json(status: u16, value: &serde_json::Value) -> Self {
-        let _ = (status, value);
-        todo!()
+        Self::new(status, value.to_string()).header("content-type", "application/json")
     }
 
     /// Adds a header. The name becomes lower case.
     #[must_use]
     pub fn header(mut self, name: &str, value: impl Into<String>) -> Self {
-        let _ = (&mut self, name, value);
-        todo!()
+        self.headers.push((name.to_ascii_lowercase(), value.into()));
+        self
     }
 
     /// Returns the first value of a header. The name match ignores case.
@@ -115,8 +145,7 @@ impl HttpResponse {
 /// Returns the first value of a header. The name match ignores case.
 #[must_use]
 pub fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    let _ = (headers, name);
-    todo!()
+    headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
 }
 
 /// A transport failure with no HTTP reply.
@@ -178,26 +207,82 @@ impl ReqwestTransport {
     ///
     /// Fails when the TLS setup fails.
     pub fn new(config: TransportConfig) -> Result<Self, TransportError> {
-        let _ = config;
-        todo!()
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(config.timeout)
+            .connect_timeout(config.connect_timeout)
+            .use_rustls_tls()
+            .build()
+            .map_err(|e| TransportError::Invalid(e.without_url().to_string()))?;
+        Ok(Self {
+            client,
+            max_body_bytes: config.max_body_bytes,
+        })
+    }
+
+    fn map_error(e: reqwest::Error) -> TransportError {
+        if e.is_timeout() {
+            TransportError::Timeout
+        } else if e.is_builder() || e.is_request() && !e.is_connect() {
+            TransportError::Invalid(e.without_url().to_string())
+        } else {
+            TransportError::Connect(e.without_url().to_string())
+        }
     }
 }
 
 #[async_trait]
 impl HttpTransport for ReqwestTransport {
     async fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
-        let _ = (request, &self.client, self.max_body_bytes);
-        todo!()
+        let method = reqwest::Method::from_bytes(request.method.as_bytes())
+            .map_err(|_| TransportError::Invalid("bad HTTP method".to_owned()))?;
+        let url = reqwest::Url::parse(&request.url)
+            .map_err(|_| TransportError::Invalid("bad URL".to_owned()))?;
+        let mut builder = self.client.request(method, url);
+        for (k, v) in &request.headers {
+            let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())
+                .map_err(|_| TransportError::Invalid("bad header name".to_owned()))?;
+            let value = reqwest::header::HeaderValue::from_str(v)
+                .map_err(|_| TransportError::Invalid("bad header value".to_owned()))?;
+            builder = builder.header(name, value);
+        }
+        let mut response = builder.body(request.body).send().await.map_err(Self::map_error)?;
+        if response
+            .content_length()
+            .is_some_and(|n| n > self.max_body_bytes as u64)
+        {
+            return Err(TransportError::BodyTooLarge);
+        }
+        let status = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.as_str().to_owned(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
+            .collect();
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(Self::map_error)? {
+            if body.len() + chunk.len() > self.max_body_bytes {
+                return Err(TransportError::BodyTooLarge);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(HttpResponse { status, headers, body })
     }
 }
 
-type Script = VecDeque<Result<HttpResponse, TransportError>>;
+/// The replies of one route. `used` is `true` when the last reply has been
+/// given at least one time.
+#[derive(Debug, Default)]
+struct Script {
+    items: VecDeque<Result<HttpResponse, TransportError>>,
+    used: bool,
+}
 
 /// A fake transport for tests.
 ///
 /// Set replies with [`MemoryTransport::reply`]. A route is a method and a URL
-/// with no query. Replies for a route come in order. The last reply repeats.
-/// A request with no route gets a 404 reply.
+/// with no query. Replies for a route come in order. The last reply repeats
+/// until a new reply is added. A request with no route gets a 404 reply.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryTransport {
     routes: Arc<Mutex<HashMap<(String, String), Script>>>,
@@ -213,35 +298,67 @@ impl MemoryTransport {
 
     /// Adds a reply for `method` and `url`. The query of `url` is ignored.
     pub fn reply(&self, method: &str, url: &str, response: HttpResponse) {
-        let _ = (method, url, response);
-        todo!()
+        self.push(method, url, Ok(response));
+    }
+
+    fn push(&self, method: &str, url: &str, item: Result<HttpResponse, TransportError>) {
+        let key = (method.to_ascii_uppercase(), strip_query(url).to_owned());
+        let mut routes = lock(&self.routes);
+        let script = routes.entry(key).or_default();
+        if script.used {
+            script.items.clear();
+            script.used = false;
+        }
+        script.items.push_back(item);
     }
 
     /// Adds a failure for `method` and `url`.
     pub fn fail(&self, method: &str, url: &str, error: TransportError) {
-        let _ = (method, url, error);
-        todo!()
+        self.push(method, url, Err(error));
     }
 
     /// Returns all requests, in order.
     #[must_use]
     pub fn requests(&self) -> Vec<HttpRequest> {
-        todo!()
+        lock(&self.log).clone()
     }
 
     /// Returns the requests to a URL with no query, in order.
     #[must_use]
     pub fn requests_to(&self, url: &str) -> Vec<HttpRequest> {
-        let _ = url;
-        todo!()
+        let target = strip_query(url);
+        lock(&self.log)
+            .iter()
+            .filter(|r| strip_query(&r.url) == target)
+            .cloned()
+            .collect()
     }
+}
+
+fn strip_query(url: &str) -> &str {
+    url.split_once('?').map_or(url, |(base, _)| base)
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[async_trait]
 impl HttpTransport for MemoryTransport {
     async fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
-        let _ = (request, &self.routes, &self.log);
-        todo!()
+        let key = (request.method.clone(), strip_query(&request.url).to_owned());
+        lock(&self.log).push(request);
+        let mut routes = lock(&self.routes);
+        let Some(script) = routes.get_mut(&key) else {
+            return Ok(HttpResponse::new(404, "no route in MemoryTransport"));
+        };
+        let item = if script.items.len() > 1 {
+            script.items.pop_front()
+        } else {
+            script.used = true;
+            script.items.front().cloned()
+        };
+        item.unwrap_or_else(|| Ok(HttpResponse::new(404, "no route in MemoryTransport")))
     }
 }
 
@@ -285,7 +402,7 @@ mod tests {
         assert_eq!(send("https://a/other").await.unwrap().status, 404);
         assert_eq!(t.send(HttpRequest::new("POST", "https://a/x")).await.unwrap().status, 404);
         assert_eq!(t.requests().len(), 5);
-        assert_eq!(t.requests_to("https://a/x").len(), 3);
+        assert_eq!(t.requests_to("https://a/x").len(), 4, "all methods");
     }
 
     #[tokio::test]

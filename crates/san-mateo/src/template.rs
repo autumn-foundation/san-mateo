@@ -12,9 +12,42 @@
 //! - A value in the host part must be a host name part (`[A-Za-z0-9._-]`).
 //! - A value in the path or query is percent-encoded.
 
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::Value;
 
 use crate::error::{Error, Result};
+
+/// Characters that `encodeURIComponent` keeps: letters, digits and `-_.!~*'()`.
+const COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'!')
+    .remove(b'~')
+    .remove(b'*')
+    .remove(b'\'')
+    .remove(b'(')
+    .remove(b')');
+
+/// Percent-encodes like `encodeURIComponent`.
+#[must_use]
+pub fn encode_component(s: &str) -> String {
+    utf8_percent_encode(s, COMPONENT).to_string()
+}
+
+/// One part of a parsed template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Node {
+    Text(String),
+    Path(String),
+    Call(String, Vec<Node>),
+}
+
+/// A render failure inside one alternative.
+enum Fail {
+    Missing(String),
+    Bad(String),
+}
 
 /// Renders a template with `vars`. See the module docs.
 ///
@@ -23,8 +56,7 @@ use crate::error::{Error, Result};
 /// [`Error::Template`] when the syntax is wrong, a function is unknown, or a
 /// value is missing in all alternatives.
 pub fn render(template: &str, vars: &Value) -> Result<String> {
-    let _ = (template, vars);
-    todo!()
+    render_with(template, vars, false)
 }
 
 /// Renders a URL template with `vars`. See the module docs.
@@ -34,8 +66,20 @@ pub fn render(template: &str, vars: &Value) -> Result<String> {
 /// [`Error::Template`] for the errors of [`render`], and for a value that is
 /// not a valid host name part in the host position.
 pub fn render_url(template: &str, vars: &Value) -> Result<String> {
-    let _ = (template, vars);
-    todo!()
+    render_with(template, vars, true)
+}
+
+fn render_with(template: &str, vars: &Value, url: bool) -> Result<String> {
+    let alts = alternatives(template)?;
+    let mut missing = String::new();
+    for nodes in &alts {
+        match eval(nodes, vars, url) {
+            Ok(s) => return Ok(s),
+            Err(Fail::Missing(p)) => missing = p,
+            Err(Fail::Bad(m)) => return Err(Error::Template(m)),
+        }
+    }
+    Err(Error::Template(format!("missing value: {missing}")))
 }
 
 /// Returns `true` when the template has a `${` placeholder.
@@ -50,15 +94,221 @@ pub fn has_placeholders(template: &str) -> bool {
 ///
 /// [`Error::Template`] when the syntax is wrong.
 pub fn paths(template: &str) -> Result<Vec<String>> {
-    let _ = template;
-    todo!()
+    fn walk(nodes: &[Node], out: &mut Vec<String>) {
+        for n in nodes {
+            match n {
+                Node::Text(_) => {}
+                Node::Path(p) => out.push(p.clone()),
+                Node::Call(_, args) => walk(args, out),
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for nodes in alternatives(template)? {
+        walk(&nodes, &mut out);
+    }
+    Ok(out)
 }
 
-/// Reads a dotted path from a JSON value.
+/// Reads a dotted path from a JSON value. A key with dots (for example a
+/// token reply path) also matches.
 #[must_use]
 pub fn lookup<'a>(vars: &'a Value, path: &str) -> Option<&'a Value> {
-    let _ = (vars, path);
-    todo!()
+    let obj = vars.as_object()?;
+    if let Some(v) = obj.get(path) {
+        return Some(v);
+    }
+    let (head, rest) = path.split_once('.')?;
+    lookup(obj.get(head)?, rest)
+}
+
+/// Splits a template at top-level `||` and parses each part.
+fn alternatives(template: &str) -> Result<Vec<Vec<Node>>> {
+    let mut parts = Vec::new();
+    let mut depth = 0_usize;
+    let mut last = 0;
+    let bytes = template.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"${") {
+            depth += 1;
+            i += 2;
+            continue;
+        }
+        match bytes[i] {
+            b'}' if depth > 0 => depth -= 1,
+            b'|' if depth == 0 && bytes.get(i + 1) == Some(&b'|') => {
+                parts.push(&template[last..i]);
+                last = i + 2;
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    parts.push(&template[last..]);
+    let trim = parts.len() > 1;
+    parts
+        .into_iter()
+        .map(|p| parse(if trim { p.trim() } else { p }))
+        .collect()
+}
+
+fn syntax(msg: &str) -> Error {
+    Error::Template(format!("bad template syntax: {msg}"))
+}
+
+fn parse(s: &str) -> Result<Vec<Node>> {
+    let mut out = Vec::new();
+    let mut text = String::new();
+    let mut rest = s;
+    while let Some(at) = rest.find("${") {
+        text.push_str(&rest[..at]);
+        let inner_start = at + 2;
+        let close = matching(rest, inner_start).ok_or_else(|| syntax("a `${` has no `}`"))?;
+        if !text.is_empty() {
+            out.push(Node::Text(std::mem::take(&mut text)));
+        }
+        out.push(parse_expr(&rest[inner_start..close])?);
+        rest = &rest[close + 1..];
+    }
+    text.push_str(rest);
+    if !text.is_empty() {
+        out.push(Node::Text(text));
+    }
+    Ok(out)
+}
+
+/// Returns the index of the `}` that closes a `${` whose content starts at `start`.
+fn matching(s: &str, start: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut depth = 1_usize;
+    let mut i = start;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"${") {
+            depth += 1;
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn is_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn is_path(s: &str) -> bool {
+    s.split('.').all(|part| {
+        !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }) && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+}
+
+fn parse_expr(inner: &str) -> Result<Node> {
+    let t = inner.trim();
+    if t.is_empty() {
+        return Err(syntax("an empty `${}`"));
+    }
+    if let Some(open) = t.find('(') {
+        let name = &t[..open];
+        if t.ends_with(')') && is_ident(name) {
+            return Ok(Node::Call(name.to_owned(), parse(&t[open + 1..t.len() - 1])?));
+        }
+        return Err(syntax("a function call is not closed"));
+    }
+    if is_path(t) {
+        Ok(Node::Path(t.to_owned()))
+    } else {
+        Err(syntax("a placeholder is not a dotted path"))
+    }
+}
+
+fn value_text(vars: &Value, path: &str) -> std::result::Result<String, Fail> {
+    match lookup(vars, path) {
+        None | Some(Value::Null) => Err(Fail::Missing(path.to_owned())),
+        Some(Value::String(s)) if s.is_empty() => Err(Fail::Missing(path.to_owned())),
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(Value::Number(n)) => Ok(n.to_string()),
+        Some(Value::Bool(b)) => Ok(b.to_string()),
+        Some(_) => Err(Fail::Bad(format!("the value of {path} is not text"))),
+    }
+}
+
+fn call(name: &str, arg: &str) -> std::result::Result<String, Fail> {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let engine = &base64::engine::general_purpose::STANDARD;
+    match name {
+        "base64" => Ok(engine.encode(arg)),
+        "sha256Hex" => Ok(hex::encode(sha2::Sha256::digest(arg.as_bytes()))),
+        "sha256Base64" => Ok(engine.encode(sha2::Sha256::digest(arg.as_bytes()))),
+        _ => Err(Fail::Bad(format!("unknown template function: {name}"))),
+    }
+}
+
+fn eval_plain(nodes: &[Node], vars: &Value) -> std::result::Result<String, Fail> {
+    let mut out = String::new();
+    for n in nodes {
+        match n {
+            Node::Text(t) => out.push_str(t),
+            Node::Path(p) => out.push_str(&value_text(vars, p)?),
+            Node::Call(name, args) => out.push_str(&call(name, &eval_plain(args, vars)?)?),
+        }
+    }
+    Ok(out)
+}
+
+fn eval(nodes: &[Node], vars: &Value, url: bool) -> std::result::Result<String, Fail> {
+    if !url {
+        return eval_plain(nodes, vars);
+    }
+    let mut out = String::new();
+    for n in nodes {
+        let value = match n {
+            Node::Text(t) => {
+                out.push_str(t);
+                continue;
+            }
+            Node::Path(p) => value_text(vars, p)?,
+            Node::Call(name, args) => call(name, &eval_plain(args, vars)?)?,
+        };
+        if out.is_empty() {
+            out.push_str(&value);
+        } else if in_authority(&out) {
+            if !is_host_part(&value) {
+                return Err(Fail::Bad("a value in the host part of a URL is not a valid host name part".to_owned()));
+            }
+            out.push_str(&value);
+        } else {
+            out.push_str(&encode_component(&value));
+        }
+    }
+    Ok(out)
+}
+
+/// Returns `true` when the next char of `prefix` is in the URL authority.
+fn in_authority(prefix: &str) -> bool {
+    prefix
+        .split_once("://")
+        .is_some_and(|(_, rest)| !rest.contains(['/', '?', '#']))
+}
+
+fn is_host_part(v: &str) -> bool {
+    let edge_ok = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    !v.is_empty()
+        && !v.contains("..")
+        && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        && v.chars().next().is_some_and(edge_ok)
+        && v.chars().last().is_some_and(edge_ok)
 }
 
 #[cfg(test)]

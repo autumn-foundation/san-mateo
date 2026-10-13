@@ -3,10 +3,15 @@
 
 use std::collections::BTreeMap;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 
+use crate::clock::{from_ms, to_ms};
 use crate::error::{Error, Result};
+use crate::policy::expires_at_ms;
 use crate::provider::{BodyFormat, Provider, TokenAuthMethod};
 use crate::secret::Secret;
 use crate::transport::HttpRequest;
@@ -17,8 +22,7 @@ pub const USER_AGENT: &str = concat!("san-mateo/", env!("CARGO_PKG_VERSION"));
 /// Returns the S256 code challenge: base64url(sha256(verifier)), no padding.
 #[must_use]
 pub fn pkce_challenge(verifier: &str) -> String {
-    let _ = verifier;
-    todo!()
+    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
 /// The parts of an authorization request.
@@ -43,6 +47,18 @@ pub struct AuthorizeRequest<'a> {
     pub params: &'a BTreeMap<String, String>,
 }
 
+/// Sets `key` to `value`. An existing key keeps its position.
+fn set(list: &mut Vec<(String, String)>, key: &str, value: &str) {
+    match list.iter_mut().find(|(k, _)| k == key) {
+        Some(item) => value.clone_into(&mut item.1),
+        None => list.push((key.to_owned(), value.to_owned())),
+    }
+}
+
+fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+    items.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+}
+
 /// Builds the authorization URL.
 ///
 /// The query has `response_type=code`, `client_id`, `redirect_uri`, `scope`
@@ -53,8 +69,44 @@ pub struct AuthorizeRequest<'a> {
 ///
 /// [`Error::Template`] when the authorization URL is not a valid URL.
 pub fn authorize_url(req: &AuthorizeRequest<'_>) -> Result<String> {
-    let _ = req;
-    todo!()
+    url::Url::parse(req.authorization_url)
+        .map_err(|_| Error::Template("the authorization URL is not a valid URL".to_owned()))?;
+    let mut list = pairs(&[
+        ("response_type", "code"),
+        ("client_id", req.client_id),
+        ("redirect_uri", req.redirect_uri),
+    ]);
+    if !req.scopes.is_empty() {
+        list.push(("scope".to_owned(), req.scopes.join(req.scope_separator)));
+    }
+    list.push(("state".to_owned(), req.state.to_owned()));
+    if let Some(challenge) = req.code_challenge {
+        list.push(("code_challenge".to_owned(), challenge.to_owned()));
+        list.push(("code_challenge_method".to_owned(), "S256".to_owned()));
+    }
+    for (k, v) in req.params {
+        set(&mut list, k, v);
+    }
+    let query = list
+        .iter()
+        .map(|(k, v)| format!("{}={}", encode_component(k), encode_component(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+    let base = req.authorization_url;
+    let sep = if !base.contains('?') {
+        "?"
+    } else if base.ends_with('?') || base.ends_with('&') {
+        ""
+    } else {
+        "&"
+    };
+    Ok(format!("{base}{sep}{query}"))
+}
+
+/// Percent-encodes like `encodeURIComponent`.
+#[must_use]
+pub fn encode_component(s: &str) -> String {
+    crate::template::encode_component(s)
 }
 
 /// Returns the parameters of a code exchange.
@@ -65,8 +117,18 @@ pub fn code_exchange_params(
     code_verifier: Option<&str>,
     token_params: &BTreeMap<String, String>,
 ) -> Vec<(String, String)> {
-    let _ = (code, redirect_uri, code_verifier, token_params);
-    todo!()
+    let mut list = pairs(&[
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+    ]);
+    if let Some(v) = code_verifier {
+        list.push(("code_verifier".to_owned(), v.to_owned()));
+    }
+    for (k, v) in token_params {
+        set(&mut list, k, v);
+    }
+    list
 }
 
 /// Returns the parameters of a refresh request.
@@ -80,8 +142,17 @@ pub fn refresh_params(
     refresh_params: &BTreeMap<String, String>,
     token_params: &BTreeMap<String, String>,
 ) -> Vec<(String, String)> {
-    let _ = (refresh_token, refresh_params, token_params);
-    todo!()
+    let mut list = pairs(&[("grant_type", "refresh_token"), ("refresh_token", refresh_token)]);
+    if refresh_params.is_empty() {
+        for (k, v) in token_params.iter().filter(|(k, _)| k.as_str() != "grant_type") {
+            set(&mut list, k, v);
+        }
+    } else {
+        for (k, v) in refresh_params {
+            set(&mut list, k, v);
+        }
+    }
+    list
 }
 
 /// Returns the parameters of a client credentials request.
@@ -91,8 +162,14 @@ pub fn client_credentials_params(
     scope_separator: &str,
     token_params: &BTreeMap<String, String>,
 ) -> Vec<(String, String)> {
-    let _ = (scopes, scope_separator, token_params);
-    todo!()
+    let mut list = pairs(&[("grant_type", "client_credentials")]);
+    if !scopes.is_empty() {
+        list.push(("scope".to_owned(), scopes.join(scope_separator)));
+    }
+    for (k, v) in token_params {
+        set(&mut list, k, v);
+    }
+    list
 }
 
 /// Builds a token endpoint request.
@@ -105,10 +182,36 @@ pub fn token_request(
     url: &str,
     client_id: &str,
     client_secret: &str,
-    params: Vec<(String, String)>,
+    mut params: Vec<(String, String)>,
 ) -> HttpRequest {
-    let _ = (provider, url, client_id, client_secret, params);
-    todo!()
+    let mut req = HttpRequest::new("POST", url)
+        .header("accept", "application/json")
+        .header("user-agent", USER_AGENT);
+    if uses_basic(provider) {
+        let id: String = url::form_urlencoded::byte_serialize(client_id.as_bytes()).collect();
+        let secret: String = url::form_urlencoded::byte_serialize(client_secret.as_bytes()).collect();
+        req = req.header("authorization", format!("Basic {}", STANDARD.encode(format!("{id}:{secret}"))));
+    } else {
+        params.push(("client_id".to_owned(), client_id.to_owned()));
+        if !client_secret.is_empty() {
+            params.push(("client_secret".to_owned(), client_secret.to_owned()));
+        }
+    }
+    match body_format(provider) {
+        BodyFormat::Form => {
+            let body = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs(params.iter())
+                .finish();
+            req.header("content-type", "application/x-www-form-urlencoded")
+                .body(body.into_bytes())
+        }
+        BodyFormat::Json => {
+            let obj: serde_json::Map<String, Value> =
+                params.into_iter().map(|(k, v)| (k, Value::String(v))).collect();
+            req.header("content-type", "application/json")
+                .body(Value::Object(obj).to_string().into_bytes())
+        }
+    }
 }
 
 /// A parsed token reply.
@@ -122,6 +225,54 @@ pub struct TokenReply {
     pub expires_at: Option<DateTime<Utc>>,
     /// The reply as JSON.
     pub raw: Value,
+}
+
+/// Parses a reply body as a JSON object, or as a form.
+fn parse_body(body: &[u8]) -> Option<serde_json::Map<String, Value>> {
+    if let Ok(v) = serde_json::from_slice::<Value>(body) {
+        return v.as_object().cloned();
+    }
+    let text = std::str::from_utf8(body).ok()?;
+    if !text.contains('=') {
+        return None;
+    }
+    Some(
+        url::form_urlencoded::parse(text.as_bytes())
+            .map(|(k, v)| (k.into_owned(), Value::String(v.into_owned())))
+            .collect(),
+    )
+}
+
+fn non_empty_str(v: Option<&Value>) -> Option<&str> {
+    v.and_then(Value::as_str).filter(|s| !s.is_empty())
+}
+
+/// Reads a non-negative number from a number or a numeric string.
+fn as_count(v: &Value) -> Option<u64> {
+    match v {
+        Value::Number(n) => n.as_u64().or_else(|| {
+            let f = n.as_f64()?;
+            // The check keeps the value inside `u64`.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            (f.is_finite() && f >= 0.0 && f < 1.8e19).then(|| f as u64)
+        }),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+/// Returns the error text of a provider reply, if any. It has the provider
+/// error code and description only.
+#[must_use]
+pub fn reply_error(body: &[u8]) -> Option<String> {
+    let obj = parse_body(body)?;
+    let error = match obj.get("error")? {
+        Value::String(s) => s.clone(),
+        Value::Object(o) => non_empty_str(o.get("code")).or_else(|| non_empty_str(o.get("type")))?.to_owned(),
+        _ => return None,
+    };
+    let description = non_empty_str(obj.get("error_description")).unwrap_or("");
+    Some(if description.is_empty() { error } else { format!("{error}: {description}") })
 }
 
 /// Parses a token reply body.
@@ -144,29 +295,65 @@ pub fn parse_token_reply(
     now: DateTime<Utc>,
     code: &'static str,
 ) -> Result<TokenReply> {
-    let _ = (body, alternate_path, expires_in_ms, now, code);
-    todo!()
+    let raw = parse_body(body).ok_or_else(|| provider_error(code, "the token reply is not a JSON object"))?;
+    if raw.contains_key("error") {
+        let msg = reply_error(body).unwrap_or_else(|| "the provider gave an error".to_owned());
+        return Err(provider_error(code, msg));
+    }
+    let raw = Value::Object(raw);
+    let (token, holder) = if let Some(t) = non_empty_str(raw.get("access_token")) {
+        (t.to_owned(), &raw)
+    } else {
+        let alt = alternate_path
+            .and_then(|p| crate::template::lookup(&raw, p))
+            .ok_or_else(|| provider_error(code, "the token reply has no access token"))?;
+        match alt {
+            Value::String(s) if !s.is_empty() => (s.clone(), &raw),
+            Value::Object(o) => {
+                let t = non_empty_str(o.get("access_token"))
+                    .ok_or_else(|| provider_error(code, "the token reply has no access token"))?;
+                (t.to_owned(), alt)
+            }
+            _ => return Err(provider_error(code, "the token reply has no access token")),
+        }
+    };
+    let refresh_token = non_empty_str(holder.get("refresh_token")).map(Secret::new);
+    let expires_at = holder
+        .get("expires_at")
+        .and_then(crate::clock::parse_instant)
+        .or_else(|| {
+            let n = as_count(holder.get("expires_in")?)?;
+            Some(from_ms(expires_at_ms(to_ms(now), n, expires_in_ms)))
+        });
+    Ok(TokenReply {
+        access_token: Secret::new(token),
+        refresh_token,
+        expires_at,
+        raw,
+    })
 }
 
 /// Copies the values at `paths` from the token reply. Only strings, numbers
 /// and bools are copied. The key is the full dotted path.
 #[must_use]
 pub fn extract_metadata(raw: &Value, paths: &[String]) -> serde_json::Map<String, Value> {
-    let _ = (raw, paths);
-    todo!()
+    paths
+        .iter()
+        .filter_map(|p| match crate::template::lookup(raw, p)? {
+            v @ (Value::String(_) | Value::Number(_) | Value::Bool(_)) => Some((p.clone(), v.clone())),
+            _ => None,
+        })
+        .collect()
 }
 
-#[allow(dead_code)]
 const fn uses_basic(provider: &Provider) -> bool {
     matches!(provider.token_request_auth_method, Some(TokenAuthMethod::Basic))
 }
 
-#[allow(dead_code)]
 fn body_format(provider: &Provider) -> BodyFormat {
     provider.body_format.unwrap_or_default()
 }
 
-#[allow(dead_code)]
 fn provider_error(code: &'static str, message: impl Into<String>) -> Error {
     Error::Provider {
         code,
@@ -188,7 +375,7 @@ mod tests {
     #[test]
     fn pkce_rfc7636_vector() {
         assert_eq!(
-            pkce_challenge("dBjftJeZ4CVP-1mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         );
     }

@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::error::Result;
 use crate::model::{ConnectionKey, EndUser, IntegrationDefaults, Organization, Tags};
-use crate::records::{Change, RecordQuery};
+use crate::records::{Change, LastAction, RecordQuery};
 
 mod memory;
 pub use memory::MemoryStore;
@@ -206,6 +206,20 @@ pub struct RecordRow {
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
+impl RecordRow {
+    /// Returns the last change of the record.
+    #[must_use]
+    pub fn last_action(&self) -> LastAction {
+        if self.deleted_at.is_some() {
+            LastAction::Deleted
+        } else if self.created_at == self.updated_at {
+            LastAction::Added
+        } else {
+            LastAction::Updated
+        }
+    }
+}
+
 /// The status of a sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -319,6 +333,8 @@ pub trait Store: Send + Sync + 'static {
     async fn insert_connect_session(&self, row: ConnectSessionRow) -> Result<()>;
     /// Reads a connect session by token hash. It can be expired.
     async fn get_connect_session(&self, token_hash: &str) -> Result<Option<ConnectSessionRow>>;
+    /// Reads a connect session by id. It can be expired.
+    async fn get_connect_session_by_id(&self, id: Uuid) -> Result<Option<ConnectSessionRow>>;
     /// Deletes a connect session.
     async fn delete_connect_session(&self, id: Uuid) -> Result<bool>;
 

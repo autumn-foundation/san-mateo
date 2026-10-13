@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::provider::AuthMode;
 use crate::secret::Secret;
@@ -72,41 +72,88 @@ pub enum Credentials {
 
 impl std::fmt::Debug for Credentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        todo!()
+        // Only the mode, the expiry and the client id show. Tokens and `raw` do not.
+        let mut d = f.debug_struct("Credentials");
+        d.field("type", &self.auth_mode().as_str());
+        if let Some(t) = self.expires_at() {
+            d.field("expires_at", &t);
+        }
+        match self {
+            Self::OAuth2(c) => d.field("has_refresh_token", &c.refresh_token.is_some()),
+            Self::OAuth2ClientCredentials(c) => d.field("client_id", &c.client_id),
+            Self::Basic { username, .. } => d.field("username", username),
+            Self::ApiKey { .. } | Self::Unauthenticated => &mut d,
+        };
+        d.finish_non_exhaustive()
     }
 }
 
 impl Credentials {
     /// Returns the auth mode of these credentials.
     #[must_use]
-    pub fn auth_mode(&self) -> AuthMode {
-        todo!()
+    pub const fn auth_mode(&self) -> AuthMode {
+        match self {
+            Self::OAuth2(_) => AuthMode::OAuth2,
+            Self::OAuth2ClientCredentials(_) => AuthMode::OAuth2ClientCredentials,
+            Self::ApiKey { .. } => AuthMode::ApiKey,
+            Self::Basic { .. } => AuthMode::Basic,
+            Self::Unauthenticated => AuthMode::None,
+        }
     }
 
     /// Returns the expiry instant, if any.
     #[must_use]
-    pub fn expires_at(&self) -> Option<DateTime<Utc>> {
-        todo!()
+    pub const fn expires_at(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::OAuth2(c) => c.expires_at,
+            Self::OAuth2ClientCredentials(c) => c.expires_at,
+            _ => None,
+        }
     }
 
     /// Returns the bearer token for OAuth2 modes.
     #[must_use]
     pub fn bearer_token(&self) -> Option<&str> {
-        todo!()
+        match self {
+            Self::OAuth2(c) => Some(c.access_token.expose()),
+            Self::OAuth2ClientCredentials(c) => Some(c.token.expose()),
+            _ => None,
+        }
     }
 
     /// Returns the refresh token, if any.
     #[must_use]
     pub fn refresh_token(&self) -> Option<&str> {
-        todo!()
+        match self {
+            Self::OAuth2(c) => c.refresh_token.as_ref().map(Secret::expose),
+            _ => None,
+        }
     }
 
     /// Returns the template variables: `apiKey`, `accessToken`, `clientId`
     /// and `credentials.*`.
     #[must_use]
     pub fn template_vars(&self) -> Value {
-        todo!()
+        match self {
+            Self::OAuth2(c) => json!({
+                "accessToken": c.access_token.expose(),
+                "credentials": {"access_token": c.access_token.expose(), "raw": c.raw},
+            }),
+            Self::OAuth2ClientCredentials(c) => json!({
+                "accessToken": c.token.expose(),
+                "clientId": c.client_id,
+                "clientSecret": c.client_secret.expose(),
+                "credentials": {"token": c.token.expose(), "client_id": c.client_id, "raw": c.raw},
+            }),
+            Self::ApiKey { api_key } => json!({
+                "apiKey": api_key.expose(),
+                "credentials": {"apiKey": api_key.expose()},
+            }),
+            Self::Basic { username, password } => json!({
+                "credentials": {"username": username, "password": password.expose()},
+            }),
+            Self::Unauthenticated => json!({"credentials": {}}),
+        }
     }
 }
 

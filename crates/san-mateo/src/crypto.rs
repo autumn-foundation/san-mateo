@@ -5,6 +5,14 @@
 
 use std::collections::BTreeMap;
 
+use aes_gcm::aead::{Aead, KeyInit, Payload};
+use aes_gcm::{Aes256Gcm, Nonce};
+use base64::Engine as _;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
+
 use crate::error::{Error, Result};
 
 /// The prefix of a sealed value.
@@ -34,8 +42,11 @@ pub struct KeyRing {
 
 impl std::fmt::Debug for KeyRing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        todo!()
+        f.debug_struct("KeyRing")
+            .field("active", &self.active)
+            .field("keys", &self.keys.keys().collect::<Vec<_>>())
+            .field("lookup", &self.lookup_id)
+            .finish()
     }
 }
 
@@ -46,8 +57,14 @@ impl KeyRing {
     ///
     /// The id must be 1 to 32 chars of `[A-Za-z0-9_-]`.
     pub fn new(id: &str, key: [u8; 32]) -> Result<Self> {
-        let _ = (id, key);
-        todo!()
+        check_id(id)?;
+        let mut keys = BTreeMap::new();
+        keys.insert(id.to_owned(), Key(key));
+        Ok(Self {
+            keys,
+            active: id.to_owned(),
+            lookup_id: id.to_owned(),
+        })
     }
 
     /// Makes a ring from a base64 (standard or URL-safe) 32-byte key.
@@ -56,8 +73,7 @@ impl KeyRing {
     ///
     /// The value must decode to exactly 32 bytes. The id must be valid.
     pub fn from_base64(id: &str, key_b64: &str) -> Result<Self> {
-        let _ = (id, key_b64);
-        todo!()
+        Self::new(id, decode_key(key_b64)?)
     }
 
     /// Adds a key that can open data. The active key does not change.
@@ -65,9 +81,13 @@ impl KeyRing {
     /// # Errors
     ///
     /// The id must be valid and new.
-    pub fn with_key(self, id: &str, key: [u8; 32]) -> Result<Self> {
-        let _ = (id, key);
-        todo!()
+    pub fn with_key(mut self, id: &str, key: [u8; 32]) -> Result<Self> {
+        check_id(id)?;
+        if self.keys.contains_key(id) {
+            return Err(invalid("the key id is in the ring already"));
+        }
+        self.keys.insert(id.to_owned(), Key(key));
+        Ok(self)
     }
 
     /// Adds a base64 key that can open data.
@@ -76,8 +96,8 @@ impl KeyRing {
     ///
     /// The value must decode to exactly 32 bytes. The id must be valid and new.
     pub fn with_base64_key(self, id: &str, key_b64: &str) -> Result<Self> {
-        let _ = (id, key_b64);
-        todo!()
+        let key = decode_key(key_b64)?;
+        self.with_key(id, key)
     }
 
     /// Makes the key with `id` the active key.
@@ -85,9 +105,12 @@ impl KeyRing {
     /// # Errors
     ///
     /// The ring must hold the key.
-    pub fn activate(self, id: &str) -> Result<Self> {
-        let _ = id;
-        todo!()
+    pub fn activate(mut self, id: &str) -> Result<Self> {
+        if !self.keys.contains_key(id) {
+            return Err(invalid("the key id is not in the ring"));
+        }
+        id.clone_into(&mut self.active);
+        Ok(self)
     }
 
     /// Uses the key with `id` for lookup hashes.
@@ -95,15 +118,18 @@ impl KeyRing {
     /// # Errors
     ///
     /// The ring must hold the key.
-    pub fn lookup_with(self, id: &str) -> Result<Self> {
-        let _ = id;
-        todo!()
+    pub fn lookup_with(mut self, id: &str) -> Result<Self> {
+        if !self.keys.contains_key(id) {
+            return Err(invalid("the key id is not in the ring"));
+        }
+        id.clone_into(&mut self.lookup_id);
+        Ok(self)
     }
 
     /// Returns the id of the active key.
     #[must_use]
     pub fn active_key_id(&self) -> &str {
-        todo!()
+        &self.active
     }
 
     /// Encrypts `plaintext`. `aad` binds the value to its row.
@@ -112,8 +138,19 @@ impl KeyRing {
     ///
     /// Fails only when the cipher fails.
     pub fn seal(&self, plaintext: &[u8], aad: &[u8]) -> Result<String> {
-        let _ = (plaintext, aad);
-        todo!()
+        let key = self.keys.get(&self.active).ok_or(Error::Crypto)?;
+        let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(&key.0));
+        let mut nonce = [0_u8; 12];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+        let ct = cipher
+            .encrypt(Nonce::from_slice(&nonce), Payload { msg: plaintext, aad })
+            .map_err(|_| Error::Crypto)?;
+        Ok(format!(
+            "{SEALED_PREFIX}.{}.{}.{}",
+            self.active,
+            URL_SAFE_NO_PAD.encode(nonce),
+            URL_SAFE_NO_PAD.encode(ct)
+        ))
     }
 
     /// Decrypts a sealed value.
@@ -122,8 +159,25 @@ impl KeyRing {
     ///
     /// [`Error::Crypto`] when the format, the key id, the AAD or the tag is wrong.
     pub fn open(&self, sealed: &str, aad: &[u8]) -> Result<Vec<u8>> {
-        let _ = (sealed, aad);
-        todo!()
+        let mut parts = sealed.split('.');
+        let (Some(prefix), Some(id), Some(nonce), Some(ct), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(Error::Crypto);
+        };
+        if prefix != SEALED_PREFIX {
+            return Err(Error::Crypto);
+        }
+        let key = self.keys.get(id).ok_or(Error::Crypto)?;
+        let nonce = URL_SAFE_NO_PAD.decode(nonce).map_err(|_| Error::Crypto)?;
+        let ct = URL_SAFE_NO_PAD.decode(ct).map_err(|_| Error::Crypto)?;
+        if nonce.len() != 12 {
+            return Err(Error::Crypto);
+        }
+        let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(&key.0));
+        cipher
+            .decrypt(Nonce::from_slice(&nonce), Payload { msg: &ct, aad })
+            .map_err(|_| Error::Crypto)
     }
 
     /// Seals a value as JSON.
@@ -132,8 +186,8 @@ impl KeyRing {
     ///
     /// Fails when the value does not serialize.
     pub fn seal_json<T: serde::Serialize>(&self, value: &T, aad: &[u8]) -> Result<String> {
-        let _ = (value, aad);
-        todo!()
+        let bytes = serde_json::to_vec(value).map_err(|e| Error::Internal(format!("serialize: {e}")))?;
+        self.seal(&bytes, aad)
     }
 
     /// Opens a JSON value.
@@ -142,8 +196,8 @@ impl KeyRing {
     ///
     /// [`Error::Crypto`] when the value does not open or does not parse.
     pub fn open_json<T: serde::de::DeserializeOwned>(&self, sealed: &str, aad: &[u8]) -> Result<T> {
-        let _ = (sealed, aad);
-        todo!()
+        let bytes = self.open(sealed, aad)?;
+        serde_json::from_slice(&bytes).map_err(|_| Error::Crypto)
     }
 
     /// Returns the hex HMAC-SHA256 of `value` with the lookup key.
@@ -151,8 +205,7 @@ impl KeyRing {
     /// Use it to find high-entropy tokens. Do not use it for passwords.
     #[must_use]
     pub fn lookup_hash(&self, value: &str) -> String {
-        let _ = value;
-        todo!()
+        hex::encode(hmac(&self.lookup_key(), value.as_bytes()))
     }
 
     /// Returns the hex HMAC-SHA256 of `data` with a key for `purpose`.
@@ -161,28 +214,61 @@ impl KeyRing {
     /// its own key.
     #[must_use]
     pub fn keyed_hash(&self, purpose: &str, data: &[u8]) -> String {
-        let _ = (purpose, data);
-        todo!()
+        let key = hmac(&self.lookup_key(), format!("purpose:{purpose}").as_bytes());
+        hex::encode(hmac(&key, data))
     }
+
+    fn lookup_key(&self) -> [u8; 32] {
+        // `lookup_with` and `new` make sure that the ring holds the lookup id.
+        let base = self.keys.get(&self.lookup_id).map_or([0_u8; 32], |k| k.0);
+        hmac(&base, b"san-mateo/lookup/v1")
+    }
+}
+
+fn hmac(key: &[u8], data: &[u8]) -> [u8; 32] {
+    // HMAC accepts a key of any length.
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).unwrap_or_else(|_| unreachable!());
+    mac.update(data);
+    mac.finalize().into_bytes().into()
+}
+
+fn check_id(id: &str) -> Result<()> {
+    let ok = !id.is_empty()
+        && id.len() <= 32
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if ok { Ok(()) } else { Err(invalid("a key id must be 1 to 32 chars of [A-Za-z0-9_-]")) }
+}
+
+fn decode_key(key_b64: &str) -> Result<[u8; 32]> {
+    let t = key_b64.trim();
+    let bytes = STANDARD
+        .decode(t)
+        .or_else(|_| URL_SAFE_NO_PAD.decode(t))
+        .or_else(|_| URL_SAFE.decode(t))
+        .map_err(|_| invalid("the key is not base64"))?;
+    <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| invalid("the key must be 32 bytes"))
 }
 
 /// Returns `true` when `a` and `b` are equal. The time does not depend on the
 /// position of the first difference.
 #[must_use]
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let _ = (a, b);
-    todo!()
+    a.ct_eq(b).into()
 }
 
 /// Builds an AAD from parts. Each part has a length prefix, so different
 /// parts never give the same AAD.
 #[must_use]
 pub fn aad(parts: &[&str]) -> Vec<u8> {
-    let _ = parts;
-    todo!()
+    let mut out = Vec::new();
+    for p in parts {
+        let len = u32::try_from(p.len()).unwrap_or(u32::MAX);
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(p.as_bytes());
+    }
+    out
 }
 
-#[allow(dead_code)]
 fn invalid(msg: &str) -> Error {
     Error::Invalid(msg.to_owned())
 }

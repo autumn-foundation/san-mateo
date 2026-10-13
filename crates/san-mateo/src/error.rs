@@ -91,19 +91,66 @@ impl Error {
     /// Returns the stable error code for the API.
     #[must_use]
     pub const fn code(&self) -> &'static str {
-        todo!()
+        match self {
+            Self::Unauthorized(_) => "unauthorized",
+            Self::InvalidConnectSession => "invalid_connect_session",
+            Self::InvalidOAuthState => "invalid_oauth_state",
+            Self::UnknownProvider(_) => "unknown_provider",
+            Self::UnknownIntegration(_) => "unknown_provider_config",
+            Self::UnknownConnection(_) => "unknown_connection",
+            Self::Invalid(_) => "invalid_body",
+            Self::MissingField(_) => "missing_field",
+            Self::UnsupportedAuthMode(_) => "unsupported_auth_mode",
+            Self::IntegrationNotAllowed(_) => "integration_not_allowed",
+            Self::Template(_) => "invalid_template",
+            Self::ForbiddenHost(_) => "forbidden_host",
+            Self::Conflict(_) => "conflict",
+            Self::Provider { code, .. } => code,
+            Self::RefreshExhausted => "connection_refresh_exhausted",
+            Self::RefreshCooldown => "connection_refresh_backoff",
+            Self::Upstream(_) => "upstream_error",
+            Self::UpstreamTooLarge => "upstream_body_too_large",
+            Self::UnknownFunction(_) => "unknown_function",
+            Self::Function(_) => "function_failed",
+            Self::Crypto => "decryption_failed",
+            Self::Store(_) => "store_error",
+            Self::Internal(_) => "server_error",
+        }
     }
 
     /// Returns the HTTP status for the API.
     #[must_use]
     pub const fn status(&self) -> u16 {
-        todo!()
+        match self {
+            Self::Unauthorized(_) | Self::InvalidConnectSession => 401,
+            Self::InvalidOAuthState
+            | Self::Invalid(_)
+            | Self::MissingField(_)
+            | Self::UnsupportedAuthMode(_)
+            | Self::Template(_) => 400,
+            Self::IntegrationNotAllowed(_) | Self::ForbiddenHost(_) => 403,
+            Self::UnknownProvider(_)
+            | Self::UnknownIntegration(_)
+            | Self::UnknownConnection(_)
+            | Self::UnknownFunction(_) => 404,
+            Self::Conflict(_) => 409,
+            Self::RefreshExhausted | Self::RefreshCooldown => 424,
+            Self::Provider { .. } | Self::Upstream(_) | Self::UpstreamTooLarge => 502,
+            Self::Function(_) | Self::Crypto | Self::Store(_) | Self::Internal(_) => 500,
+        }
     }
 
     /// Returns `true` when a later attempt can succeed.
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
-        todo!()
+        match self {
+            Self::Upstream(_) | Self::RefreshCooldown | Self::Store(_) => true,
+            Self::Provider { status, .. } => match status {
+                Some(s) => *s >= 500 || *s == 408 || *s == 425 || *s == 429,
+                None => true,
+            },
+            _ => false,
+        }
     }
 }
 

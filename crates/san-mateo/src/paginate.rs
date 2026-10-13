@@ -73,7 +73,19 @@ impl PaginationConfig {
     /// Returns the dotted path to the records.
     #[must_use]
     pub fn response_path(&self) -> Option<&str> {
-        todo!()
+        match self {
+            Self::Cursor { response_path, .. }
+            | Self::Link { response_path, .. }
+            | Self::Offset { response_path, .. } => response_path.as_deref(),
+        }
+    }
+
+    fn limit_name(&self) -> Option<&str> {
+        match self {
+            Self::Cursor { limit_name_in_request, .. }
+            | Self::Link { limit_name_in_request, .. }
+            | Self::Offset { limit_name_in_request, .. } => limit_name_in_request.as_deref(),
+        }
     }
 }
 
@@ -100,21 +112,87 @@ impl Paginator {
     /// Makes a paginator. `limit` is the page size to ask for.
     #[must_use]
     pub fn new(config: PaginationConfig, limit: Option<u64>) -> Self {
-        let _ = (config, limit);
-        todo!()
+        let offset = match &config {
+            PaginationConfig::Offset { offset_start_value, .. } => offset_start_value.unwrap_or(0),
+            _ => 0,
+        };
+        Self {
+            config,
+            limit,
+            offset,
+            last_link: None,
+        }
+    }
+
+    fn limit_param(&self) -> Option<(String, String)> {
+        Some((self.config.limit_name()?.to_owned(), self.limit?.to_string()))
     }
 
     /// Returns the query for the first page.
     #[must_use]
     pub fn first(&self) -> PageQuery {
-        todo!()
+        let mut params = Vec::new();
+        if let PaginationConfig::Offset { offset_name_in_request, .. } = &self.config {
+            params.push((offset_name_in_request.clone(), self.offset.to_string()));
+        }
+        params.extend(self.limit_param());
+        PageQuery { params, link: None }
     }
 
     /// Reads a page reply. Returns the query for the next page, or `None` at
     /// the end.
     pub fn advance(&mut self, headers: &[(String, String)], body: &Value) -> Option<PageQuery> {
-        let _ = (headers, body);
-        todo!()
+        let count = self.records(body).len();
+        match &self.config {
+            PaginationConfig::Cursor { cursor_path_in_response, cursor_name_in_request, .. } => {
+                if count == 0 {
+                    return None;
+                }
+                let next = match crate::template::lookup(body, cursor_path_in_response)? {
+                    Value::String(s) if !s.is_empty() => s.clone(),
+                    Value::Number(n) => n.to_string(),
+                    _ => return None,
+                };
+                let mut params = vec![(cursor_name_in_request.clone(), next)];
+                params.extend(self.limit_param());
+                Some(PageQuery { params, link: None })
+            }
+            PaginationConfig::Link { link_rel_in_response_header, link_path_in_response_body, .. } => {
+                let rel = link_rel_in_response_header.as_deref().unwrap_or("next");
+                let from_body = link_path_in_response_body
+                    .as_deref()
+                    .and_then(|p| crate::template::lookup(body, p))
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let next = from_body.or_else(|| {
+                    crate::transport::header_value(headers, "link").and_then(|h| parse_link_header(h, rel))
+                })?;
+                if self.last_link.as_deref() == Some(next.as_str()) {
+                    return None;
+                }
+                self.last_link = Some(next.clone());
+                Some(PageQuery { params: Vec::new(), link: Some(next) })
+            }
+            PaginationConfig::Offset { offset_name_in_request, offset_calculation_method, .. } => {
+                if count == 0 {
+                    return None;
+                }
+                if let Some(limit) = self.limit {
+                    if (count as u64) < limit {
+                        return None;
+                    }
+                }
+                let step = match offset_calculation_method.unwrap_or_default() {
+                    OffsetMethod::ByResponseSize => count as u64,
+                    OffsetMethod::PerPage => 1,
+                };
+                self.offset = self.offset.saturating_add(step);
+                let mut params = vec![(offset_name_in_request.clone(), self.offset.to_string())];
+                params.extend(self.limit_param());
+                Some(PageQuery { params, link: None })
+            }
+        }
     }
 
     /// Returns the records of a page reply.
@@ -128,15 +206,39 @@ impl Paginator {
 /// A value that is not an array gives no records.
 #[must_use]
 pub fn records_from(body: &Value, path: Option<&str>) -> Vec<Value> {
-    let _ = (body, path);
-    todo!()
+    let target = match path {
+        Some(p) => crate::template::lookup(body, p),
+        None => Some(body),
+    };
+    match target {
+        Some(Value::Array(items)) => items.clone(),
+        _ => Vec::new(),
+    }
 }
 
 /// Returns the URL with `rel` from an RFC 8288 `Link` header value.
 #[must_use]
 pub fn parse_link_header(value: &str, rel: &str) -> Option<String> {
-    let _ = (value, rel);
-    todo!()
+    for link in value.split(',') {
+        let mut parts = link.split(';');
+        let Some(target) = parts.next().map(str::trim) else {
+            continue;
+        };
+        let Some(url) = target.strip_prefix('<').and_then(|t| t.strip_suffix('>')) else {
+            continue;
+        };
+        let has_rel = parts.any(|p| {
+            let p = p.trim();
+            p.strip_prefix("rel")
+                .map(str::trim_start)
+                .and_then(|p| p.strip_prefix('='))
+                .is_some_and(|v| v.trim().trim_matches('"').split_whitespace().any(|r| r.eq_ignore_ascii_case(rel)))
+        });
+        if has_rel {
+            return Some(url.to_owned());
+        }
+    }
+    None
 }
 
 #[cfg(test)]

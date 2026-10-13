@@ -6,14 +6,16 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
+use hmac::{Hmac, Mac};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
+use sha2::Sha256;
 
 use crate::model::{EndUser, Tags};
 use crate::secret::Secret;
 use crate::store::SyncCounts;
-use crate::transport::HttpTransport;
+use crate::transport::{HttpRequest, HttpTransport};
 
 /// The San Mateo signature header.
 pub const SIGNATURE_HEADER: &str = "x-san-mateo-hmac-sha256";
@@ -136,29 +138,101 @@ impl WebhookEvent {
     /// Returns the event as JSON, with Nango-compatible camelCase keys.
     #[must_use]
     pub fn to_json(&self) -> Value {
-        todo!()
+        let mut v = match self {
+            Self::Auth(e) => {
+                let mut v = json!({
+                    "from": "san-mateo",
+                    "type": "auth",
+                    "connectionId": e.connection_id,
+                    "providerConfigKey": e.provider_config_key,
+                    "provider": e.provider,
+                    "authMode": e.auth_mode,
+                    "environment": e.environment,
+                    "operation": e.operation,
+                    "success": e.success,
+                });
+                if !e.tags.is_empty() {
+                    v["tags"] = json!(e.tags);
+                }
+                if let Some(u) = &e.end_user {
+                    let mut user = json!({"endUserId": u.id, "tags": u.tags});
+                    if let Some(email) = &u.email {
+                        user["endUserEmail"] = json!(email);
+                    }
+                    if let Some(org) = &u.organization {
+                        user["organizationId"] = json!(org.id);
+                    }
+                    v["endUser"] = user;
+                }
+                if let Some(err) = &e.error {
+                    v["error"] = json!(err);
+                }
+                v
+            }
+            Self::Sync(e) => {
+                let mut v = json!({
+                    "from": "san-mateo",
+                    "type": "sync",
+                    "connectionId": e.connection_id,
+                    "providerConfigKey": e.provider_config_key,
+                    "syncName": e.sync_name,
+                    "model": e.models.first().cloned().unwrap_or_default(),
+                    "models": e.models,
+                    "syncType": "INCREMENTAL",
+                    "success": e.success,
+                    "modifiedAfter": e.modified_after.to_rfc3339_opts(SecondsFormat::AutoSi, true),
+                    "responseResults": e.counts,
+                });
+                if let Some(err) = &e.error {
+                    v["error"] = json!(err);
+                }
+                v
+            }
+        };
+        if let Value::Object(m) = &mut v {
+            m.retain(|_, x| !x.is_null());
+        }
+        v
     }
 
     /// Returns the body bytes: JSON with sorted keys.
     #[must_use]
     pub fn body(&self) -> Vec<u8> {
-        todo!()
+        crate::records::canonical_json(&self.to_json()).into_bytes()
+    }
+
+    const fn wanted(&self, settings: &WebhookSettings) -> bool {
+        match self {
+            Self::Auth(_) => settings.send_auth,
+            Self::Sync(_) => settings.send_sync,
+        }
     }
 }
 
 /// Returns the hex HMAC-SHA256 of `body` with `secret`.
 #[must_use]
 pub fn sign(secret: &str, body: &[u8]) -> String {
-    let _ = (secret, body);
-    todo!()
+    hex::encode(hmac_sha256(secret.as_bytes(), body))
+}
+
+fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    // HMAC accepts a key of any length.
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).unwrap_or_else(|_| unreachable!());
+    mac.update(data);
+    mac.finalize().into_bytes().into()
 }
 
 /// Checks a signature. The compare takes constant time. An empty secret
 /// never verifies.
 #[must_use]
 pub fn verify(secret: &str, body: &[u8], signature_hex: &str) -> bool {
-    let _ = (secret, body, signature_hex);
-    todo!()
+    if secret.is_empty() {
+        return false;
+    }
+    let Ok(given) = hex::decode(signature_hex.trim()) else {
+        return false;
+    };
+    crate::crypto::constant_time_eq(&hmac_sha256(secret.as_bytes(), body), &given)
 }
 
 /// The result of one delivery to one URL.
@@ -201,8 +275,52 @@ impl WebhookSender {
         url_override: Option<&str>,
         event: &WebhookEvent,
     ) -> Vec<Delivery> {
-        let _ = (settings, url_override, event, &self.transport);
-        todo!()
+        if !event.wanted(settings) {
+            return Vec::new();
+        }
+        let urls: Vec<&str> = match url_override {
+            Some(u) => vec![u],
+            None => [&settings.primary_url, &settings.secondary_url]
+                .into_iter()
+                .filter_map(|u| u.as_deref())
+                .filter(|u| !u.is_empty())
+                .collect(),
+        };
+        let body = event.body();
+        let mut request = HttpRequest::new("POST", "")
+            .header("content-type", "application/json")
+            .header("user-agent", crate::oauth2::USER_AGENT)
+            .body(body.clone());
+        if let Some(secret) = settings.signing_secret.as_ref().filter(|s| !s.is_empty()) {
+            let sig = sign(secret.expose(), &body);
+            request = request.header(SIGNATURE_HEADER, sig.clone()).header(NANGO_SIGNATURE_HEADER, sig);
+        }
+        let sends = urls.into_iter().map(|url| {
+            let mut req = request.clone();
+            url.clone_into(&mut req.url);
+            self.deliver_one(settings, req)
+        });
+        futures::future::join_all(sends).await
+    }
+
+    async fn deliver_one(&self, settings: &WebhookSettings, request: HttpRequest) -> Delivery {
+        let mut attempts = 0_u32;
+        loop {
+            attempts += 1;
+            let (status, retryable) = match self.transport.send(request.clone()).await {
+                Ok(r) => (Some(r.status), r.status == 429 || r.status >= 500),
+                Err(_) => (None, true),
+            };
+            let ok = status.is_some_and(|s| (200..300).contains(&s));
+            if ok || !retryable || attempts > settings.retries {
+                if !ok {
+                    tracing::warn!(url = %crate::transport::redact_query(&request.url), ?status, attempts, "webhook delivery failed");
+                }
+                return Delivery { url: request.url, status, attempts, ok };
+            }
+            let wait = crate::policy::backoff_ms(settings.initial_backoff_ms, attempts, 60_000);
+            tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+        }
     }
 }
 
