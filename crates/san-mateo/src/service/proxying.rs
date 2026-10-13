@@ -30,8 +30,10 @@ impl SanMateo {
         conn: &Connection,
         provider: &Provider,
         request: &ProxyRequest,
+        client: (Option<&str>, Option<&str>),
     ) -> Result<Prepared> {
-        let vars = Self::vars_for(&conn.credentials, &conn.connection_config, &conn.metadata);
+        let mut vars = Self::vars_for(&conn.credentials, &conn.connection_config, &conn.metadata);
+        crate::credentials::add_client_vars(&mut vars, client.0, client.1);
         let provider_base = provider
             .base_url()
             .map(|b| crate::template::render_url(b, &vars))
@@ -90,7 +92,21 @@ impl SanMateo {
         let mut conn = self.get_connection(env, key, GetOptions::default()).await?;
         let provider = self.catalog().require(&conn.provider)?;
         let retry = provider.proxy.as_ref().and_then(|p| p.retry.as_ref());
-        let mut prepared = self.prepare(&conn, &provider, &request)?;
+        // OAuth2 templates can use the integration client, as in Nango. Client
+        // credentials connections hold their own client.
+        let (client_id, client_secret) =
+            if matches!(conn.credentials, crate::Credentials::OAuth2(_)) {
+                let integration = self.integration_row(env, &key.provider_config_key).await?;
+                let secret = self.client_secret(&integration)?;
+                (integration.client_id, secret)
+            } else {
+                (None, None)
+            };
+        let client = (
+            client_id.as_deref(),
+            client_secret.as_ref().map(crate::secret::Secret::expose),
+        );
+        let mut prepared = self.prepare(&conn, &provider, &request, client)?;
         let idempotent = px::is_idempotent(&request.method);
         let rule = RetryRule {
             max_attempts: request.retries.saturating_add(1),
@@ -112,7 +128,7 @@ impl SanMateo {
                             self.refresh(env, key, RefreshMode::Rejected).await
                         {
                             conn = Self::to_connection(row, creds);
-                            prepared = self.prepare(&conn, &provider, &request)?;
+                            prepared = self.prepare(&conn, &provider, &request, client)?;
                             continue;
                         }
                     }

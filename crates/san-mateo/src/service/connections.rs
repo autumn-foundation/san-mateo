@@ -628,7 +628,8 @@ impl SanMateo {
                 let fresh = self
                     .client_credentials_token(
                         provider,
-                        &integration.scopes,
+                        // The same scopes as the first token request.
+                        &Self::requested_scopes(&integration, provider),
                         &cfg,
                         &old.client_id,
                         &old.client_secret,

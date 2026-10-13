@@ -533,7 +533,7 @@ async fn optional_template_values_are_left_out() {
     assert_eq!(sent.header_value("x-login-customer-id"), Some("123"));
 }
 
-/// Nango OAuth2 templates such as `${clientId}:${clientSecret}` read the
+/// Nango `OAuth2` templates such as `${clientId}:${clientSecret}` read the
 /// integration client.
 #[tokio::test]
 async fn oauth_templates_see_the_integration_client() {
