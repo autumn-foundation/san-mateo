@@ -19,7 +19,7 @@ Style for all docs and comments: ASD-STE100.
 | `crates/san-mateo-postgres` | `PgStore` (diesel-async) and SQL migrations. |
 | `crates/san-mateo-server` | The `san-mateo` binary. Env config. |
 | `crates/autumn-plugin-san-mateo` | autumn-web 0.9 plugin. |
-| `crates/san-mateo-harvest` | autumn-harvest 0.7 activities and workflows. |
+| `crates/san-mateo-harvest` | autumn-harvest 0.8 activities and workflows. |
 | `crates/san-mateo-camel` | rust-camel 0.57 `san-mateo:` component. |
 | `crates/*/examples/` | Runnable examples: `embedded`, `autumn_app`, `harvest_workflow`. |
 | `examples/harvest-camel` | The `harvest_camel` example. A separate workspace (ADR 0006). |

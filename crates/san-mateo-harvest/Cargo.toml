@@ -1,7 +1,8 @@
 [package]
 name = "san-mateo-harvest"
 description = "autumn-harvest activities and workflows for San Mateo: proxy calls, token refresh and durable syncs"
-version.workspace = true
+# Ahead of the workspace: 0.2 moves to autumn-harvest 0.8.
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -12,14 +13,14 @@ categories = ["asynchronous", "authentication"]
 
 [dependencies]
 san-mateo.workspace = true
-autumn-harvest = "0.7.0"
+autumn-harvest = "0.8.0"
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-autumn-harvest = { version = "0.7.0", features = ["testing"] }
+autumn-harvest = { version = "0.8.0", features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
 
 # With `test = true`, `cargo test` runs the tests in the example. The
