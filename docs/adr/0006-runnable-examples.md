@@ -30,8 +30,9 @@ harvest-camel route. Example code that no job runs can rot.
   `examples/harvest-camel`. harvest-camel needs `autumn-harvest-plugin`,
   which turns on the autumn-web default features (C builds of libpq and
   SQLite). In the main workspace, these features would go into all builds.
-- harvest-camel is not on crates.io. The example pins a full git `rev` with
-  camel 0.57.
+- harvest-camel was not on crates.io at first. The example pinned a full
+  git `rev` with camel 0.57. Since harvest-camel 0.2.0 (2026-10-31), the
+  example uses the crates.io release.
 
 ## Results
 

@@ -70,7 +70,7 @@ an example file.
 | EX11 Guard | Done | `core/t/examples_wired.rs`: 4 tests. Mutations M10, M11. |
 | EX12 Docs | Done | README "Examples" and the ecosystem notes, CLAUDE.md, `docs/examples-plan.md`, ADR 0006, crate docs. The README `rust` and `rust,no_run` blocks compile as doc tests of `server/src/lib.rs` (mutation M12). No doc says that a harvest-camel context cannot hold the component. The research row of the plan records the start state (camel 0.55). The queue limit of the library workflows is in the README, the `san-mateo-harvest` docs and "Known limits". |
 | EX13 TDD | Done | RED `9c9ce53`: each example test failed ("not yet"), the guard failed ("CI does not run …"), the smoke script failed ("the app stopped at boot"). GREEN `c584992`. REFACTOR `499353c`. Review fixes `d33131e`: the key guard test of `hc/` failed first (the route sent the POST and got a retryable 503), then passed. |
-| EX14 harvest-camel pin | Done | harvest-camel PRs 5 and 6 merged: camel 0.57 on `main`. The example pins `29a4783` of `main` (`09d716f`). CI step "One version each of camel and autumn-harvest" is green. |
+| EX14 harvest-camel pin | Done | harvest-camel PRs 5 and 6 merged: camel 0.57 on `main`. The example pins `29a4783` of `main` (`09d716f`). harvest-camel 0.2.0 (PR 7) moved to autumn-harvest 0.8 and is on crates.io. The example now uses `harvest-camel = "0.2.0"` from crates.io. CI step "One version each of camel and autumn-harvest" is green. |
 
 ## TDD record
 
@@ -181,10 +181,10 @@ or a CI step fail.
   network policy for names that resolve to private addresses.
 - The host check compares the last two host labels. A catalog URL such as
   `https://${x}.co.uk` passes. Catalog URLs must use a full domain.
-- harvest-camel is not on crates.io. The `harvest_camel` example pins a
-  commit of its `main` (camel 0.57) by a full hash. To move the pin, change
-  `rev` and run `cargo update --manifest-path
-  examples/harvest-camel/Cargo.toml -p harvest-camel`.
+- The `harvest_camel` example uses harvest-camel 0.2 from crates.io
+  (camel 0.57, autumn-harvest 0.8). To move it, change the version and run
+  `cargo update --manifest-path examples/harvest-camel/Cargo.toml -p
+  harvest-camel`.
 - The workflows `san_mateo_sync_loop` and `san_mateo_refresh_sweep` send
   their activities to the queue `default`. A worker on a different queue
   does not get them. A fix changes behaviour, so it needs approval.
