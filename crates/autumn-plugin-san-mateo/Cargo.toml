@@ -1,7 +1,8 @@
 [package]
 name = "autumn-plugin-san-mateo"
 description = "San Mateo plugin for autumn-web: OAuth and API key connections, token refresh, an auth proxy, syncs and actions"
-version.workspace = true
+# Ahead of the workspace: 0.2 moves to autumn-web 0.9.
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -13,7 +14,7 @@ categories = ["web-programming", "authentication"]
 [dependencies]
 san-mateo.workspace = true
 # Keep this requirement equal to `AUTUMN_WEB_REQUIREMENT`. A unit test checks it.
-autumn-web = { version = "0.8", default-features = false }
+autumn-web = { version = "0.9", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
