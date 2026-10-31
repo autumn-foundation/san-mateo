@@ -167,7 +167,8 @@ Rules for each example:
   commit) and passed after it (GREEN commit).
 - **EX14 harvest-camel pin.** harvest-camel `main` is on camel 0.57 (PRs 5
   and 6). The example pins a full 40-hex `rev` of `main`. The example lock
-  has one version each of camel and autumn-harvest.
+  has one version each of camel and autumn-harvest. Since harvest-camel
+  0.2.0 (autumn-harvest 0.8), the example uses the crates.io release.
 
 ## 8. Out of scope
 
