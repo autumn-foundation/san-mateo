@@ -100,11 +100,13 @@ async fn main() {
     };
     // `run` reads `[san_mateo]` from autumn.toml. It stops on SIGTERM or
     // Ctrl-C, after the plugin stops its loops and sends its webhooks.
-    autumn_web::app()
-        .routes(autumn_web::routes![index, contacts])
-        .plugin(SanMateoPlugin::new().catalog(catalog))
-        .run()
-        .await;
+    Box::pin(
+        autumn_web::app()
+            .routes(autumn_web::routes![index, contacts])
+            .plugin(SanMateoPlugin::new().catalog(catalog))
+            .run(),
+    )
+    .await;
 }
 
 #[cfg(test)]

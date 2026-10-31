@@ -206,7 +206,7 @@ fn plugin_name_contract_and_config_section() {
     assert_eq!(p.name(), PLUGIN_NAME);
     assert_eq!(p.route_prefix(), DEFAULT_PREFIX);
     let contract = p.contract().unwrap();
-    assert!(format!("{contract:?}").contains("0.8"), "{contract:?}");
+    assert!(format!("{contract:?}").contains("0.9"), "{contract:?}");
     let app = autumn_web::app().plugin(SanMateoPlugin::default());
     assert!(app.has_plugin(PLUGIN_NAME));
     assert!(app.has_config_section("san_mateo"));

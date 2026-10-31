@@ -26,20 +26,22 @@ async fn boot_child_server() {
     if std::env::var(CHILD_MARK).is_err() {
         return;
     }
-    autumn_web::app()
-        .routes(autumn_web::routes![index])
-        .plugin(SanMateoPlugin::new())
-        // autumn runs state initializers before job workers and startup
-        // hooks. The service must be ready here, so a `#[job]` can use it.
-        .state_initializer(|state| {
-            let expect = std::env::var("SAN_MATEO_BOOT_EXPECT_SERVICE").is_ok();
-            if expect && SanMateoService::from_state(state).is_none() {
-                eprintln!("no SanMateoService before job workers start");
-                std::process::exit(3);
-            }
-        })
-        .run()
-        .await;
+    Box::pin(
+        autumn_web::app()
+            .routes(autumn_web::routes![index])
+            .plugin(SanMateoPlugin::new())
+            // autumn runs state initializers before job workers and startup
+            // hooks. The service must be ready here, so a `#[job]` can use it.
+            .state_initializer(|state| {
+                let expect = std::env::var("SAN_MATEO_BOOT_EXPECT_SERVICE").is_ok();
+                if expect && SanMateoService::from_state(state).is_none() {
+                    eprintln!("no SanMateoService before job workers start");
+                    std::process::exit(3);
+                }
+            })
+            .run(),
+    )
+    .await;
 }
 
 struct KillOnDrop(Child);
