@@ -141,7 +141,7 @@ flowchart LR
 | `san-mateo-postgres` | `PgStore` with diesel-async. SQL migrations. | `san-mateo`, diesel-async 0.9, deadpool 0.13. |
 | `san-mateo-server` | The `san-mateo` binary. Config from env vars. | `san-mateo`, `san-mateo-postgres`. |
 | `autumn-plugin-san-mateo` | `SanMateoPlugin` for autumn-web 0.8. | `san-mateo`, `autumn-web`. |
-| `san-mateo-harvest` | Activities and workflows for autumn-harvest 0.7. | `san-mateo`, `autumn-harvest`. |
+| `san-mateo-harvest` | Activities and workflows for autumn-harvest 0.8. | `san-mateo`, `autumn-harvest`. |
 | `san-mateo-camel` | `san-mateo:` component for rust-camel 0.57. | `san-mateo`, camel crates. |
 
 ### 6.2 Core modules (`san-mateo`)
