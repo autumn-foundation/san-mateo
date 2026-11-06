@@ -27,6 +27,9 @@ url.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+# The README doc tests use the core crates and axum too.
+axum.workspace = true
+san-mateo-postgres = { version = "0.1.0", path = "../san-mateo-postgres" }
 # The `autumn_app` example test makes a random encryption key.
 base64.workspace = true
 reqwest.workspace = true

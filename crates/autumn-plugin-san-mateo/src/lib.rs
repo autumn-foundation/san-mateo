@@ -63,3 +63,11 @@ pub use plugin::{
 };
 pub use san_mateo;
 pub use service::{SanMateoService, autumn_error};
+
+// The `rust` and `rust,no_run` blocks of the README compile as doc tests of
+// this crate, so they do not rot. This crate needs Rust 1.97 and has the
+// dependencies that they use. `tests/doc_snippets.rs` refuses an `ignore`
+// block in the README.
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+struct ReadmeDoctests;
