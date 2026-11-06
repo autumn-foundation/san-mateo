@@ -12,7 +12,7 @@ use autumn_web::config::AutumnConfig;
 use autumn_web::plugin::Plugin;
 use autumn_web::plugin_contract::PluginContract;
 use autumn_web::reexports::axum::Router;
-use autumn_web::{AppState, AutumnError, ProcessRole};
+use autumn_web::{AppState, AutumnError, Role};
 use san_mateo::{ActionFunction, Catalog, HttpTransport, Registry, SanMateo, Store, SyncFunction};
 
 use crate::config::{SECTION, SanMateoConfig, Secrets};
@@ -30,7 +30,7 @@ pub const DEFAULT_PREFIX: &str = "/san-mateo";
 ///
 /// It must equal the `autumn-web` requirement in `Cargo.toml`. A unit test
 /// checks this.
-pub const AUTUMN_WEB_REQUIREMENT: &str = "0.9";
+pub const AUTUMN_WEB_REQUIREMENT: &str = "0.10";
 
 /// The contract that [`SanMateoPlugin`] declares to autumn.
 #[must_use]
@@ -199,24 +199,24 @@ impl SanMateoPlugin {
     /// # Errors
     /// Returns a config error, or an error from the service build.
     pub fn start(self, state: &AppState) -> Result<SanMateoRuntime, PluginError> {
-        let role = state.role();
+        let role = state.role().clone();
         self.start_with_role(state, role)
     }
 
     /// Starts the plugin as if the process has `role`. A role that serves no
     /// HTTP skips the CSRF check. A role that runs no workers runs no
-    /// background loops.
+    /// background loops. A [`autumn_web::ProcessRole`] converts to a role.
     ///
     /// # Errors
     /// Same as [`Self::start`].
     pub fn start_with_role(
         self,
         state: &AppState,
-        role: ProcessRole,
+        role: impl Into<Role>,
     ) -> Result<SanMateoRuntime, PluginError> {
         let cell: Cell = Arc::new(OnceLock::new());
         let health = Arc::new(SanMateoHealth::new(Arc::clone(&cell)));
-        let runtime = self.start_inner(state, role)?;
+        let runtime = self.start_inner(state, &role.into())?;
         runtime.start_loops();
         let _ = cell.set(Arc::clone(&runtime));
         Ok(SanMateoRuntime {
@@ -226,7 +226,7 @@ impl SanMateoPlugin {
         })
     }
 
-    fn start_inner(self, state: &AppState, role: ProcessRole) -> Result<Arc<Runtime>, PluginError> {
+    fn start_inner(self, state: &AppState, role: &Role) -> Result<Arc<Runtime>, PluginError> {
         let config = match &self.config {
             Some(c) => {
                 c.validate()?;
@@ -755,7 +755,7 @@ mod tests {
             .service(service())
             .catalog(Catalog::default())
             .registry(Registry::new())
-            .start_with_role(&state, ProcessRole::Worker)
+            .start_with_role(&state, autumn_web::ProcessRole::Worker)
             .unwrap_err()
             .to_string();
         assert!(e.contains("catalog") && e.contains("registry"), "{e}");
@@ -768,7 +768,7 @@ mod tests {
         let state = AppState::for_test();
         let rt = SanMateoPlugin::with_config(SanMateoConfig::default())
             .service(service())
-            .start_inner(&state, ProcessRole::Worker)
+            .start_inner(&state, &autumn_web::ProcessRole::Worker.into())
             .unwrap();
         assert!(!rt.background_running());
         rt.start_loops();
