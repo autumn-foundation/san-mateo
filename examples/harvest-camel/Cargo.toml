@@ -52,7 +52,7 @@ module_name_repetitions = "allow"
 unused_async_trait_impl = "allow"
 assert_is_empty = "allow"
 
+[patch.crates-io]
 # harvest-camel 0.3 (on autumn-harvest 0.10) is not on crates.io yet.
 # Remove this patch after the release.
-[patch.crates-io]
 harvest-camel = { git = "https://github.com/autumn-foundation/harvest-camel", branch = "claude/project-thread-8btuvj" }
