@@ -25,9 +25,13 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
 
 [dev-dependencies]
+# The README doc tests use the autumn-web plugin.
+autumn-plugin-san-mateo = { path = "../autumn-plugin-san-mateo" }
+autumn-web = { version = "0.10", default-features = false }
 tower.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["test-util", "io-util"] }
+toml = "1"
 
 [lints]
 workspace = true

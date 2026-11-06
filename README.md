@@ -191,12 +191,23 @@ app that you can run. See [Examples](#examples).
 
 ### autumn-web
 
-```rust,ignore
-autumn_web::app()
-    .routes(routes![index])
-    .plugin(SanMateoPlugin::new().prefix("/san-mateo"))
-    .run()
-    .await;
+```rust,no_run
+use autumn_plugin_san_mateo::SanMateoPlugin;
+use autumn_web::prelude::*;
+
+#[get("/")]
+async fn index() -> &'static str {
+    "Hello"
+}
+
+#[autumn_web::main]
+async fn main() {
+    autumn_web::app()
+        .routes(routes![index])
+        .plugin(SanMateoPlugin::new().prefix("/san-mateo"))
+        .run()
+        .await;
+}
 ```
 
 autumn needs one or more routes of the app. The
