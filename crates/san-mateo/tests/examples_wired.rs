@@ -222,6 +222,43 @@ fn each_example_file_is_in_the_list() {
     }
 }
 
+/// Returns the packages in a `Cargo.lock` text that depend on `name`.
+fn dependents(lock: &str, name: &str) -> Vec<String> {
+    let dep = format!("\"{name}\"");
+    let dep_versioned = format!("\"{name} ");
+    lock.split("[[package]]")
+        .filter(|block| {
+            block
+                .lines()
+                .any(|l| l.trim().starts_with(&dep) || l.trim().starts_with(&dep_versioned))
+        })
+        .filter_map(|block| {
+            block
+                .lines()
+                .find_map(|l| l.strip_prefix("name = \""))
+                .map(|n| n.trim_end_matches('"').to_owned())
+        })
+        .collect()
+}
+
+/// Returns the version of `name` in a `Cargo.lock` text.
+fn locked_version(lock: &str, name: &str) -> Option<String> {
+    let head = format!("name = \"{name}\"\nversion = \"");
+    let at = lock.find(&head)? + head.len();
+    lock[at..].split('"').next().map(str::to_owned)
+}
+
+#[test]
+fn the_sqlite_store_links_the_sqlite_of_autumn_harvest() {
+    // `libsqlite3-sys` has `links = "sqlite3"`. An app that embeds the
+    // SQLite store and `autumn-harvest-sqlite` can link only one version.
+    // The harvest-camel lock holds the version of autumn-harvest.
+    let root = locked_version(&read("Cargo.lock"), "libsqlite3-sys");
+    let harvest = locked_version(&read("examples/harvest-camel/Cargo.lock"), "libsqlite3-sys");
+    assert!(root.is_some());
+    assert_eq!(root, harvest);
+}
+
 #[test]
 fn the_harvest_camel_workspace_stays_apart() {
     let root_manifest = read("Cargo.toml");
@@ -232,17 +269,15 @@ fn the_harvest_camel_workspace_stays_apart() {
     // These crates come only with harvest-camel. They must not enter the
     // main workspace (ADR 0006).
     let lock = read("Cargo.lock");
-    for name in [
-        "harvest-camel",
-        "autumn-harvest-plugin",
-        "pq-src",
-        "libsqlite3-sys",
-    ] {
+    for name in ["harvest-camel", "autumn-harvest-plugin", "pq-src"] {
         assert!(
             !lock.contains(&format!("name = \"{name}\"")),
             "the root Cargo.lock has {name}"
         );
     }
+    // SQLite comes only with the opt-in store crate (ADR 0007).
+    assert_eq!(dependents(&lock, "libsqlite3-sys"), ["rusqlite"]);
+    assert_eq!(dependents(&lock, "rusqlite"), ["san-mateo-sqlite"]);
     // The example uses the same lints as the main workspace. Compare the
     // lint sections only, up to the next other section.
     let lints = |text: &str, from: &str| -> String {

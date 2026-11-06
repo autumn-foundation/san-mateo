@@ -24,6 +24,7 @@ workflows, or from rust-camel routes.
 |---|---|
 | [`san-mateo`](crates/san-mateo) | Embed the core: service, REST API (axum), memory store. |
 | [`san-mateo-postgres`](crates/san-mateo-postgres) | Keep data in Postgres (diesel-async). |
+| [`san-mateo-sqlite`](crates/san-mateo-sqlite) | Keep data in one SQLite file, with no database server. |
 | [`san-mateo-server`](crates/san-mateo-server) | Run the `san-mateo` binary. |
 | [`autumn-plugin-san-mateo`](crates/autumn-plugin-san-mateo) | Mount San Mateo in an autumn-web app. |
 | [`san-mateo-harvest`](crates/san-mateo-harvest) | Call San Mateo from durable harvest workflows. |
@@ -94,7 +95,8 @@ More design detail: [docs/plan.md](docs/plan.md) and the ADRs in
 ## Quick start: the server
 
 1. Make a key: `openssl rand -base64 32`.
-2. Start Postgres (optional). With no database, data stays in memory.
+2. Start Postgres (optional), or build with `--features sqlite` and use a
+   file. With no database, data stays in memory.
 3. Run the server:
 
 ```sh
@@ -102,6 +104,9 @@ export SAN_MATEO_ENCRYPTION_KEY="$(openssl rand -base64 32)"
 export SAN_MATEO_DEV_SECRET_KEY="sk_dev_$(openssl rand -hex 16)"
 export SAN_MATEO_DATABASE_URL="postgres://user:password@localhost/san_mateo"
 cargo run -p san-mateo-server --release
+# Or one SQLite file, with no database server:
+# export SAN_MATEO_DATABASE_URL="sqlite:///var/lib/san-mateo/sm.db"
+# cargo run -p san-mateo-server --release --features sqlite
 ```
 
 4. Make an integration and a connect session:
@@ -135,7 +140,7 @@ The server reads these variables:
 | `SAN_MATEO_SERVER_URL` | Public URL of the API. Default `http://localhost:3003`. |
 | `SAN_MATEO_CONNECT_URL` | Base of `connect_link`. Default `<server URL>/connect`. |
 | `SAN_MATEO_BIND` | Listen address. Default `0.0.0.0:3003`. |
-| `SAN_MATEO_DATABASE_URL` | Postgres URL. With no URL, data stays in memory. |
+| `SAN_MATEO_DATABASE_URL` | `postgres://...`, `sqlite://<path>` or `sqlite::memory:`. SQLite needs the `sqlite` feature. With no URL, data stays in memory. |
 | `SAN_MATEO_ENCRYPTION_KEY` | Base64 32-byte key. Required. |
 | `SAN_MATEO_ENCRYPTION_KEY_ID` | Id of that key. Default `k1`. |
 | `SAN_MATEO_OLD_ENCRYPTION_KEYS` | Old keys for rotation: `id:base64,id:base64`. |
@@ -365,6 +370,9 @@ items are different:
   output of `Secret` and of the server settings hides the values.
 - **Postgres TLS.** `PgStore::connect` makes a pool with no TLS. For TLS,
   make a pool with a TLS setup and use `PgStore::new`.
+- **SQLite.** `SqliteStore` holds one connection. Each write takes the
+  write lock of the file. That suits one app or a small server. Use Postgres
+  for many workers. See [ADR 0007](docs/adr/0007-sqlite-store.md).
 - **Crypto backends.** The core uses `ring` through rustls. The autumn
   plugin and the camel crate also use `aws-lc-rs` through `jsonwebtoken`.
 
@@ -378,6 +386,9 @@ cargo llvm-cov --workspace --fail-under-lines 85
 ```
 
 - The Postgres tests run only when `SAN_MATEO_TEST_DATABASE_URL` is set.
+  The SQLite tests always run. They use files in a temporary directory.
+- `cargo test -p san-mateo-server --features sqlite` runs the server tests
+  with SQLite. CI runs the server tests with and without the feature.
 - `verus/policy.rs` holds the policy proofs. The test
   `policy::verus_bodies_match` fails when `src/policy.rs` and the spec are
   not the same. CI runs Verus.

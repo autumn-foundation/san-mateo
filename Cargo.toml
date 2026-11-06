@@ -2,6 +2,7 @@
 members = [
     "crates/san-mateo",
     "crates/san-mateo-postgres",
+    "crates/san-mateo-sqlite",
     "crates/san-mateo-server",
     "crates/autumn-plugin-san-mateo",
     "crates/san-mateo-harvest",

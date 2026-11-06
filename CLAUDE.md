@@ -17,7 +17,8 @@ Style for all docs and comments: ASD-STE100.
 | `crates/san-mateo/src/service/` | `SanMateo` facade: connect, integrations, connections and refresh, proxy, records, functions. |
 | `crates/san-mateo/src/api/` | axum router, connect page, OAuth result page. |
 | `crates/san-mateo-postgres` | `PgStore` (diesel-async) and SQL migrations. |
-| `crates/san-mateo-server` | The `san-mateo` binary. Env config. |
+| `crates/san-mateo-sqlite` | `SqliteStore` (rusqlite, bundled) and SQL migrations. ADR 0007. |
+| `crates/san-mateo-server` | The `san-mateo` binary. Env config. Feature `sqlite`. |
 | `crates/autumn-plugin-san-mateo` | autumn-web 0.10 plugin. |
 | `crates/san-mateo-harvest` | autumn-harvest 0.10 activities and workflows. |
 | `crates/san-mateo-camel` | rust-camel 0.57 `san-mateo:` component. |
@@ -33,6 +34,7 @@ git config core.hooksPath .githooks   # pre-commit: fmt, clippy, test
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 SAN_MATEO_TEST_DATABASE_URL=postgres://sm:sm@localhost/sm_test cargo test --workspace
+cargo test -p san-mateo-server --features sqlite
 cargo llvm-cov --workspace --summary-only
 verus verus/policy.rs
 cargo run --locked -p san-mateo --example embedded
@@ -59,7 +61,10 @@ SAN_MATEO_TEST_DATABASE_URL=postgres://sm:sm@localhost/sm_test cargo test --lock
 - Never retry a non-idempotent call after a 5xx or a network error, unless
   the caller opts in.
 - A new `Store` method needs a case in `store/conformance.rs`. It runs on
-  `MemoryStore` and `PgStore`.
+  `MemoryStore`, `PgStore` and `SqliteStore`. Change the SQL of both
+  database stores, and give each a migration.
+- Keep `rusqlite` on the `libsqlite3-sys` of `autumn-harvest-sqlite`. The
+  crate has `links = "sqlite3"`, so an app can link only one version.
 - Postgres tests: one pool for each test, unique ids, far-future times for
   rows that the purge must not touch.
 - No `unwrap` or `expect` in `src/` outside tests.

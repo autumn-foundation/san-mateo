@@ -80,8 +80,12 @@ jobs:
           curl -fsSL --retry 4 -o "$RUNNER_TEMP/nango-providers.yaml" \
             "https://raw.githubusercontent.com/NangoHQ/nango/$NANGO_REV/packages/providers/providers.yaml"
           echo "SAN_MATEO_NANGO_PROVIDERS=$RUNNER_TEMP/nango-providers.yaml" >> "$GITHUB_ENV"
+      # The SQLite store tests need no service. The server runs with its
+      # `sqlite` feature here and without it in the next step.
       - name: Test with coverage (fail under 85% lines)
-        run: cargo llvm-cov --workspace --all-targets --fail-under-lines 85 --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --all-targets --features san-mateo-server/sqlite --fail-under-lines 85 --lcov --output-path lcov.info
+      - name: Server tests without the sqlite feature
+        run: cargo test -p san-mateo-server --all-targets
       - name: Doc tests
         run: cargo test --workspace --doc
       - uses: actions/upload-artifact@v4
@@ -222,7 +226,7 @@ jobs:
       # The core crates keep Rust 1.89. autumn-web 0.10 and autumn-harvest
       # 0.10 need Rust 1.97, so the plugin and the harvest crate need it too.
       - name: MSRV 1.89 (core crates)
-        run: cargo +1.89.0 check --locked --all-targets -p san-mateo -p san-mateo-postgres -p san-mateo-server -p san-mateo-camel
+        run: cargo +1.89.0 check --locked --all-targets -p san-mateo -p san-mateo-postgres -p san-mateo-sqlite -p san-mateo-server -p san-mateo-camel --features san-mateo-server/sqlite
       - name: MSRV 1.97 (workspace)
         run: cargo +1.97.0 check --workspace --all-targets --locked
 
