@@ -1,4 +1,5 @@
-//! The San Mateo server: the REST API with Postgres or memory storage.
+//! The San Mateo server: the REST API with Postgres, SQLite or memory
+//! storage.
 //!
 //! Configure it with environment variables:
 //!
@@ -7,7 +8,7 @@
 //! | `SAN_MATEO_SERVER_URL` | Public URL of the API. Default `http://localhost:3003`. |
 //! | `SAN_MATEO_CONNECT_URL` | Base of `connect_link`. Default `<server URL>/connect`. |
 //! | `SAN_MATEO_BIND` | Listen address. Default `0.0.0.0:3003`. |
-//! | `SAN_MATEO_DATABASE_URL` | Postgres URL. With no URL, data stays in memory. |
+//! | `SAN_MATEO_DATABASE_URL` | `postgres://...`, `sqlite://<path>` or `sqlite::memory:`. SQLite needs the `sqlite` feature. With no URL, data stays in memory. |
 //! | `SAN_MATEO_ENCRYPTION_KEY` | Base64 32-byte key. Required. |
 //! | `SAN_MATEO_ENCRYPTION_KEY_ID` | Id of that key. Default `k1`. |
 //! | `SAN_MATEO_OLD_ENCRYPTION_KEYS` | Old keys for rotation: `id:base64,id:base64`. |
@@ -28,6 +29,7 @@
 
 use std::future::Future;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,7 +55,8 @@ pub struct ServerConfig {
     pub service: san_mateo::Config,
     /// The listen address.
     pub bind: SocketAddr,
-    /// The Postgres URL, if any. It can contain a password.
+    /// The database URL, if any. It can contain a password. See
+    /// [`parse_store_url`].
     pub database_url: Option<Secret>,
     /// The active key: (id, base64).
     pub encryption_key: NamedKey,
@@ -240,25 +243,90 @@ impl ServerConfig {
     }
 }
 
+/// The store that a database URL selects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreUrl {
+    /// `postgres://...` or `postgresql://...`: the full URL.
+    Postgres(String),
+    /// `sqlite://<path>`: a file. `sqlite::memory:`: `None`, a database in
+    /// memory.
+    Sqlite(Option<PathBuf>),
+}
+
+/// Reads `SAN_MATEO_DATABASE_URL`.
+///
+/// `sqlite://` comes before the path, so `sqlite:///var/lib/sm.db` is an
+/// absolute path and `sqlite://sm.db` is relative to the work directory.
+///
+/// # Errors
+///
+/// [`Error::Invalid`] for another scheme or an empty path. The message does
+/// not show the URL, because a URL can hold a password.
+pub fn parse_store_url(url: &str) -> Result<StoreUrl> {
+    const VAR: &str = "SAN_MATEO_DATABASE_URL";
+    if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+        return Ok(StoreUrl::Postgres(url.to_owned()));
+    }
+    if url == "sqlite::memory:" {
+        return Ok(StoreUrl::Sqlite(None));
+    }
+    match url.strip_prefix("sqlite://") {
+        Some("") => Err(bad(VAR, "the sqlite:// URL has no path")),
+        Some(path) => Ok(StoreUrl::Sqlite(Some(PathBuf::from(path)))),
+        None => Err(bad(
+            VAR,
+            "use postgres://, postgresql://, sqlite://<path> or sqlite::memory:",
+        )),
+    }
+}
+
 /// Builds the service from the settings. It runs the migrations when a
 /// database is set.
 ///
 /// # Errors
 ///
-/// Fails when the key, the catalog file or the database is not valid.
+/// Fails when the key, the catalog file or the database is not valid. Fails
+/// for a SQLite URL when the build has no `sqlite` feature.
 pub async fn build(config: &ServerConfig) -> Result<SanMateo> {
     let mut catalog = Catalog::builtin()?;
     if let Some(path) = &config.providers_file {
         catalog = catalog.merge(Catalog::from_yaml_file(path)?);
     }
-    let store: Arc<dyn Store> = if let Some(url) = &config.database_url {
-        let pg = PgStore::connect(url.expose(), 16)?;
-        let applied = pg.migrate().await?;
-        tracing::info!(count = applied.len(), "database migrations applied");
-        Arc::new(pg)
-    } else {
-        tracing::warn!("no SAN_MATEO_DATABASE_URL: data stays in memory and is lost at exit");
-        Arc::new(MemoryStore::new())
+    let url = config
+        .database_url
+        .as_ref()
+        .map(|u| parse_store_url(u.expose()))
+        .transpose()?;
+    let store: Arc<dyn Store> = match url {
+        Some(StoreUrl::Postgres(url)) => {
+            let pg = PgStore::connect(&url, 16)?;
+            let applied = pg.migrate().await?;
+            tracing::info!(count = applied.len(), "database migrations applied");
+            Arc::new(pg)
+        }
+        #[cfg(feature = "sqlite")]
+        Some(StoreUrl::Sqlite(path)) => {
+            let sqlite = if let Some(path) = &path {
+                san_mateo_sqlite::SqliteStore::open(path)?
+            } else {
+                tracing::warn!("sqlite::memory: data stays in memory and is lost at exit");
+                san_mateo_sqlite::SqliteStore::open_in_memory()?
+            };
+            let applied = sqlite.migrate().await?;
+            tracing::info!(count = applied.len(), "database migrations applied");
+            Arc::new(sqlite)
+        }
+        #[cfg(not(feature = "sqlite"))]
+        Some(StoreUrl::Sqlite(_)) => {
+            return Err(bad(
+                "SAN_MATEO_DATABASE_URL",
+                "this build has no SQLite store: build san-mateo-server with the sqlite feature",
+            ));
+        }
+        None => {
+            tracing::warn!("no SAN_MATEO_DATABASE_URL: data stays in memory and is lost at exit");
+            Arc::new(MemoryStore::new())
+        }
     };
     SanMateo::builder()
         .config(config.service.clone())

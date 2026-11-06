@@ -1,5 +1,6 @@
 //! The storage seam. [`MemoryStore`] keeps data in memory. The
-//! `san-mateo-postgres` crate keeps data in Postgres.
+//! `san-mateo-postgres` crate keeps data in Postgres. The `san-mateo-sqlite`
+//! crate keeps data in one SQLite file.
 //!
 //! The store never sees plaintext secrets. The service seals credentials,
 //! client secrets, PKCE verifiers and record data before a write.
