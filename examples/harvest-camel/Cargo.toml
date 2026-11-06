@@ -10,7 +10,7 @@
 name = "san-mateo-example-harvest-camel"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.97"
 license = "Apache-2.0"
 publish = false
 
@@ -23,9 +23,9 @@ path = "src/main.rs"
 [dependencies]
 san-mateo = { path = "../../crates/san-mateo" }
 san-mateo-camel = { path = "../../crates/san-mateo-camel" }
-# harvest-camel 0.2 uses camel 0.57 and autumn-harvest 0.8.
-harvest-camel = "0.2.0"
-autumn-harvest = "0.8.0"
+# harvest-camel 0.3 uses camel 0.57 and autumn-harvest 0.10.
+harvest-camel = "0.3.0"
+autumn-harvest = "0.10.0"
 camel-api = "0.57"
 camel-builder = "0.57"
 camel-component-direct = "0.57"
@@ -51,3 +51,8 @@ module_name_repetitions = "allow"
 # The same allows as the autumn workspace. A trait impl can need no `.await`.
 unused_async_trait_impl = "allow"
 assert_is_empty = "allow"
+
+# harvest-camel 0.3 (on autumn-harvest 0.10) is not on crates.io yet.
+# Remove this patch after the release.
+[patch.crates-io]
+harvest-camel = { git = "https://github.com/autumn-foundation/harvest-camel", branch = "claude/project-thread-8btuvj" }

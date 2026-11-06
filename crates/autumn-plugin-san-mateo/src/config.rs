@@ -1097,7 +1097,7 @@ enabled = false
         assert!(!p.allow_private_hosts);
         let b = c.background.settings();
         assert_eq!(b.tick, std::time::Duration::from_secs(3));
-        assert_eq!(b.refresh_within, std::time::Duration::from_secs(1_800));
+        assert_eq!(b.refresh_within, std::time::Duration::from_mins(30));
         assert_eq!(b.refresh_batch, 100);
         assert!(!b.run_syncs);
     }
