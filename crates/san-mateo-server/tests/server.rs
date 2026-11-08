@@ -8,7 +8,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use san_mateo::Secret;
-use san_mateo_server::{ServerConfig, app, build, serve};
+use san_mateo_server::{ServerConfig, StoreUrl, app, build, parse_store_url, serve};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tower::ServiceExt as _;
 
@@ -260,6 +260,91 @@ async fn build_uses_postgres_when_set() {
         .unwrap();
     let list = san.list_integrations("dev").await.unwrap();
     let _ = list;
+}
+
+#[test]
+fn a_database_url_selects_a_store() {
+    assert_eq!(
+        parse_store_url("postgres://u:p@db/sm").unwrap(),
+        StoreUrl::Postgres("postgres://u:p@db/sm".into())
+    );
+    assert_eq!(
+        parse_store_url("postgresql://db/sm").unwrap(),
+        StoreUrl::Postgres("postgresql://db/sm".into())
+    );
+    assert_eq!(
+        parse_store_url("sqlite:///var/lib/sm/sm.db").unwrap(),
+        StoreUrl::Sqlite(Some("/var/lib/sm/sm.db".into()))
+    );
+    assert_eq!(
+        parse_store_url("sqlite://sm.db").unwrap(),
+        StoreUrl::Sqlite(Some("sm.db".into()))
+    );
+    assert_eq!(
+        parse_store_url("sqlite::memory:").unwrap(),
+        StoreUrl::Sqlite(None)
+    );
+    for bad in ["sqlite://", "mysql://db/sm", "sm.db", ""] {
+        let err = parse_store_url(bad).unwrap_err();
+        // The message names the variable, never the URL: a URL can hold a
+        // password.
+        assert!(err.to_string().contains("SAN_MATEO_DATABASE_URL"), "{bad}");
+    }
+    let err = parse_store_url("mysql://user:hunter2@db/sm").unwrap_err();
+    assert!(!err.to_string().contains("hunter2"));
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn build_uses_sqlite_and_keeps_data_across_restarts() {
+    use san_mateo::NewIntegration;
+    let dir = std::env::temp_dir().join(format!("sm-server-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let url = format!("sqlite://{}", dir.join("sm.db").display());
+    let mut e = base();
+    e.push(("SAN_MATEO_DATABASE_URL", &url));
+    let config = ServerConfig::from_env(env(&e)).unwrap();
+    {
+        let san = build(&config).await.unwrap();
+        san.create_integration(
+            "dev",
+            NewIntegration {
+                unique_key: "gh".into(),
+                provider: "github".into(),
+                client_id: Some("id".into()),
+                client_secret: Some(Secret::new("secret")),
+                ..NewIntegration::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let san = build(&config).await.unwrap();
+    let list = san.list_integrations("dev").await.unwrap();
+    assert_eq!(list.len(), 1);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn build_uses_sqlite_in_memory() {
+    let mut e = base();
+    e.push(("SAN_MATEO_DATABASE_URL", "sqlite::memory:"));
+    let san = build(&ServerConfig::from_env(env(&e)).unwrap())
+        .await
+        .unwrap();
+    assert!(san.list_integrations("dev").await.unwrap().is_empty());
+}
+
+#[cfg(not(feature = "sqlite"))]
+#[tokio::test]
+async fn build_without_the_sqlite_feature_refuses_a_sqlite_url() {
+    let mut e = base();
+    e.push(("SAN_MATEO_DATABASE_URL", "sqlite::memory:"));
+    let err = build(&ServerConfig::from_env(env(&e)).unwrap())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("sqlite feature"), "{err}");
 }
 
 #[tokio::test]
