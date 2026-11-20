@@ -30,7 +30,7 @@ pub const DEFAULT_PREFIX: &str = "/san-mateo";
 ///
 /// It must equal the `autumn-web` requirement in `Cargo.toml`. A unit test
 /// checks this.
-pub const AUTUMN_WEB_REQUIREMENT: &str = "0.10";
+pub const AUTUMN_WEB_REQUIREMENT: &str = "0.11";
 
 /// The contract that [`SanMateoPlugin`] declares to autumn.
 #[must_use]

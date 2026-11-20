@@ -1,10 +1,10 @@
 [package]
 name = "autumn-plugin-san-mateo"
 description = "San Mateo plugin for autumn-web: OAuth and API key connections, token refresh, an auth proxy, syncs and actions"
-# Ahead of the workspace: 0.3 moves to autumn-web 0.10.
-version = "0.3.0"
+# Ahead of the workspace: 0.4 moves to autumn-web 0.11.
+version = "0.4.0"
 edition.workspace = true
-# autumn-web 0.10 needs Rust 1.97.
+# autumn-web 0.11 needs Rust 1.97.
 rust-version = "1.97"
 license.workspace = true
 repository.workspace = true
@@ -15,7 +15,7 @@ categories = ["web-programming", "authentication"]
 [dependencies]
 san-mateo.workspace = true
 # Keep this requirement equal to `AUTUMN_WEB_REQUIREMENT`. A unit test checks it.
-autumn-web = { version = "0.10", default-features = false }
+autumn-web = { version = "0.11", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -27,6 +27,8 @@ url.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+# The conformance harness needs the `plugin-conformance` feature.
+autumn-web = { version = "0.11", default-features = false, features = ["plugin-conformance"] }
 # The README doc tests use the core crates and axum too.
 axum.workspace = true
 san-mateo-postgres = { version = "0.1.0", path = "../san-mateo-postgres" }
