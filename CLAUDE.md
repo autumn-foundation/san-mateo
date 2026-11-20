@@ -19,7 +19,7 @@ Style for all docs and comments: ASD-STE100.
 | `crates/san-mateo-postgres` | `PgStore` (diesel-async) and SQL migrations. |
 | `crates/san-mateo-sqlite` | `SqliteStore` (rusqlite, bundled) and SQL migrations. ADR 0007. |
 | `crates/san-mateo-server` | The `san-mateo` binary. Env config. Feature `sqlite`. |
-| `crates/autumn-plugin-san-mateo` | autumn-web 0.10 plugin. |
+| `crates/autumn-plugin-san-mateo` | autumn-web 0.11 plugin. |
 | `crates/san-mateo-harvest` | autumn-harvest 0.10 activities and workflows. |
 | `crates/san-mateo-camel` | rust-camel 0.57 `san-mateo:` component. |
 | `crates/*/examples/` | Runnable examples: `embedded`, `autumn_app`, `harvest_workflow`. |
