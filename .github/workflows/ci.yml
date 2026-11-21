@@ -223,8 +223,8 @@ jobs:
         with:
           toolchain: 1.97.0
       - uses: Swatinem/rust-cache@v2
-      # The core crates keep Rust 1.89. autumn-web 0.10 and autumn-harvest
-      # 0.10 need Rust 1.97, so the plugin and the harvest crate need it too.
+      # The core crates keep Rust 1.89. autumn-web 0.11 and autumn-harvest
+      # 0.11 need Rust 1.97, so the plugin and the harvest crate need it too.
       - name: MSRV 1.89 (core crates)
         run: cargo +1.89.0 check --locked --all-targets -p san-mateo -p san-mateo-postgres -p san-mateo-sqlite -p san-mateo-server -p san-mateo-camel --features san-mateo-server/sqlite
       - name: MSRV 1.97 (workspace)

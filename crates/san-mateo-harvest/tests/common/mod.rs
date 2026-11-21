@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use autumn_harvest::chrono::{self, DateTime, TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use san_mateo::clock::{ManualClock, SeqEntropy};
 use san_mateo::credentials::OAuth2Credentials;
 use san_mateo::transport::HttpResponse;

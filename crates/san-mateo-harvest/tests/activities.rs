@@ -378,14 +378,13 @@ async fn refresh_forces_a_new_token_and_returns_only_the_expiry() {
         .refresh(&h.san)
         .await
         .unwrap();
-    let expected = (start() + autumn_harvest::chrono::Duration::seconds(7_200)).to_rfc3339();
-    let got =
-        autumn_harvest::chrono::DateTime::parse_from_rfc3339(out.expires_at.as_deref().unwrap())
-            .unwrap()
-            .to_rfc3339();
+    let expected = (start() + chrono::Duration::seconds(7_200)).to_rfc3339();
+    let got = chrono::DateTime::parse_from_rfc3339(out.expires_at.as_deref().unwrap())
+        .unwrap()
+        .to_rfc3339();
     assert_eq!(
         got,
-        autumn_harvest::chrono::DateTime::parse_from_rfc3339(&expected)
+        chrono::DateTime::parse_from_rfc3339(&expected)
             .unwrap()
             .to_rfc3339()
     );
@@ -618,8 +617,7 @@ async fn refresh_due_returns_counts() {
     .unwrap();
     assert_eq!((out.refreshed, out.failed), (0, 0));
     // The default sweep window is 30 minutes. Move the clock by 45 minutes.
-    h.clock
-        .advance(autumn_harvest::chrono::Duration::minutes(45));
+    h.clock.advance(chrono::Duration::minutes(45));
     let out = RefreshDueInput::default().run(&h.san).await.unwrap();
     assert_eq!(out.refreshed, 1);
     assert_eq!(out.failed, 0);

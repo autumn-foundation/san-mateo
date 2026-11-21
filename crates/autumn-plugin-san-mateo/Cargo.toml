@@ -31,7 +31,7 @@ async-trait.workspace = true
 autumn-web = { version = "0.11", default-features = false, features = ["plugin-conformance"] }
 # The README doc tests use the core crates and axum too.
 axum.workspace = true
-san-mateo-postgres = { version = "0.1.0", path = "../san-mateo-postgres" }
+san-mateo-postgres = { version = "0.2.0", path = "../san-mateo-postgres" }
 # The `autumn_app` example test makes a random encryption key.
 base64.workspace = true
 reqwest.workspace = true
