@@ -18,8 +18,8 @@ doc = false
 
 [dependencies]
 san-mateo.workspace = true
-san-mateo-postgres = { version = "0.1.0", path = "../san-mateo-postgres" }
-san-mateo-sqlite = { version = "0.1.0", path = "../san-mateo-sqlite", optional = true }
+san-mateo-postgres = { version = "0.2.0", path = "../san-mateo-postgres" }
+san-mateo-sqlite = { version = "0.2.0", path = "../san-mateo-sqlite", optional = true }
 axum.workspace = true
 tokio.workspace = true
 tracing.workspace = true

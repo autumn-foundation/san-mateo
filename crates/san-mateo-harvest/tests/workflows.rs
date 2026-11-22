@@ -107,7 +107,7 @@ async fn sync_loop_runs_waits_and_continues_as_new() {
     assert_eq!(next.frequency_secs, 300);
     assert_eq!(scheduled(&outcome, RUN_SYNC), 3);
     assert_eq!(timers(&outcome), vec![300, 300, 300]);
-    assert_eq!(outcome.elapsed().num_seconds(), 900);
+    assert_eq!(outcome.elapsed().as_secs(), 900);
     assert!(matches!(
         outcome.events().last(),
         Some(WorkflowEvent::WorkflowContinuedAsNew { .. })
@@ -300,7 +300,7 @@ async fn a_harvest_deadline_makes_the_loop_continue_early() {
     // With a 100 s run budget, harvest asks for `continue_as_new` after 80 s.
     let handler = san_mateo_sync_loop_info().handler;
     let outcome = WorkflowTestEnv::new()
-        .with_execution_timeout(autumn_harvest::chrono::Duration::seconds(100))
+        .with_execution_timeout(autumn_harvest::jiff::SignedDuration::from_secs(100))
         .mock_activity(RUN_SYNC, |_| Ok(ok_run(0)))
         .run(handler, serde_json::to_value(loop_input(30, 100)).unwrap())
         .await;

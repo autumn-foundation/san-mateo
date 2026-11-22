@@ -181,8 +181,8 @@ or a CI step fail.
   network policy for names that resolve to private addresses.
 - The host check compares the last two host labels. A catalog URL such as
   `https://${x}.co.uk` passes. Catalog URLs must use a full domain.
-- The `harvest_camel` example uses harvest-camel 0.3 (camel 0.57,
-  autumn-harvest 0.10). Until 0.3 is on crates.io, a `[patch.crates-io]`
+- The `harvest_camel` example uses harvest-camel 0.5 (camel 0.57,
+  autumn-harvest 0.11). Until 0.5 is on crates.io, a `[patch.crates-io]`
   entry takes it from git. Remove the entry after the release. To move it, change the version and run
   `cargo update --manifest-path examples/harvest-camel/Cargo.toml -p
   harvest-camel`.
