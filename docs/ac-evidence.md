@@ -182,8 +182,7 @@ or a CI step fail.
 - The host check compares the last two host labels. A catalog URL such as
   `https://${x}.co.uk` passes. Catalog URLs must use a full domain.
 - The `harvest_camel` example uses harvest-camel 0.5 (camel 0.57,
-  autumn-harvest 0.11). Until 0.5 is on crates.io, a `[patch.crates-io]`
-  entry takes it from git. Remove the entry after the release. To move it, change the version and run
+  autumn-harvest 0.11) from crates.io. To move it, change the version and run
   `cargo update --manifest-path examples/harvest-camel/Cargo.toml -p
   harvest-camel`.
 - The workflows `san_mateo_sync_loop` and `san_mateo_refresh_sweep` send

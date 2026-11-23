@@ -51,8 +51,3 @@ module_name_repetitions = "allow"
 # The same allows as the autumn workspace. A trait impl can need no `.await`.
 unused_async_trait_impl = "allow"
 assert_is_empty = "allow"
-
-[patch.crates-io]
-# harvest-camel 0.5 (on autumn-harvest 0.11) is not on crates.io yet.
-# Remove this patch after the release.
-harvest-camel = { git = "https://github.com/autumn-foundation/harvest-camel", rev = "bfdb04ffc10c1cb562518c140bf256b72f2d5bf6" }
